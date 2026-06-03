@@ -1,0 +1,23 @@
+# Python
+backend-ai/venv/
+backend-ai/__pycache__/
+backend-ai/*.pyc
+backend-ai/.env
+
+# Java
+backend-app/target/
+backend-app/.idea/
+backend-app/*.iml
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+
+# IDE
+.idea/
+.vscode/
+
+# System
+*.log
+.DS_Store
+Thumbs.db
