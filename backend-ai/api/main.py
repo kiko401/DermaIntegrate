@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import shutil
 import uuid
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List
@@ -14,18 +16,27 @@ from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from config import settings
 from models.database import (
-    init_db, get_db, async_session,
+    async_session, get_db,
     ImageResource as ImageDB,
     AITask as TaskDB,
     AIFeature as FeatureDB,
 )
 
+# ==========================================
+# 日志配置（替换所有 print）
+# ==========================================
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 # ==========================================
-# 1. Pydantic 模型定义 (严格对齐 api-contract.yaml)
+# Pydantic 模型定义 (严格对齐 api-contract.yaml)
 # ==========================================
-
 class ErrorResponse(BaseModel):
     error: str
     error_code: str
@@ -56,8 +67,8 @@ class DicomTags(BaseModel):
 class ImageMetadataResponse(BaseModel):
     image_uid: str
     format: str = "PNG"
-    url: str
-    status: str  # processing, ready, failed
+    url: Optional[str] = None  # 修改：DICOM可能为null
+    status: str
     error_message: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
@@ -72,9 +83,7 @@ class VisualEvidence(BaseModel):
 
 
 class Morphology(BaseModel):
-    # 等效于 JSON Schema 的 additionalProperties: false
     model_config = ConfigDict(extra='forbid')
-
     border: str
     pigment_network: str
     color_distribution: str
@@ -99,22 +108,27 @@ class SSEResultEvent(BaseModel):
     confidence: float
     status: str = "completed"
     disclaimer: str
-    completed_at: str  # ISO格式时间戳
+    completed_at: str
 
 
 # ==========================================
-# 2. FastAPI 初始化与配置
+# FastAPI 初始化与配置
 # ==========================================
-
-os.makedirs("static/images", exist_ok=True)
-os.makedirs("static/heatmaps", exist_ok=True)
-os.makedirs("uploads", exist_ok=True)
+os.makedirs(f"{settings.STATIC_DIR}/images", exist_ok=True)
+os.makedirs(f"{settings.STATIC_DIR}/heatmaps", exist_ok=True)
+os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 服务启动时自动执行数据库初始化（建表）
-    await init_db()
+    """生命周期：仅做数据库连接探测，不建表"""
+    try:
+        async with async_session() as session:
+            await session.execute(select(ImageDB).limit(1))
+        logger.info("Database connection OK")
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        raise RuntimeError("Database not ready") from e
     yield
 
 
@@ -131,15 +145,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/ai-static", StaticFiles(directory="static"), name="static")
+app.mount("/ai-static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
 
 # ==========================================
-# 3. 辅助函数
+# 辅助函数
 # ==========================================
-
 def create_error_response(status_code: int, error: str, error_code: str, message: str):
-    """生成符合契约的统一错误响应"""
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(error=error, error_code=error_code, message=message).model_dump()
@@ -147,18 +159,16 @@ def create_error_response(status_code: int, error: str, error_code: str, message
 
 
 # ==========================================
-# 4. 接口实现
+# 接口实现
 # ==========================================
-
 @app.get("/health", tags=["System"])
 async def health(db: AsyncSession = Depends(get_db)):
-    # 增加数据库心跳检测，微服务部署标准实践
     try:
         await db.execute(select(TaskDB.task_id).limit(1))
-        db_status = "connected"
-    except Exception:
-        db_status = "disconnected"
-    return {"service": "backend-ai", "status": "UP", "db": db_status}
+        return {"service": "backend-ai", "status": "UP", "db": "connected"}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {"service": "backend-ai", "status": "DEGRADED", "db": "disconnected"}
 
 
 @app.post("/upload", status_code=202, response_model=UploadIngestResponse, tags=["Image"])
@@ -168,26 +178,40 @@ async def upload_image(
         study_uid: Optional[str] = Form(None),
         db: AsyncSession = Depends(get_db)
 ):
-    """上传皮肤镜影像，异步返回 202 Accepted"""
+    """上传影像：所有文件先落 uploads/，普通图片复制到 static/images/"""
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
 
     content = await file.read()
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if not ext:
+        ext = ".png"
 
-    is_dicom = file.content_type == "application/dicom" or (file.filename and file.filename.lower().endswith(".dcm"))
+    # 1. 所有原始文件先落 uploads/（原始文件保全）
+    raw_filename = f"{image_uid}_{file.filename or 'unknown'}"
+    raw_path = os.path.join(settings.UPLOAD_DIR, raw_filename)
+    with open(raw_path, "wb") as f:
+        f.write(content)
+
+    # 2. 判断类型，决定路由
+    is_dicom = file.content_type == "application/dicom" or ext == ".dcm"
 
     if is_dicom:
-        source_path = f"uploads/{task_id}_{file.filename}"
-        with open(source_path, "wb") as f:
-            f.write(content)
-        img_status = "processing"  # DICOM 需要后端异步转码管线处理
+        # DICOM：等待阶段4转码管线，url留空，status=processing
+        img_status = "processing"
+        img_url = None
+        img_format = "DICOM"
     else:
+        # 普通图片：复制到 static/images/，直接可访问
+        static_filename = f"{image_uid}{ext}"
+        static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
+        shutil.copy(raw_path, static_path)
 
-        target_path = f"static/images/{image_uid}.png"
-        with open(target_path, "wb") as f:
-            f.write(content)
-        img_status = "ready"  # 普通 Web 图片上传即可用
+        img_status = "ready"
+        img_url = f"/ai-static/images/{static_filename}"
+        img_format = ext.lstrip(".").upper() if ext else "PNG"
 
+    # 3. 入库
     task = TaskDB(
         task_id=task_id,
         image_uid=image_uid,
@@ -199,15 +223,17 @@ async def upload_image(
     image = ImageDB(
         image_uid=image_uid,
         task_id=task_id,
-        format="PNG",
-        url=f"/ai-static/images/{image_uid}.png",
-        status=img_status,  # 根据文件类型动态设置状态
-        width=1024,
+        format=img_format,
+        url=img_url,
+        status=img_status,
+        width=1024,  # 阶段4用PIL读取真实尺寸替换
         height=768,
         created_at=datetime.now(timezone.utc)
     )
     db.add(image)
     await db.commit()
+
+    logger.info(f"Upload accepted: task_id={task_id}, image_uid={image_uid}, status={img_status}")
 
     return UploadIngestResponse(
         task_id=task_id,
@@ -215,21 +241,15 @@ async def upload_image(
         filename=file.filename,
         content_type=file.content_type or "application/octet-stream",
         status="accepted",
-        message="影像已接收，预处理启动中"
+        message="影像已接收，预处理启动中" if is_dicom else "影像已就绪"
     )
 
 
 @app.post("/ingest", status_code=202, response_model=UploadIngestResponse, tags=["Image"])
 async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
-    """异步触发DICOM离线摄取管线，异步返回 202 Accepted"""
+    """离线摄取：仅创建记录，实际下载转码在阶段4实现"""
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
-
-    dicom_tags = DicomTags(
-        PatientID=req.patient_id or "MOCK_PACIENT_001",
-        StudyInstanceUID=req.study_uid or f"study_{uuid.uuid4().hex[:8]}",
-        PhotometricInterpretation="YBR_FULL_422"
-    )
 
     task = TaskDB(
         task_id=task_id,
@@ -239,20 +259,25 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
     )
     db.add(task)
 
-    # 离线摄取场景，文件尚未下载转码，一定是 processing 状态
     image = ImageDB(
         image_uid=image_uid,
         task_id=task_id,
-        format="PNG",
-        url=f"/ai-static/images/{image_uid}.png",
-        status="processing",
+        format="DICOM",
+        url=None,  # 下载转码后更新
+        status="processing",  # 明确标记为处理中
         width=1024,
         height=768,
-        original_dicom_tags=dicom_tags.model_dump(),
+        original_dicom_tags={
+            "PatientID": req.patient_id or "MOCK_PATIENT_001",
+            "StudyInstanceUID": req.study_uid or f"study_{uuid.uuid4().hex[:8]}",
+            "PhotometricInterpretation": "YBR_FULL_422"
+        },
         created_at=datetime.now(timezone.utc)
     )
     db.add(image)
     await db.commit()
+
+    logger.info(f"Ingest task created: task_id={task_id}, source={req.image_source}")
 
     return UploadIngestResponse(
         task_id=task_id,
@@ -313,7 +338,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
 
         for step_data in steps:
             if await request.is_disconnected():
-                print(f"Client disconnected during step {step_data['step']}. Aborting.")
+                logger.warning(f"Client disconnected during step {step_data['step']}. Aborting.")
                 return
 
             yield f"event: step\ndata: {json.dumps(step_data)}\n\n"
@@ -351,7 +376,6 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
             completed_at=datetime.now(timezone.utc).isoformat()
         )
 
-        # SSE 流结束后，用独立 Session 保存结果，避免主 Session 被关闭的陷阱
         try:
             async with async_session() as session:
                 img_res = await session.execute(select(ImageDB).where(ImageDB.image_uid == image_uid))
@@ -367,7 +391,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                 session.add(feature)
                 await session.commit()
         except Exception as e:
-            print(f"Error saving inference results to DB: {e}")
+            logger.error(f"Error saving inference results to DB: {e}")
 
         yield f"event: result\ndata: {result_event.model_dump_json()}\n\n"
 
@@ -383,9 +407,3 @@ async def get_historical_features(image_uid: str, db: AsyncSession = Depends(get
         return create_error_response(404, "NotFound", "FEATURE_NOT_FOUND", "该影像尚无成功的推理结果")
 
     return SSEResultEvent(**feature.ai_features)
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
