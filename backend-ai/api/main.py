@@ -16,6 +16,9 @@ from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+# 新增 httpx 导入，用于 4.3 离线摄取
+import httpx
+
 from config import settings
 from models.database import (
     async_session, get_db,
@@ -23,6 +26,9 @@ from models.database import (
     AITask as TaskDB,
     AIFeature as FeatureDB,
 )
+
+# 新增 DicomParser 导入，用于 4.2 和 4.3 转码
+from preprocessing.dicom_parser import DicomParser, DicomParseException
 
 # ==========================================
 # 日志配置（替换所有 print）
@@ -178,7 +184,7 @@ async def upload_image(
         study_uid: Optional[str] = Form(None),
         db: AsyncSession = Depends(get_db)
 ):
-    """上传影像：所有文件先落 uploads/，普通图片复制到 static/images/"""
+    """上传影像：所有文件先落 uploads/，普通图片复制到 static/images/，DICOM转码后存入"""
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
 
@@ -196,11 +202,41 @@ async def upload_image(
     # 2. 判断类型，决定路由
     is_dicom = file.content_type == "application/dicom" or ext == ".dcm"
 
+    # 初始化入库所需的变量
+    img_status = "processing"
+    img_url = None
+    img_format = ext.lstrip(".").upper() if ext else "PNG"
+    img_width = None
+    img_height = None
+    dicom_tags_json = None
+    error_msg = None
+
     if is_dicom:
-        # DICOM：等待阶段4转码管线，url留空，status=processing
-        img_status = "processing"
-        img_url = None
         img_format = "DICOM"
+        try:
+            # 调用 DicomParser 进行同步转码
+            parser = DicomParser(raw_path)
+
+            # 转码并保存到 static/images/
+            static_filename = f"{image_uid}.png"
+            static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
+            img = parser.save_as_png(static_path)
+
+            # 转码成功，更新状态和字段
+            img_status = "ready"
+            img_url = f"/ai-static/images/{static_filename}"
+            img_format = "PNG"  # 转码后格式变为PNG
+            img_width = img.width
+            img_height = img.height
+            dicom_tags_json = parser.metadata_dict
+
+            logger.info(f"DICOM 转码成功: image_uid={image_uid}")
+
+        except DicomParseException as e:
+            # 转码失败，记录错误，状态标记为 failed
+            img_status = "failed"
+            error_msg = str(e)
+            logger.error(f"DICOM 转码失败: image_uid={image_uid}, error={e}")
     else:
         # 普通图片：复制到 static/images/，直接可访问
         static_filename = f"{image_uid}{ext}"
@@ -209,7 +245,9 @@ async def upload_image(
 
         img_status = "ready"
         img_url = f"/ai-static/images/{static_filename}"
-        img_format = ext.lstrip(".").upper() if ext else "PNG"
+        # 普通图片暂不获取真实宽高，阶段5用PIL读取替换
+        img_width = 1024
+        img_height = 768
 
     # 3. 入库
     task = TaskDB(
@@ -226,8 +264,10 @@ async def upload_image(
         format=img_format,
         url=img_url,
         status=img_status,
-        width=1024,  # 阶段4用PIL读取真实尺寸替换
-        height=768,
+        error_message=error_msg,
+        width=img_width,
+        height=img_height,
+        original_dicom_tags=dicom_tags_json,
         created_at=datetime.now(timezone.utc)
     )
     db.add(image)
@@ -247,10 +287,63 @@ async def upload_image(
 
 @app.post("/ingest", status_code=202, response_model=UploadIngestResponse, tags=["Image"])
 async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
-    """离线摄取：仅创建记录，实际下载转码在阶段4实现"""
+    """离线摄取：下载URL资源，执行DICOM转码并入库"""
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
 
+    # 初始化入库所需的变量
+    img_status = "processing"
+    img_url = None
+    img_format = "DICOM"
+    img_width = None
+    img_height = None
+    dicom_tags_json = None
+    error_msg = None
+    raw_path = None
+
+    try:
+        # 1. 异步下载文件
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(req.image_source)
+            response.raise_for_status()  # 检查HTTP状态码
+            content = response.content
+
+        # 2. 原始文件落盘 uploads/
+        ext = os.path.splitext(req.image_source)[1].lower() or ".dcm"
+        raw_filename = f"{image_uid}_ingest{ext}"
+        raw_path = os.path.join(settings.UPLOAD_DIR, raw_filename)
+        with open(raw_path, "wb") as f:
+            f.write(content)
+
+        # 3. 执行 DICOM 转码 (复用 DicomParser 逻辑)
+        try:
+            parser = DicomParser(raw_path)
+
+            static_filename = f"{image_uid}.png"
+            static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
+            img = parser.save_as_png(static_path)
+
+            img_status = "ready"
+            img_url = f"/ai-static/images/{static_filename}"
+            img_format = "PNG"
+            img_width = img.width
+            img_height = img.height
+            dicom_tags_json = parser.metadata_dict
+
+            logger.info(f"Ingest DICOM 转码成功: image_uid={image_uid}")
+
+        except DicomParseException as e:
+            img_status = "failed"
+            error_msg = str(e)
+            logger.error(f"Ingest DICOM 转码失败: image_uid={image_uid}, error={e}")
+
+    except httpx.HTTPError as e:
+        # 下载失败处理
+        img_status = "failed"
+        error_msg = f"文件下载失败: {str(e)}"
+        logger.error(f"Ingest 下载失败: source={req.image_source}, error={e}")
+
+    # 4. 入库
     task = TaskDB(
         task_id=task_id,
         image_uid=image_uid,
@@ -262,22 +355,19 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
     image = ImageDB(
         image_uid=image_uid,
         task_id=task_id,
-        format="DICOM",
-        url=None,  # 下载转码后更新
-        status="processing",  # 明确标记为处理中
-        width=1024,
-        height=768,
-        original_dicom_tags={
-            "PatientID": req.patient_id or "MOCK_PATIENT_001",
-            "StudyInstanceUID": req.study_uid or f"study_{uuid.uuid4().hex[:8]}",
-            "PhotometricInterpretation": "YBR_FULL_422"
-        },
+        format=img_format,
+        url=img_url,
+        status=img_status,
+        error_message=error_msg,
+        width=img_width if img_width else 1024,  # 兜底默认值
+        height=img_height if img_height else 768,
+        original_dicom_tags=dicom_tags_json,
         created_at=datetime.now(timezone.utc)
     )
     db.add(image)
     await db.commit()
 
-    logger.info(f"Ingest task created: task_id={task_id}, source={req.image_source}")
+    logger.info(f"Ingest task created: task_id={task_id}, source={req.image_source}, status={img_status}")
 
     return UploadIngestResponse(
         task_id=task_id,
