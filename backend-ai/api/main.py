@@ -2,14 +2,24 @@ import asyncio
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List
 
-from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, Request, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ConfigDict
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from models.database import (
+    init_db, get_db, async_session,
+    ImageResource as ImageDB,
+    AITask as TaskDB,
+    AIFeature as FeatureDB,
+)
 
 
 # ==========================================
@@ -63,7 +73,6 @@ class VisualEvidence(BaseModel):
 
 class Morphology(BaseModel):
     # 等效于 JSON Schema 的 additionalProperties: false
-    # 严禁 DeepSeek-VL2 夹带契约外字段(如偷偷输出 diagnosis)，违例直接 ValidationError 打回
     model_config = ConfigDict(extra='forbid')
 
     border: str
@@ -101,9 +110,18 @@ os.makedirs("static/images", exist_ok=True)
 os.makedirs("static/heatmaps", exist_ok=True)
 os.makedirs("uploads", exist_ok=True)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 服务启动时自动执行数据库初始化（建表）
+    await init_db()
+    yield
+
+
 app = FastAPI(
     title="DermaIntegrate AI Backend",
-    description="智能推理域 API，严格遵循 api-contract.yaml"
+    description="智能推理域 API，严格遵循 api-contract.yaml",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -114,11 +132,6 @@ app.add_middleware(
 )
 
 app.mount("/ai-static", StaticFiles(directory="static"), name="static")
-
-# Mock 内存数据库
-tasks_db = {}
-images_db = {}
-features_db = {}
 
 
 # ==========================================
@@ -138,35 +151,63 @@ def create_error_response(status_code: int, error: str, error_code: str, message
 # ==========================================
 
 @app.get("/health", tags=["System"])
-async def health():
-    return {"service": "backend-ai", "status": "UP"}
+async def health(db: AsyncSession = Depends(get_db)):
+    # 增加数据库心跳检测，微服务部署标准实践
+    try:
+        await db.execute(select(TaskDB.task_id).limit(1))
+        db_status = "connected"
+    except Exception:
+        db_status = "disconnected"
+    return {"service": "backend-ai", "status": "UP", "db": db_status}
 
 
 @app.post("/upload", status_code=202, response_model=UploadIngestResponse, tags=["Image"])
 async def upload_image(
         file: UploadFile = File(...),
         patient_id: Optional[str] = Form(None),
-        study_uid: Optional[str] = Form(None)
+        study_uid: Optional[str] = Form(None),
+        db: AsyncSession = Depends(get_db)
 ):
     """上传皮肤镜影像，异步返回 202 Accepted"""
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
 
-    # 实际场景下会丢给后台线程/消息队列处理，此处仅Mock记录
     content = await file.read()
-    file_path = f"uploads/{task_id}_{file.filename}"
-    with open(file_path, "wb") as f:
-        f.write(content)
 
-    tasks_db[task_id] = {"task_id": task_id, "image_uid": image_uid}
+    is_dicom = file.content_type == "application/dicom" or (file.filename and file.filename.lower().endswith(".dcm"))
 
-    images_db[image_uid] = ImageMetadataResponse(
+    if is_dicom:
+        source_path = f"uploads/{task_id}_{file.filename}"
+        with open(source_path, "wb") as f:
+            f.write(content)
+        img_status = "processing"  # DICOM 需要后端异步转码管线处理
+    else:
+
+        target_path = f"static/images/{image_uid}.png"
+        with open(target_path, "wb") as f:
+            f.write(content)
+        img_status = "ready"  # 普通 Web 图片上传即可用
+
+    task = TaskDB(
+        task_id=task_id,
         image_uid=image_uid,
-        url=f"/ai-static/images/{image_uid}.png",
-        status="processing",
-        width=1024,
-        height=768
+        status="queued",
+        created_at=datetime.now(timezone.utc)
     )
+    db.add(task)
+
+    image = ImageDB(
+        image_uid=image_uid,
+        task_id=task_id,
+        format="PNG",
+        url=f"/ai-static/images/{image_uid}.png",
+        status=img_status,  # 根据文件类型动态设置状态
+        width=1024,
+        height=768,
+        created_at=datetime.now(timezone.utc)
+    )
+    db.add(image)
+    await db.commit()
 
     return UploadIngestResponse(
         task_id=task_id,
@@ -179,28 +220,39 @@ async def upload_image(
 
 
 @app.post("/ingest", status_code=202, response_model=UploadIngestResponse, tags=["Image"])
-async def ingest_image(req: IngestRequest):
+async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
     """异步触发DICOM离线摄取管线，异步返回 202 Accepted"""
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
 
-    tasks_db[task_id] = {"task_id": task_id, "image_uid": image_uid}
-
-    # Mock DICOM解析提取Tag
     dicom_tags = DicomTags(
         PatientID=req.patient_id or "MOCK_PACIENT_001",
         StudyInstanceUID=req.study_uid or f"study_{uuid.uuid4().hex[:8]}",
         PhotometricInterpretation="YBR_FULL_422"
     )
 
-    images_db[image_uid] = ImageMetadataResponse(
+    task = TaskDB(
+        task_id=task_id,
         image_uid=image_uid,
+        status="queued",
+        created_at=datetime.now(timezone.utc)
+    )
+    db.add(task)
+
+    # 离线摄取场景，文件尚未下载转码，一定是 processing 状态
+    image = ImageDB(
+        image_uid=image_uid,
+        task_id=task_id,
+        format="PNG",
         url=f"/ai-static/images/{image_uid}.png",
         status="processing",
         width=1024,
         height=768,
-        original_dicom_tags=dicom_tags
+        original_dicom_tags=dicom_tags.model_dump(),
+        created_at=datetime.now(timezone.utc)
     )
+    db.add(image)
+    await db.commit()
 
     return UploadIngestResponse(
         task_id=task_id,
@@ -213,18 +265,41 @@ async def ingest_image(req: IngestRequest):
 
 
 @app.get("/images/{image_uid}", response_model=ImageMetadataResponse, tags=["Image"])
-async def get_image(image_uid: str):
-    if image_uid not in images_db:
+async def get_image(image_uid: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ImageDB).where(ImageDB.image_uid == image_uid))
+    image = result.scalar_one_or_none()
+
+    if not image:
         return create_error_response(404, "NotFound", "IMAGE_NOT_FOUND", "影像 UID 不存在")
-    return images_db[image_uid]
+
+    dicom_tags = None
+    if image.original_dicom_tags:
+        dicom_tags = DicomTags(**image.original_dicom_tags)
+
+    return ImageMetadataResponse(
+        image_uid=image.image_uid,
+        format=image.format,
+        url=image.url,
+        status=image.status,
+        error_message=image.error_message,
+        width=image.width,
+        height=image.height,
+        color_space=image.color_space or "sRGB",
+        original_dicom_tags=dicom_tags
+    )
 
 
 @app.get("/stream/{task_id}", tags=["Diagnosis"])
-async def stream_diagnosis(request: Request, task_id: str):
-    if task_id not in tasks_db:
+async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(TaskDB).where(TaskDB.task_id == task_id))
+    task = result.scalar_one_or_none()
+
+    if not task:
         return create_error_response(404, "NotFound", "TASK_NOT_FOUND", "task_id 不存在")
 
-    image_uid = tasks_db[task_id].get("image_uid", "unknown")
+    image_uid = task.image_uid
+    task.status = "running"
+    await db.commit()
 
     async def event_generator():
         steps = [
@@ -236,25 +311,18 @@ async def stream_diagnosis(request: Request, task_id: str):
             {"step": 5, "stage": "evidence_integration", "msg": "证据链组装完成", "progress": 1.0},
         ]
 
-        # 模拟异步推理步级生成
         for step_data in steps:
             if await request.is_disconnected():
                 print(f"Client disconnected during step {step_data['step']}. Aborting.")
-                return  # 终止生成器，释放资源
+                return
 
             yield f"event: step\ndata: {json.dumps(step_data)}\n\n"
-            await asyncio.sleep(0.8)  # 模拟推理耗时
+            await asyncio.sleep(0.8)
 
-            # 兑现心跳契约
             hb_data = {"ping": True}
             yield f"event: heartbeat\ndata: {json.dumps(hb_data)}\n\n"
 
-        # 推理完成，更新影像状态为 ready
-        if image_uid in images_db:
-            images_db[image_uid].status = "ready"
-
-        # 构建符合 SSEResultEvent 的完整证据链
-        result = SSEResultEvent(
+        result_event = SSEResultEvent(
             task_id=task_id,
             image_uid=image_uid,
             visual_evidence=VisualEvidence(
@@ -283,20 +351,38 @@ async def stream_diagnosis(request: Request, task_id: str):
             completed_at=datetime.now(timezone.utc).isoformat()
         )
 
-        # 缓存历史特征
-        features_db[image_uid] = result
+        # SSE 流结束后，用独立 Session 保存结果，避免主 Session 被关闭的陷阱
+        try:
+            async with async_session() as session:
+                img_res = await session.execute(select(ImageDB).where(ImageDB.image_uid == image_uid))
+                img = img_res.scalar_one()
+                img.status = "ready"
 
-        # 发送成功终结事件
-        yield f"event: result\ndata: {result.model_dump_json()}\n\n"
+                feature = FeatureDB(
+                    image_uid=image_uid,
+                    task_id=task_id,
+                    ai_features=result_event.model_dump(),
+                    created_at=datetime.now(timezone.utc)
+                )
+                session.add(feature)
+                await session.commit()
+        except Exception as e:
+            print(f"Error saving inference results to DB: {e}")
+
+        yield f"event: result\ndata: {result_event.model_dump_json()}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/features/{image_uid}", response_model=SSEResultEvent, tags=["Diagnosis"])
-async def get_historical_features(image_uid: str):
-    if image_uid not in features_db:
+async def get_historical_features(image_uid: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(FeatureDB).where(FeatureDB.image_uid == image_uid))
+    feature = result.scalar_one_or_none()
+
+    if not feature:
         return create_error_response(404, "NotFound", "FEATURE_NOT_FOUND", "该影像尚无成功的推理结果")
-    return features_db[image_uid]
+
+    return SSEResultEvent(**feature.ai_features)
 
 
 if __name__ == "__main__":

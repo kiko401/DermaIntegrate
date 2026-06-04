@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: derma-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 挂载两个微服务域的 SQL 脚本到初始化目录，MySQL 首次启动时按字母顺序执行
+      - ../backend-ai/sql/init.sql:/docker-entrypoint-initdb.d/01-init-ai.sql
+      - ../backend-app/sql/init.sql:/docker-entrypoint-initdb.d/02-init-app.sql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: derma-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  redis:
+    image: redis:7
+    container_name: derma-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mysql_data:
+  qdrant_data:
+  redis_data:
