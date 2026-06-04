@@ -1,0 +1,511 @@
+openapi: 3.0.3
+info:
+  title: DermaIntegrate - AI Inference Domain API Contract
+  description: |
+    智能推理域对外暴露的接口契约。
+    应用平台域通过此契约调用推理服务，严禁硬编码契约外字段。
+    边界界定：推理域负责影像预处理、特征提取与证据链生成；平台域负责业务流转、EMPI路由及前端交互。
+  version: 1.0.0
+  contact:
+    name: AI Inference Team
+
+servers:
+  - url: http://localhost:8000
+    description: 智能推理域本地开发环境
+
+tags:
+  - name: System
+    description: 系统级接口
+  - name: Image
+    description: 医学影像处理与调阅
+  - name: Diagnosis
+    description: AI 辅助诊断流式推理与历史特征查询
+
+security:
+  - BearerAuth: []
+
+x-static-file-serving:
+  description: |
+    推理域挂载静态资源服务：
+    - /ai-static/images/   → 转码后的 PNG 影像
+    - /ai-static/heatmaps/ → Grad-CAM 热力图
+    应用域 Nginx 需将 /ai-static/ 路径反向代理至推理域。客户端严禁硬编码路径，必须通过 API 响应获取 URL。
+
+paths:
+  # ==========================================
+  # 1. 系统健康检查
+  # ==========================================
+  /health:
+    get:
+      tags: [System]
+      summary: 推理域健康检查
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [service, status]
+                properties:
+                  service:
+                    type: string
+                    example: "backend-ai"
+                  status:
+                    type: string
+                    enum: [UP, DOWN]
+                    example: "UP"
+
+  # ==========================================
+  # 2. 影像上传（前端直传场景）
+  # ==========================================
+  /upload:
+    post:
+      tags: [Image]
+      summary: 上传皮肤镜影像
+      description: 接收前端直传的皮肤镜影像文件，异步执行预处理，返回全局唯一的 task_id 与 image_uid。
+      operationId: uploadImage
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 皮肤镜影像文件（限制 20MB，支持 PNG/JPG/DICOM）
+                patient_id:
+                  type: string
+                  description: 可选，应用域透传的患者标识
+                study_uid:
+                  type: string
+                  description: 可选，DICOM StudyInstanceUID
+      responses:
+        '202':
+          description: 上传成功，预处理任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadIngestResponse'
+        '400':
+          description: 文件格式不支持或文件损坏
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: 文件过大（限制 20MB）
+
+  # ==========================================
+  # 3. 影像异步摄取（应用域后端触发场景）
+  # ==========================================
+  /ingest:
+    post:
+      tags: [Image]
+      summary: 异步触发DICOM离线摄取管线
+      description: |
+        应用域接收到外部系统（如PACS）影像通知后调用。推理域拉取影像并执行解析、色彩空间还原转码PNG。
+        若未传入 patient_id 等标识，推理域需自行从 DICOM Tags 中提取元数据建立映射。
+      operationId: ingestImage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [image_source]
+              properties:
+                image_source:
+                  type: string
+                  description: 影像获取地址（内部共享存储路径或 PACS WADO-RS URL）
+                  example: "http://pacs.mock.local/wado-rs/studies/1.2.3/series/4.5.6/instances/7.8.9"
+                patient_id:
+                  type: string
+                  description: 可选备用，EMPI全局患者标识
+                study_uid:
+                  type: string
+                  description: 可选备用，DICOM StudyInstanceUID
+      responses:
+        '202':
+          description: 摄取任务已接受
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadIngestResponse'
+        '400':
+          description: 缺少 image_source 参数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ==========================================
+  # 4. 影像调阅（转码后的 Web 友好格式）
+  # ==========================================
+  /images/{image_uid}:
+    get:
+      tags: [Image]
+      summary: 获取转码后的影像元数据及访问路径
+      description: |
+        应用域通过 UID 获取转码后的 PNG 路径及元数据。前端禁止直接解析 DICOM。
+        若影像仍在预处理中，返回 processing 状态。
+      operationId: getImage
+      parameters:
+        - name: image_uid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 影像唯一标识
+      responses:
+        '200':
+          description: 影像元数据及访问地址
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [image_uid, format, url, status]
+                properties:
+                  image_uid:
+                    type: string
+                  format:
+                    type: string
+                    enum: [PNG]
+                  url:
+                    type: string
+                    format: uri
+                    description: 可直接渲染的 PNG 相对路径（需应用域网关代理转发）
+                    example: "/ai-static/images/img_uid_987654321abcd.png"
+                  status:
+                    type: string
+                    enum: [processing, ready, failed]
+                    description: 影像转码状态。processing 时应用域应轮询或等待 SSE step 通知
+                  error_message:
+                    type: string
+                    nullable: true
+                    description: 仅当 status 为 failed 时返回
+                  width:
+                    type: integer
+                  height:
+                    type: integer
+                  color_space:
+                    type: string
+                    description: 转码后统一为 sRGB
+                    example: "sRGB"
+                  original_dicom_tags:
+                    type: object
+                    nullable: true
+                    description: 原始 DICOM 关键元数据（仅 DICOM 来源返回）
+                    properties:
+                      PatientID:
+                        type: string
+                      StudyInstanceUID:
+                        type: string
+                      PhotometricInterpretation:
+                        type: string
+                        example: "YBR_FULL_422"
+        '404':
+          description: 影像 UID 不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ==========================================
+  # 5. SSE 流式诊断（核心契约）
+  # ==========================================
+  /stream/{task_id}:
+    get:
+      tags: [Diagnosis]
+      summary: SSE 流式获取 AI 辅助诊断证据链
+      description: |
+        Server-Sent Events 长连接。系统不直接输出诊断结论，仅提供客观证据供医生裁决。
+        【SSE 事件类型与载荷契约】（严格遵循）：
+        - `event: step`      → data: SSEStepEvent (中间推理步骤通知)
+        - `event: result`    → data: SSEResultEvent (成功终结，返回完整证据链，随后关闭连接)
+        - `event: error`     → data: SSEErrorEvent (证据链断裂异常，随后关闭连接)
+        - `event: heartbeat` → data: SSEHeartbeatEvent (防止中间件静默断连，每 30s 至少一次)
+      operationId: streamDiagnosis
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: /upload 或 /ingest 返回的任务 ID
+      responses:
+        '200':
+          description: SSE 流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  事件流格式示例：
+                  event: step
+                  data: {"step":1,"stage":"gradcam","msg":"显著性区域提取完成","progress":0.4}
+
+                  event: result
+                  data: {"task_id":"a1b2...","image_uid":"img...","morphology":{...},"status":"completed"}
+
+                  event: heartbeat
+                  data: {"ping":true}
+        '404':
+          description: task_id 不存在或已过期
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ==========================================
+  # 6. 历史诊断特征查询
+  # ==========================================
+  /features/{image_uid}:
+    get:
+      tags: [Diagnosis]
+      summary: 获取影像的历史AI辅助诊断特征
+      description: |
+        查阅历史病历时调用。仅当该影像存在已成功的推理结果时返回 200，否则 404。
+        严禁对历史病历重复发起 GPU 推理流 (/stream)。
+      operationId: getHistoricalFeatures
+      parameters:
+        - name: image_uid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 影像资源唯一标识
+      responses:
+        '200':
+          description: 历史特征数据（结构同 SSE result 事件载荷）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSEResultEvent'
+        '404':
+          description: 该影像尚无成功的推理结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 服务间授权 Token
+
+  schemas:
+    # ==========================================
+    # 通用响应模型
+    # ==========================================
+    UploadIngestResponse:
+      type: object
+      required: [task_id, image_uid, status, message]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+          description: 全局唯一推理任务标识
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        image_uid:
+          type: string
+          description: 影像资源唯一标识
+          example: "img_uid_987654321abcd"
+        filename:
+          type: string
+          description: 文件名或影像源标识
+          example: "lesion_20240604.dcm"
+        content_type:
+          type: string
+          example: "application/dicom"
+        status:
+          type: string
+          enum: [accepted, rejected]
+          example: "accepted"
+        message:
+          type: string
+          example: "影像已接收，预处理启动中"
+
+    # ==========================================
+    # SSE 事件载荷定义
+    # ==========================================
+    SSEStepEvent:
+      type: object
+      description: 中间推理步骤事件
+      required: [step, stage, msg]
+      properties:
+        step:
+          type: integer
+          example: 1
+        stage:
+          type: string
+          enum: [image_preprocessing, gradcam, vlm_analysis, rag_retrieval, evidence_integration]
+          example: "gradcam"
+        msg:
+          type: string
+          example: "显著性区域提取完成"
+        data:
+          type: object
+          description: 阶段性产出数据（如预处理完成时返回转码URL）
+          properties:
+            image_url:
+              type: string
+              format: uri
+        progress:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          example: 0.4
+
+    SSEResultEvent:
+      type: object
+      description: 成功终结事件或历史特征查询响应，完整证据链
+      required: [task_id, image_uid, visual_evidence, morphology, rag_citations, confidence, status, disclaimer]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        image_uid:
+          type: string
+          description: 关联的影像UID，前端用于绑定当前查看的影像
+        visual_evidence:
+          type: object
+          description: 显著性视觉依据
+          required: [heatmap_url, image_url, lesion_region]
+          properties:
+            heatmap_url:
+              type: string
+              format: uri
+              example: "/ai-static/heatmaps/a1b2c3d4_heatmap.png"
+            image_url:
+              type: string
+              format: uri
+              example: "/ai-static/images/img_uid_987654321abcd.png"
+            lesion_region:
+              type: array
+              items:
+                type: integer
+              minItems: 4
+              maxItems: 4
+              description: 病灶区域 bounding box [x, y, width, height] (px)
+              example: [120, 80, 300, 250]
+        morphology:
+          type: object
+          description: |
+            结构化客观形态学描述。
+            【严格约束】VLM受强制JSON格式约束，additionalProperties: false严禁夹带契约外字段。
+          required: [border, pigment_network, color_distribution]
+          additionalProperties: false
+          properties:
+            border:
+              type: string
+              example: "不规则"
+            pigment_network:
+              type: string
+              example: "非典型网络"
+            color_distribution:
+              type: string
+              example: "多色不均匀"
+            diameter:
+              type: string
+              example: ">6mm"
+            symmetry:
+              type: string
+              example: "不对称"
+            vascular_pattern:
+              type: string
+              example: "点状不规则血管"
+        rag_citations:
+          type: array
+          description: RAG 检索增强的医学文献引用
+          items:
+            type: object
+            required: [title, relevance]
+            properties:
+              title:
+                type: string
+                example: "皮肤镜诊断指南2024"
+              source:
+                type: string
+              relevance:
+                type: number
+                format: float
+                example: 0.92
+              excerpt:
+                type: string
+                description: 相关文献片段
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: 证据链整体置信度，低于阈值触发证据链断裂
+          example: 0.85
+        status:
+          type: string
+          enum: [completed]
+        disclaimer:
+          type: string
+          example: "本结果仅为AI辅助证据，最终诊断裁量权归临床医生所有。"
+
+    SSEErrorEvent:
+      type: object
+      description: 证据链断裂事件，前端必须拒绝展示推断结果并触发降级提示
+      required: [error_code, message, stage]
+      properties:
+        error_code:
+          type: string
+          enum: [EVIDENCE_CHAIN_BROKEN, GRADCAM_FAILED, RAG_EMPTY, VLM_OUTPUT_INVALID, IMAGE_PREPROCESSING_FAILED, TIMEOUT]
+          example: "EVIDENCE_CHAIN_BROKEN"
+        message:
+          type: string
+          example: "证据链不完整：RAG 未检索到有效医学文献支撑"
+        stage:
+          type: string
+          description: 发生错误的推理阶段
+          example: "rag_retrieval"
+
+    SSEHeartbeatEvent:
+      type: object
+      description: 心跳保活事件
+      required: [ping]
+      properties:
+        ping:
+          type: boolean
+          example: true
+
+    # ==========================================
+    # 通用错误响应
+    # ==========================================
+    ErrorResponse:
+      type: object
+      required: [error, message, error_code]
+      properties:
+        error:
+          type: string
+          example: "BadRequest"
+        error_code:
+          type: string
+          example: "FORMAT_UNSUPPORTED"
+        message:
+          type: string
+          example: "不支持的文件格式：仅接受 PNG/JPG/DICOM"
+
+  # ==========================================
+  # 架构契约约束（精简版，聚焦接口交互约束）
+  # ==========================================
+x-architecture-constraints:
+  - 【可解释证据链优先】系统不直接输出诊断结论。VLM输出需强制JSON约束及正则二次过滤；若关键组件缺失触发 error 事件。
+  - 【异步响应与资源回收】SSE连接期间，推理域需监测连接状态；前端断连时，必须在流式生成步级间隙终止GPU计算，防止显存无效占用。
+  - 【前后端分离渲染】前端禁止直接解析DICOM，必须通过推理域后端转码PNG并代理调阅。
+  - 【计算隔离原则】历史诊断查阅严禁触发重复推理（/stream），必须通过 /features 接口获取持久化特征。
