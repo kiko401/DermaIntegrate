@@ -1,23 +1,26 @@
 # Python
-backend-ai/venv/
-backend-ai/__pycache__/
-backend-ai/*.pyc
-backend-ai/.env
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+*.egg-info/
 
-# Java
-backend-app/target/
-backend-app/.idea/
-backend-app/*.iml
+# 环境配置（包含密码，不提交）
+.env
 
-# Frontend
-frontend/node_modules/
-frontend/build/
+# 运行时生成的文件（不上传大文件和生成物）
+backend-ai/uploads/
+backend-ai/static/images/
+backend-ai/static/heatmaps/
 
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
-# System
-*.log
+# 系统文件
 .DS_Store
 Thumbs.db

@@ -5,17 +5,18 @@ services:
     image: mysql:8.0
     container_name: derma-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: derma_ai
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      # 挂载两个微服务域的 SQL 脚本到初始化目录，MySQL 首次启动时按字母顺序执行
+      # 挂载AI域的 SQL 脚本到初始化目录
       - ../backend-ai/sql/init.sql:/docker-entrypoint-initdb.d/01-init-ai.sql
-      - ../backend-app/sql/init.sql:/docker-entrypoint-initdb.d/02-init-app.sql
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+      # - ../backend-app/sql/init.sql:/docker-entrypoint-initdb.d/02-init-app.sql  # 暂时注释，目前只管AI域
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot_password"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"] # 修正：检查密码改为 root
       interval: 10s
       timeout: 5s
       retries: 5
