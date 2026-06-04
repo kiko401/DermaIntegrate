@@ -163,13 +163,16 @@ def run_agent_pipeline(cancel_event):
 ```text
 DermaIntegrate/
 ├── backend-ai/                  # [智能推理域] 智能推理层
-│   ├── agents/                  # Multi-Agent交互逻辑 (基于DeepSeek-V3)
-│   ├── cnn/                     # ResNet50微调与Grad-CAM视觉依据生成模块
-│   ├── rag/                     # LlamaIndex + Qdrant 检索增强生成引擎
-│   ├── api/                     # FastAPI路由定义 (SSE流式接口与断连感知)
-│   └── preprocessing/           # DICOM离线摄取管线、色彩空间还原、元数据提取与UID绑定
+│   ├── sql/                     # 推理域数据库初始化脚本
+│   ├── models/                  # SQLAlchemy ORM 模型定义（数据库访问层）
+│   ├── agents/                  # Multi-Agent交互逻辑
+│   ├── cnn/                     # ResNet50微调与Grad-CAM
+│   ├── rag/                     # LlamaIndex + Qdrant
+│   ├── api/                     # FastAPI路由定义
+│   └── preprocessing/           # DICOM离线摄取管线
 │
 ├── backend-app/                 # [应用平台域] 应用服务层
+│   ├── sql/                     # 应用域的数据库脚本
 │   ├── empi/                    # EMPI主索引映射引擎与跨系统只读路由
 │   ├── fhir/                    # HAPI FHIR Adapter解析标准R4资源
 │   ├── service/                 # 患者临床视图聚合、AI诊断响应式异步代理
@@ -184,7 +187,6 @@ DermaIntegrate/
 ├── infra/                       # [推理域定义拓扑，应用域主导实施]
 │   ├── docker-compose.yml       # 异构微服务编排与GPU显存隔离配置
 │   ├── nginx/                   # 反向网关路由与SSE长连接超时配置
-│   ├── sql/                     # 数据库初始化DDL (含MySQL生成列与索引定义)
 │   └── mock-fhir-data/          # 虚拟患者JSON资源池 (符合FHIR R4规范)
 │
 └── docs/                        # 契约文档与API定义
