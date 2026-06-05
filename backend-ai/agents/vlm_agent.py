@@ -51,18 +51,31 @@ class VLMAgent:
 
         return filtered_text
 
-    def analyze(self, original_image_path: str, evidence_image_path: str) -> dict:
+    def analyze(self, original_image_path: str, evidence_image_path: str, cancel_event=None) -> dict:
         """
         分析影像，提取客观形态学描述。
         返回严格符合契约的 JSON 格式特征字典。
+        :param cancel_event: 线程取消事件，用于断连时终止推理
         """
         # 1. 降级开关判断
         if self.use_mock:
             logger.info("USE_MOCK_VLM=true. Returning mock morphology data.")
             return self._get_mock_data()
 
+        # === 步级终止检查 ===
+        if cancel_event and cancel_event.is_set():
+            logger.info("VLMAgent: 任务已取消，终止VLM调用")
+            raise InterruptedError()
+        # ====================
+
         # 2. 准备真实 API 请求
         try:
+            # === 步级终止检查 (在耗时的Base64编码前再次确认) ===
+            if cancel_event and cancel_event.is_set():
+                logger.info("VLMAgent: 任务已取消，跳过图片编码")
+                raise InterruptedError()
+            # ==================================================
+
             orig_b64 = self._encode_image_to_base64(original_image_path)
             evi_b64 = self._encode_image_to_base64(evidence_image_path)
 
@@ -104,6 +117,10 @@ class VLMAgent:
             return result_dict
 
         except (APIError, APIConnectionError, json.JSONDecodeError, Exception) as e:
+            # 注意：InterruptedError 也会被这里捕获，需要单独处理让其抛出
+            if isinstance(e, InterruptedError):
+                raise e
+
             logger.error(f"VLM API call failed or parsing error: {e}. Falling back to MOCK data.")
             # 任何真实调用异常，自动降级到 Mock，保障演示不中断
             return self._get_mock_data()
