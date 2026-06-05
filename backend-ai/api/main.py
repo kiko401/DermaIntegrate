@@ -4,6 +4,7 @@ import os
 import shutil
 import uuid
 import logging
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List
@@ -35,11 +36,8 @@ from cnn.lesion_extractor import LesionExtractor
 from agents.vlm_agent import VLMAgent
 from rag.knowledge_base import RAGKnowledgeBase
 
-
-# 自定义异常：证据链断裂
-class DiagnosisUncertainException(Exception):
-    pass
-
+# 新增阶段6 自定义异常导入
+from exceptions import ModelInferenceException, DiagnosisUncertainException
 
 # ==========================================
 # 日志配置（替换所有 print）
@@ -173,6 +171,16 @@ app.add_middleware(
 
 app.mount("/ai-static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
+
+# 全局异常处理器：拦截证据链断裂异常，返回422
+@app.exception_handler(DiagnosisUncertainException)
+async def diagnosis_uncertain_handler(request: Request, exc: DiagnosisUncertainException):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": str(exc)},
+    )
+
+
 # 全局初始化视觉提取器和 VLM Agent
 lesion_extractor = LesionExtractor()
 vlm_agent = VLMAgent()
@@ -186,6 +194,65 @@ def create_error_response(status_code: int, error: str, error_code: str, message
         status_code=status_code,
         content=ErrorResponse(error=error, error_code=error_code, message=message).model_dump()
     )
+
+
+def run_pipeline_with_cancel(task_id: str, image_uid: str, original_image_path: str, img_record_url: str,
+                             cancel_event: threading.Event, queue: asyncio.Queue, rag_kb: RAGKnowledgeBase):
+    """
+    可取消的同步推理管线包装，在独立子线程中执行。
+    通过 queue 推送中间步级状态，实现真正的流式输出。
+    """
+    try:
+        # Step 1: 视觉依据 - 调用 LesionExtractor
+        if cancel_event.is_set(): raise InterruptedError()
+        evidence_filename = f"{image_uid}_evidence.png"
+        evidence_path = os.path.join(settings.STATIC_DIR, "heatmaps", evidence_filename)
+        lesion_extractor.generate(original_image_path, evidence_path, cancel_event=cancel_event)
+        evidence_url = f"/ai-static/heatmaps/{evidence_filename}"
+        # 推送 Step 1 状态及产出物
+        queue.put_nowait(("step", {"step": 1, "stage": "gradcam", "msg": "视觉定位完成", "progress": 0.4,
+                                   "data": {"image_url": evidence_url}}))
+
+        # Step 2: 形态描述 - 调用 VLMAgent
+        if cancel_event.is_set(): raise InterruptedError()
+        morphology_dict = vlm_agent.analyze(original_image_path, evidence_path, cancel_event=cancel_event)
+        # 推送 Step 2 状态及产出物
+        queue.put_nowait(("step", {"step": 2, "stage": "vlm_analysis", "msg": "形态学分析完成", "progress": 0.6,
+                                   "data": morphology_dict}))
+
+        # Step 3: 文献检索 - 调用 RAGKnowledgeBase
+        if cancel_event.is_set(): raise InterruptedError()
+        query_text = " ".join([f"{k}:{v}" for k, v in morphology_dict.items()])
+        rag_results = rag_kb.retrieve(query_text, top_k=2)
+        # 推送 Step 3 状态及产出物
+        queue.put_nowait(("step", {"step": 3, "stage": "rag_retrieval", "msg": "检索相关医学文献完成", "progress": 0.8,
+                                   "data": {"citations": rag_results}}))
+
+        # 校验逻辑
+        if not morphology_dict or not rag_results:
+            raise DiagnosisUncertainException("证据链断裂：缺乏足够的形态学或文献依据")
+
+        # 管线执行成功，推送最终数据组装标记
+        queue.put_nowait(("final_data", {
+            "image_uid": image_uid,
+            "evidence_url": evidence_url,
+            "img_record_url": img_record_url,
+            "morphology_dict": morphology_dict,
+            "rag_results": rag_results
+        }))
+
+    except InterruptedError:
+        logger.info(f"Pipeline execution cancelled for task: {task_id}")
+        queue.put_nowait(("error", {"error_code": "CANCELLED", "message": "推理任务被中断取消"}))
+    except ModelInferenceException as e:
+        logger.error(f"Model inference failed for task {task_id}: {e}")
+        queue.put_nowait(("error", {"error_code": "INFERENCE_FAILED", "message": str(e)}))
+    except DiagnosisUncertainException as e:
+        logger.warning(f"Evidence chain broken for task {task_id}: {e}")
+        queue.put_nowait(("error", {"error_code": "EVIDENCE_CHAIN_BROKEN", "message": str(e)}))
+    except Exception as e:
+        logger.error(f"Pipeline unknown error for task {task_id}: {e}", exc_info=True)
+        queue.put_nowait(("error", {"error_code": "INTERNAL_ERROR", "message": f"未知异常: {str(e)}"}))
 
 
 # ==========================================
@@ -448,92 +515,113 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
         return create_error_response(400, "Bad Request", "IMAGE_NOT_READY", "影像尚未准备就绪")
 
     # 构建绝对路径 (从 url 转换)
-    # img_record.url 格式如: /ai-static/images/xxx.png
-    # 需要转换为 static/images/xxx.png
     relative_path = img_record.url.replace("/ai-static/", "")
     original_image_path = os.path.join(settings.STATIC_DIR, relative_path)
 
+    # 获取 RAG 实例
+    rag_kb = request.app.state.rag_kb
+
     async def event_generator():
+        cancel_event = threading.Event()
+        queue = asyncio.Queue()
+
+        # 启动子线程执行耗时推理管线
+        inference_thread = threading.Thread(
+            target=run_pipeline_with_cancel,
+            args=(task_id, image_uid, original_image_path, img_record.url, cancel_event, queue, rag_kb),
+            daemon=True
+        )
+        inference_thread.start()
+
         try:
-            # Step 1: 准备阶段
-            yield f"event: step\ndata: {json.dumps({'step': 1, 'stage': 'image_preprocessing', 'msg': '影像预处理完成', 'progress': 0.2})}\n\n"
-            await asyncio.sleep(0.2)
+            while True:
+                # 1. 优先检查前端是否断连
+                if await request.is_disconnected():
+                    cancel_event.set()
+                    logger.warning(f"Client disconnected. Aborting task: {task_id}")
+                    break
 
-            # Step 2: 视觉依据 - 调用 LesionExtractor
-            evidence_filename = f"{image_uid}_evidence.png"
-            evidence_path = os.path.join(settings.STATIC_DIR, "heatmaps", evidence_filename)
-            lesion_extractor.generate(original_image_path, evidence_path)
-            evidence_url = f"/ai-static/heatmaps/{evidence_filename}"
+                # 2. 尝试从队列获取子线程传递的消息（非阻塞）
+                try:
+                    event_type, data = queue.get_nowait()
 
-            yield f"event: step\ndata: {json.dumps({'step': 2, 'stage': 'gradcam', 'msg': '显著性区域提取完成', 'progress': 0.4, 'data': {'image_url': evidence_url}})}\n\n"
-            await asyncio.sleep(0.2)
+                    if event_type == "step":
+                        # 中间步骤实时推送
+                        yield f"event: step\ndata: {json.dumps(data)}\n\n"
+                    elif event_type == "error":
+                        # 异常降级推送
+                        yield f"event: error\ndata: {json.dumps(data)}\n\n"
+                        break
+                    elif event_type == "final_data":
+                        # 收到最终数据，执行组装与入库，推送 result 事件
+                        try:
+                            result_event = SSEResultEvent(
+                                task_id=task_id,
+                                image_uid=data["image_uid"],
+                                visual_evidence=VisualEvidence(
+                                    heatmap_url=data["evidence_url"],
+                                    image_url=data["img_record_url"],
+                                    lesion_region=[120, 80, 300, 250]  # 占位符区域
+                                ),
+                                morphology=Morphology(**data["morphology_dict"]),
+                                rag_citations=[
+                                    RagCitation(title=f"文献片段 {i + 1}", source="本地知识库", relevance=0.9,
+                                                excerpt=txt)
+                                    for i, txt in enumerate(data["rag_results"])],
+                                confidence=0.85,
+                                disclaimer="本结果仅为AI辅助证据，最终诊断裁量权归临床医生所有。",
+                                completed_at=datetime.now(timezone.utc).isoformat()
+                            )
 
-            # Step 3: 形态描述 - 调用 VLMAgent
-            morphology_dict = vlm_agent.analyze(original_image_path, evidence_path)
+                            # 保存特征到数据库
+                            try:
+                                async with async_session() as session:
+                                    img_res = await session.execute(
+                                        select(ImageDB).where(ImageDB.image_uid == image_uid))
+                                    img = img_res.scalar_one()
+                                    img.status = "ready"
 
-            yield f"event: step\ndata: {json.dumps({'step': 3, 'stage': 'vlm_analysis', 'msg': '形态学描述生成完成', 'progress': 0.6, 'data': morphology_dict})}\n\n"
-            await asyncio.sleep(0.2)
+                                    # 检查是否已存在该 image_uid 的特征记录，防止重复 INSERT 导致主键冲突
+                                    feat_res = await session.execute(
+                                        select(FeatureDB).where(FeatureDB.image_uid == image_uid))
+                                    existing_feature = feat_res.scalar_one_or_none()
 
-            # Step 4: 文献检索 - 调用 RAGKnowledgeBase
-            # 将形态学描述拼接为查询文本
-            query_text = " ".join([f"{k}:{v}" for k, v in morphology_dict.items()])
-            rag_kb = request.app.state.rag_kb
-            rag_results = rag_kb.retrieve(query_text, top_k=2)
+                                    if existing_feature:
+                                        # 已存在则更新
+                                        existing_feature.ai_features = result_event.model_dump()
+                                        existing_feature.created_at = datetime.now(timezone.utc)
+                                    else:
+                                        # 不存在则新增
+                                        feature = FeatureDB(
+                                            image_uid=image_uid,
+                                            task_id=task_id,
+                                            ai_features=result_event.model_dump(),
+                                            created_at=datetime.now(timezone.utc)
+                                        )
+                                        session.add(feature)
+                                    await session.commit()
+                            except Exception as db_e:
+                                logger.error(f"Error saving inference results to DB: {db_e}")
 
-            yield f"event: step\ndata: {json.dumps({'step': 4, 'stage': 'rag_retrieval', 'msg': '检索相关医学文献完成', 'progress': 0.8, 'data': {'citations': rag_results}})}\n\n"
-            await asyncio.sleep(0.2)
+                            yield f"event: result\ndata: {result_event.model_dump_json()}\n\n"
+                            break
 
-            # Step 5: 证据整合 - 校验逻辑
-            # 如果关键组件为空，抛出异常
-            if not morphology_dict or not rag_results:
-                raise DiagnosisUncertainException("证据链断裂：缺乏足够的形态学或文献依据")
+                        except Exception as assemble_e:
+                            logger.error(f"Error assembling final result: {assemble_e}")
+                            yield f"event: error\ndata: {json.dumps({'error_code': 'ASSEMBLE_ERROR', 'message': str(assemble_e)})}\n\n"
+                            break
 
-            # 组装最终结果
-            result_event = SSEResultEvent(
-                task_id=task_id,
-                image_uid=image_uid,
-                visual_evidence=VisualEvidence(
-                    heatmap_url=evidence_url,
-                    image_url=img_record.url,
-                    lesion_region=[120, 80, 300, 250]  # 占位符区域
-                ),
-                morphology=Morphology(**morphology_dict),
-                rag_citations=[RagCitation(title=f"文献片段 {i + 1}", source="本地知识库", relevance=0.9, excerpt=txt)
-                               for i, txt in enumerate(rag_results)],
-                confidence=0.85,  # 置信度目前写死
-                disclaimer="本结果仅为AI辅助证据，最终诊断裁量权归临床医生所有。",
-                completed_at=datetime.now(timezone.utc).isoformat()
-            )
+                except asyncio.QueueEmpty:
+                    # 3. 队列空说明子线程还在计算，发送心跳保活
+                    yield f"event: heartbeat\ndata: {{}}\n\n"
+                    await asyncio.sleep(0.1)  # 释放事件循环，避免CPU空转
 
-            # 保存特征到数据库
-            try:
-                async with async_session() as session:
-                    img_res = await session.execute(select(ImageDB).where(ImageDB.image_uid == image_uid))
-                    img = img_res.scalar_one()
-                    img.status = "ready"
-
-                    feature = FeatureDB(
-                        image_uid=image_uid,
-                        task_id=task_id,
-                        ai_features=result_event.model_dump(),
-                        created_at=datetime.now(timezone.utc)
-                    )
-                    session.add(feature)
-                    await session.commit()
-            except Exception as e:
-                logger.error(f"Error saving inference results to DB: {e}")
-
-            yield f"event: result\ndata: {result_event.model_dump_json()}\n\n"
-
-        except DiagnosisUncertainException as e:
-            # 证据链断裂异常处理
-            error_data = {"error_code": "EVIDENCE_CHAIN_BROKEN", "message": str(e)}
-            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
-
-        except Exception as e:
-            logger.error(f"Error during SSE stream: {e}")
-            error_data = {"error_code": "INTERNAL_ERROR", "message": "推理管线内部错误"}
-            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+        except asyncio.CancelledError:
+            # 处理服务端主动取消协程的情况
+            cancel_event.set()
+        finally:
+            # 确保子线程结束（设置超时防止卡死）
+            inference_thread.join(timeout=2.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

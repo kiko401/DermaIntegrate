@@ -21,13 +21,20 @@ class LesionExtractor:
         # self.model.eval()
         logger.info("LesionExtractor initialized (Currently using MOCK Gaussian Mask).")
 
-    def generate(self, image_path: str, output_path: str) -> str:
+    def generate(self, image_path: str, output_path: str, cancel_event=None) -> str:
         """
         提取病灶视觉证据并保存叠加图
         :param image_path: 输入原图路径
         :param output_path: 叠加图输出路径
+        :param cancel_event: 线程取消事件，用于断连时终止推理
         :return: 输出路径
         """
+        # === 步级终止检查 ===
+        if cancel_event and cancel_event.is_set():
+            logger.info("LesionExtractor: 任务已取消，终止视觉定位生成")
+            raise InterruptedError()
+        # ====================
+
         img_cv2 = cv2.imread(image_path)
         if img_cv2 is None:
             raise ValueError(f"无法读取图片: {image_path}")
@@ -36,7 +43,7 @@ class LesionExtractor:
 
         # ================= 核心占位逻辑：生成伪 Mask =================
         # 在图像中心生成一个椭圆形的高斯概率分布，模拟 U-Net 输出的概率图
-        center_x, center_y = w // 2, h // 2
+        center_x, center_y = w // 2, h // 3  # 稍微偏上，更符合常见皮肤病灶位置
         axes_length = (w // 3, h // 3)  # 椭圆长短轴
 
         # 创建空白 mask
@@ -53,6 +60,11 @@ class LesionExtractor:
         # ===========================================================
 
         # TODO: 未来替换为真实 U-Net 推理逻辑
+        # === 步级终止检查 (真实UNet推理前必须检查) ===
+        # if cancel_event and cancel_event.is_set():
+        #     logger.info("LesionExtractor: 任务已取消，终止UNet推理")
+        #     raise InterruptedError()
+        # ==============================================
         # input_tensor = self.transform(img_cv2).unsqueeze(0).to(self.device)
         # with torch.no_grad():
         #     pred_mask = self.model(input_tensor).squeeze().cpu().numpy()
