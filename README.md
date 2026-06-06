@@ -65,13 +65,15 @@
 
 ## 3. 关键工程实现与核心机制
 
+> **【架构演进说明】**：本节描述了多 Agent 协作管线的**完整目标架构**。当前合入主干的代码（阶段 8）已实现多模态任务驱动调度（`task_id`）、条件分支管线与 SSE 语义契约；但图像 Agent（当前高斯占位）、病历 Agent（当前透传）、化验 Agent（当前透传）及整合 Agent（当前 Mock 数据）的内部实质逻辑，将在阶段 9 进行算法替换与落地。依赖列表与目录结构已提前规划阶段 9 所需组件。
+
 ### 3.1 多 Agent 协作与多模态缺失兼容机制
 
 为解决初诊数据缺失与单模态推断局限的问题，系统将原有的图像单管线重构为以 `task_id` 驱动的多 Agent 协作管线。系统接收多模态数据（图像、病历文本/JSON、化验 JSON），各模态由独立 Agent 按需处理，最终由整合 Agent 融合输出，全程兼容数据缺失：
 
 1. **任务驱动与条件分支调度**：API 入口 (`/upload`) 接收任意组合的多模态数据并生成唯一的 `task_id`，将数据落库至扩展后的 `Task` 表。SSE 推理流 (`/stream/{task_id}`) 根据数据存在性按需触发子 Agent，无图像则跳过视觉定位，无化验则跳过规则引擎。**工程约束**：FastAPI 处理多模态表单时，文件字段必须显式使用 `Optional[UploadFile]` 类型注解，仅设置 `File(None)` 会被框架强制视为必填校验拦截请求，导致无图场景报 422 错误。
 2. **图像 Agent（视觉定位与形态提取）**：
-   - **病灶分割**：采用基于 ISIC 2018 训练的 EfficientNet-b0 UNet 模型（导出为 ONNX 格式，使用 `onnxruntime` CPU 推理，单张耗时 < 1 秒）。针对真实模型输出的离散假阳性噪声，工程层强制实施最大连通域提取（`cv2.connectedComponentsWithStats`），剔除微小噪声，生成精准的病灶掩码。最终输出病灶区域占比、大致位置及 Jet 色图热力图叠加。
+   - **病灶分割（目标架构）**：采用基于 ISIC 2018 训练的 EfficientNet-b0 UNet 模型（导出为 ONNX 格式，使用 `onnxruntime` CPU 推理，单张耗时 < 1 秒）。针对真实模型输出的离散假阳性噪声，工程层强制实施最大连通域提取（`cv2.connectedComponentsWithStats`），剔除微小噪声，生成精准的病灶掩码。最终输出病灶区域占比、大致位置及 Jet 色图热力图叠加。
    - **形态学结构化约束**：VLM 角色严格降级为“特征提取器”，通过 Prompt 强制其仅输出客观形态学特征（如边缘、色素网络），并经后置正则过滤剥离任何诊断性结论，确保视觉模块的客观性。
 3. **病历 Agent（Schema 解析双通道）**：支持结构化 JSON 直接映射，缺失字段填 `null`；对于自由文本，调用 DeepSeek API 基于 Few-shot Prompt 提取为标准 Schema（涵盖 demographics, lesion, history 等维度），LLM 提取失败时返回空 Schema 兜底，不阻塞后续流程。
 4. **化验 Agent（指南规则引擎与跨模态依赖）**：纯 Python 规则引擎实现，严格兼容空值判断。基于 Breslow 厚度、溃疡状态、LDH 等核心字段执行临床指南中的分期与分层逻辑。**跨模态依赖逻辑**：规则引擎支持跨 Agent 数据引用，例如在判定肢端型黑色素瘤附加建议时，需从病历 Agent 的输出中提取病灶位置，若该特征缺失则相关规则不触发。当核心分期字段缺失（如无 Breslow），规则引擎明确产出“无法分期，建议优先行皮肤活检明确浸润深度”的定向建议。
@@ -146,7 +148,7 @@ async def stream_diagnosis(request: Request, task_id: str):
 
 - **推理域数据模型扩展**：智能推理域 Python 端仅负责 ORM 映射与异步增删改查。为适配多模态接入，数据库表结构从单一的 `Image` 映射扩展为 `Task` 语义，新增 `clinical_text`、`clinical_json`、`lab_json` 等字段存储多模态上下文，`url` (图片路径) 字段允许为 `null` 以兼容无图场景，主键标识统一为 `task_id`。
 - **智能推理域 4C4G 低资源部署策略**：
-  1. **ONNX 替换 PyTorch 推理**：将 UNet 模型由 PyTorch 导出为 ONNX 格式，使用 `onnxruntime` 进行 CPU 推理。相比原 `torch==2.1.0+cpu` 方案，ONNX 运行时内存占用降低约 40%，单张推理耗时稳定在 1 秒内，彻底移除了对 PyTorch 重型依赖的内存压力。
+  1. **ONNX 替换 PyTorch 推理（目标架构）**：将 UNet 模型由 PyTorch 导出为 ONNX 格式，使用 `onnxruntime` 进行 CPU 推理。相比原 `torch==2.1.0+cpu` 方案，ONNX 运行时内存占用降低约 40%，单张推理耗时稳定在 1 秒内，彻底移除了对 PyTorch 重型依赖的内存压力。
   2. **容器与系统级限制**：宿主机配置 4GB Swap 虚拟内存防止系统 OOM；通过 `docker-compose.yml` 强制限制基础组件内存上限（MySQL 512M，Qdrant 512M），给 FastAPI 预留计算空间；FastAPI 服务仅开启 1 个 Worker。
 - **云端低资源环境部署约束**：
   1. **镜像基础版本约束**：因 `torch==2.1.0+cpu` 和 `transformers==4.36.1` 在 Python 3.12 下存在 API 兼容性断层，Dockerfile 基础镜像必须采用 `python:3.11-slim`。
@@ -175,11 +177,11 @@ DermaIntegrate/
 │   ├── models/                  # SQLAlchemy ORM 模型定义（Task多模态映射表）
 │   ├── agents/                  # Multi-Agent 交互逻辑
 │   │   ├── vlm_agent.py         # 图像Agent：VLM 形态学特征提取与降级策略
-│   │   ├── clinical_agent.py    # 病历Agent：结构化映射与 LLM 文本解析
-│   │   ├── lab_agent.py         # 化验Agent：基于指南的分期规则引擎与跨模态依赖
+│   │   ├── clinical_agent.py    # [阶段9规划] 病历Agent：结构化映射与 LLM 文本解析
+│   │   ├── lab_agent.py         # [阶段9规划] 化验Agent：基于指南的分期规则引擎与跨模态依赖
 │   │   └── integration_agent.py # 整合Agent：动态 Prompt 构建与结构化报告生成
-│   ├── cnn/                     # LesionExtractor (ONNX UNet) 与视觉定位逻辑
-│   │   └── unet_weights.onnx    # 真实 UNet 模型权重 (EfficientNet-b0)
+│   ├── cnn/                     # LesionExtractor (当前高斯占位，阶段9替换为 ONNX UNet) 与视觉定位逻辑
+│   │   └── unet_weights.onnx    # [阶段9规划] 真实 UNet 模型权重 (EfficientNet-b0)
 │   ├── rag/                     # SentenceTransformers + Qdrant 原生向量检索
 │   │   └── docs/                # 黑色素瘤指南知识库源文件 (强制 ID 标注)
 │   ├── api/                     # FastAPI 路由定义、SSE 流式输出与多模态调度
@@ -242,8 +244,10 @@ qdrant-client==1.18.0          # Qdrant 向量数据库客户端
 sentence-transformers==2.7.0   # 文本向量化模型加载
 transformers==4.36.1           # NLP 模型库
 opencv-python-headless==4.9.0.80 # 图像处理与掩膜叠加（Headless 版，Docker 无 GUI 依赖）
-onnxruntime==1.17.0            # 高性能 CPU 推理引擎 (替代 PyTorch 执行 UNet 推理)
-json-repair==0.25.0            # LLM 输出 JSON 结构修复库
+torch==2.1.0+cpu               # 当前占位所需，阶段9 ONNX替换后将移除
+torchvision==0.16.0+cpu        # 当前占位所需，阶段9 ONNX替换后将移除
+# onnxruntime==1.17.0          # [阶段9引入] 高性能 CPU 推理引擎 (替代 PyTorch 执行 UNet 推理)
+# json-repair==0.25.0          # [阶段9引入] LLM 输出 JSON 结构修复库
 SQLAlchemy==2.0.25             # ORM 映射
 aiomysql==0.2.0                # 异步 MySQL 驱动
 python-dotenv==1.0.0           # 环境变量配置加载
@@ -283,10 +287,10 @@ INTEGRATION_BASE_URL=https://api.deepseek.com
 INTEGRATION_MODEL=deepseek-v3
 
 # --- 降级开关配置 ---
-# 设为 true 时，将拦截真实 VLM 调用并返回预设 Mock 数据
-USE_MOCK_VLM=false
-# 设为 true 时，将拦截真实整合 LLM 调用并返回预设 Mock 结构化报告
-USE_MOCK_INTEGRATION=false
+# [当前主干状态] 必须设为 true！真实 Agent 算法(阶段9)尚未合入，关闭 Mock 将导致推理报错
+# 阶段 9 算法实质化落地后，方可改为 false
+USE_MOCK_VLM=true
+USE_MOCK_INTEGRATION=true
 
 # --- RAG 向量数据库配置 ---
 QDRANT_HOST=localhost
