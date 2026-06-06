@@ -34,6 +34,8 @@ from preprocessing.dicom_parser import DicomParser, DicomParseException
 # 新增阶段5 AI 管线导入
 from cnn.lesion_extractor import LesionExtractor
 from agents.vlm_agent import VLMAgent
+from agents.clinical_agent import parse_clinical_data  # 新增：病历 Agent
+from agents.lab_agent import evaluate_lab_data  # 新增：化验 Agent
 from rag.knowledge_base import RAGKnowledgeBase
 
 # 新增阶段6 自定义异常导入
@@ -231,21 +233,40 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
             morphology_dict = vlm_agent.analyze(original_image_path, evidence_path, cancel_event=cancel_event)
 
             image_result = {"image_url": evidence_url, "morphology": morphology_dict}
-            queue.put_nowait(("step", {"step": "image_done", "msg": "视觉定位与形态学完成", "data": image_result}))
+            queue.put_nowait(("step", {"step": "image_done", "message": "视觉定位与形态学完成", "data": image_result}))
 
-        # 2. 病历 Agent (按需触发，当前阶段直接回传原文或简单解析)
+        # 2. 病历 Agent 按需触发 (接入真实 LLM 解析)
         if clinical_json or clinical_text:
             if cancel_event.is_set(): raise InterruptedError()
-            # 阶段 8 骨架：直接将输入作为结果传递，阶段 9 替换为真实 Clinical Agent
-            clinical_result = {"raw_json": clinical_json, "raw_text": clinical_text}
-            queue.put_nowait(("step", {"step": "clinical_done", "msg": "病历结构化解析完成", "data": clinical_result}))
+            logger.info(f"Task {task_id}: Running Clinical Agent...")
 
-        # 3. 化验 Agent (按需触发，当前阶段直接回传原文或简单解析)
+            # 安全处理 clinical_json 的数据类型 (SQLAlchemy 可能返回 dict 或 str)
+            c_json_str = None
+            if clinical_json:
+                c_json_str = clinical_json if isinstance(clinical_json, str) else json.dumps(clinical_json)
+
+            clinical_result = parse_clinical_data(
+                clinical_json_str=c_json_str,
+                clinical_text=clinical_text
+            )
+            queue.put_nowait(
+                ("step", {"step": "clinical_done", "message": "病历结构化解析完成", "data": clinical_result}))
+
+        # 3. 化验 Agent 按需触发 (接入真实规则引擎与跨模态依赖)
         if lab_json:
             if cancel_event.is_set(): raise InterruptedError()
-            # 阶段 8 骨架：直接将输入作为结果传递，阶段 9 替换为真实 Lab Agent
-            clinical_result = {"raw_json": lab_json}
-            queue.put_nowait(("step", {"step": "lab_done", "msg": "化验规则引擎完成", "data": clinical_result}))
+            logger.info(f"Task {task_id}: Running Lab Agent...")
+
+            # 安全处理 lab_json 的数据类型 (化验 Agent 需要接收 dict)
+            lab_dict = lab_json if isinstance(lab_json, dict) else json.loads(lab_json)
+
+            # 跨模态依赖核心逻辑：从病历 Agent 的结果中提取病灶位置
+            lesion_location = None
+            if clinical_result and clinical_result.get("lesion"):
+                lesion_location = clinical_result.get("lesion", {}).get("location")
+
+            lab_result = evaluate_lab_data(lab_json=lab_dict, location_from_clinical=lesion_location)
+            queue.put_nowait(("step", {"step": "lab_done", "message": "化验规则引擎完成", "data": lab_result}))
 
         # 4. 整合 Agent (必触发)
         if cancel_event.is_set(): raise InterruptedError()
@@ -284,10 +305,10 @@ async def health(db: AsyncSession = Depends(get_db)):
 
 @app.post("/upload", status_code=202, response_model=UploadIngestResponse, tags=["Task"])
 async def upload_data(
-        file: Optional[UploadFile] = File(None),     # 必须加 Optional 才能真正可选！
-        clinical_text: str = Form(None),             # 新增：病历自由文本
-        clinical_json: str = Form(None),             # 新增：结构化病历 JSON 字符串
-        lab_json: str = Form(None),                  # 新增：化验数据 JSON 字符串
+        file: Optional[UploadFile] = File(None),  # 必须加 Optional 才能真正可选！
+        clinical_text: str = Form(None),  # 新增：病历自由文本
+        clinical_json: str = Form(None),  # 新增：结构化病历 JSON 字符串
+        lab_json: str = Form(None),  # 新增：化验数据 JSON 字符串
         db: AsyncSession = Depends(get_db)
 ):
     """多模态数据上传：接收图片、病历文本/JSON、化验JSON，统一生成 task_id"""
