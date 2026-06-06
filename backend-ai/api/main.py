@@ -36,6 +36,7 @@ from cnn.lesion_extractor import LesionExtractor
 from agents.vlm_agent import VLMAgent
 from agents.clinical_agent import parse_clinical_data  # 新增：病历 Agent
 from agents.lab_agent import evaluate_lab_data  # 新增：化验 Agent
+from agents.integration_agent import run_integration_agent  # 新增：整合 Agent (从独立模块导入)
 from rag.knowledge_base import RAGKnowledgeBase
 
 # 新增阶段6 自定义异常导入
@@ -110,34 +111,7 @@ class SSEResultEvent(BaseModel):
     status: str = "completed"
 
 
-# ==========================================
-# 整合 Agent 骨架与 Mock 机制 (阶段 8)
-# ==========================================
-def run_integration_agent(task_id: str, image_result: dict, clinical_result: dict, lab_result: dict,
-                          rag_passages: list):
-    """
-    整合 Agent：当前阶段走 Mock 逻辑，保障工程端联调。
-    后续阶段 9 会替换为真实 LLM 调用。
-    """
-    logger.info(f"Running MOCK Integration Agent for task: {task_id}")
-
-    # 根据 Prompt 是否缺失动态生成 Mock 提示
-    missing_modalities = []
-    if not image_result: missing_modalities.append("图像")
-    if not clinical_result: missing_modalities.append("病历")
-    if not lab_result: missing_modalities.append("化验")
-
-    risk_msg = "数据不足无法评估" if missing_modalities else "中危 (Mock)"
-    concern_text = f"缺乏{'、'.join(missing_modalities)}信息，建议完善相关检查" if missing_modalities else "Mock关注要点"
-
-    return SSEResultEvent(
-        task_id=task_id,
-        risk_level=risk_msg,
-        key_concerns=[KeyConcern(item=concern_text, source_id="R00")],
-        recommendations=[Recommendation(item="请完善相关检查 (Mock建议)", source_id="R00")],
-        differential=["Mock黑色素瘤", "Mock色素痣"],
-        disclaimer="本建议仅供辅助参考，最终诊断由执业医师结合临床判断"
-    )
+# (旧的 Mock run_integration_agent 函数已从此处删除，移至 agents/integration_agent.py)
 
 
 # ==========================================
@@ -268,13 +242,13 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
             lab_result = evaluate_lab_data(lab_json=lab_dict, location_from_clinical=lesion_location)
             queue.put_nowait(("step", {"step": "lab_done", "message": "化验规则引擎完成", "data": lab_result}))
 
-        # 4. 整合 Agent (必触发)
+        # 4. 整合 Agent (必触发，调用真实独立模块)
         if cancel_event.is_set(): raise InterruptedError()
-        # RAG 暂时不传给 Mock Agent，避免干扰
-        final_report = run_integration_agent(task_id, image_result, clinical_result, lab_result, [])
+        # RAG 暂时不传，避免干扰
+        final_report_dict = run_integration_agent(task_id, image_result, clinical_result, lab_result, [])
 
         # 管线执行成功，推送最终数据组装标记
-        queue.put_nowait(("final_data", final_report.model_dump()))
+        queue.put_nowait(("final_data", final_report_dict))  # 直接传 dict，不再 .model_dump()
 
     except InterruptedError:
         logger.info(f"Pipeline execution cancelled for task: {task_id}")

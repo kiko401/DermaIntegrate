@@ -45,9 +45,9 @@
 ② 服务与数据层（跨域协同）
   ├─ 智能推理域 Multi-Agent 协作管线：
   │   ├─ 图像 Agent：UNet (ONNX) 病灶分割提取 | VLM 结构化形态描述 (特征提取器)
-  │   ├─ 病历 Agent：结构化 JSON 映射 | LLM (DeepSeek) 自由文本 Schema 解析
+  │   ├─ 病历 Agent：结构化 JSON 映射 | LLM (DeepSeek) 自由文本 Schema 解析 (含防漂移自重试)
   │   ├─ 化验 Agent：基于指南的纯规则引擎 (跨模态依赖判定与防御性数据清洗)
-  │   └─ 整合 Agent：动态 Prompt 构建 | RAG 两阶段检索 | LLM 结构化报告生成与 JSON 修复
+  │   └─ 整合 Agent：动态 Prompt 构建 | RAG 两阶段检索 | LLM 结构化报告生成与 JSON 容错修复
   ├─ 应用平台域：患者临床视图聚合 | 主索引映射 | FHIR R4 协议接入 | AI 诊断异步代理
   ├─ 推理域数据核心：独立 MySQL 数据库 (Task 任务映射、多模态上下文存储)
   └─ 应用域数据核心：MySQL 8 (关系型业务数据存储)
@@ -65,7 +65,7 @@
 
 ## 3. 关键工程实现与核心机制
 
-> **【架构演进说明】**：本节描述了多 Agent 协作管线的核心机制。当前开发分支（阶段 9）已实现病历 Agent（基于 DeepSeek API 的双通道解析）与化验 Agent（含跨模态依赖与防御性清洗的规则引擎）的实质化落地；图像 Agent（当前高斯占位，待 UNet ONNX 替换）及整合 Agent（当前 Mock 数据，待真实 LLM 接入）将在后续阶段完成算法替换。
+> **【架构演进说明】**：当前开发分支（阶段 9）已实现病历 Agent（含语义漂移自重试机制的双通道解析）、化验 Agent（含跨模态依赖与防御性清洗的规则引擎）及整合 Agent（动态 Prompt 与真实 LLM 接入）的实质化落地；图像 Agent（当前高斯占位，待 UNet ONNX 替换）及 RAG（待专科知识库注入与两阶段检索升级）将在后续阶段完成。
 
 ### 3.1 多 Agent 协作与多模态缺失兼容机制
 
@@ -75,9 +75,9 @@
 2. **图像 Agent（视觉定位与形态提取）**：
    - **病灶分割（目标架构）**：采用基于 ISIC 2018 训练的 EfficientNet-b0 UNet 模型（导出为 ONNX 格式，使用 `onnxruntime` CPU 推理，单张耗时 < 1 秒）。针对真实模型输出的离散假阳性噪声，工程层强制实施最大连通域提取（`cv2.connectedComponentsWithStats`），剔除微小噪声，生成精准的病灶掩码。最终输出病灶区域占比、大致位置及 Jet 色图热力图叠加。
    - **形态学结构化约束**：VLM 角色严格降级为“特征提取器”，通过 Prompt 强制其仅输出客观形态学特征（如边缘、色素网络），并经后置正则过滤剥离任何诊断性结论，确保视觉模块的客观性。
-3. **病历 Agent（Schema 解析双通道）**：支持结构化 JSON 直接映射，缺失字段填 `null`；对于自由文本，调用 DeepSeek API（采用 `deepseek-v4-flash` 非思考模式，保证 JSON 格式稳定输出）基于 Few-shot Prompt 提取为标准 Schema（涵盖 demographics, lesion, history 等维度）。工程层实施防御性响应清洗（剥离 Markdown 代码块包裹），LLM 提取失败时返回空 Schema 兜底，不阻塞后续流程。
+3. **病历 Agent（Schema 解析双通道与防漂移机制）**：支持结构化 JSON 直接映射，缺失字段填 `null`；对于自由文本，调用 DeepSeek API（采用 `deepseek-v4-flash` 非思考模式，保证 JSON 格式稳定输出）基于 Few-shot Prompt 提取为标准 Schema。**防漂移自重试机制**：针对 LLM 常见的语义漂移（如将中文翻译为英文输出），工程层实施“带反馈的局部自重试”。首次提取后由规则引擎进行黑名单校验与结构校验，若不通过则将错误原因作为反馈拼入 Prompt 再次请求 LLM 修正；达到最大重试次数仍失败时返回空 Schema 兜底，确保管线不阻塞。
 4. **化验 Agent（指南规则引擎与跨模态依赖）**：纯 Python 规则引擎实现，严格兼容空值判断与 LLM 输出的不确定性。针对 LLM 提取的脏数据（如带单位的数字 `"2.5mm"`、非标布尔值 `"有"`、变体位置 `"左足底"`），引入防御性清洗函数（`_extract_float`, `_is_truthy`）与模糊匹配逻辑。**跨模态依赖逻辑**：规则引擎支持跨 Agent 数据引用，例如在判定肢端型黑色素瘤附加建议时，采用关键词模糊匹配从病历 Agent 的输出中提取病灶位置，若该特征缺失则相关规则静默不触发。当核心分期字段缺失（如无 Breslow），规则引擎明确产出“无法分期，建议优先行皮肤活检明确浸润深度”的定向建议。
-5. **整合 Agent（动态 Prompt 与结构化生成）**：接收各子 Agent 输出与 RAG 检索结果，执行动态 Prompt 构建。若某模态缺失，Prompt 将明确指示 LLM “未提供XXX，请在建议中优先考虑完善相关确诊检查”。**两阶段检索增强**：RAG 机制采用“多模态特征组合硬匹配筛选分类子集 + 向量模型精排 Top-3”的两阶段优化策略，提升专科指南召回的精准度与信噪比，且强制入库文本携带规范 ID（如 `[R01]`）以防幻觉。调用 DeepSeek API 强制 JSON 输出，并引入 `json-repair` 库对非标 JSON 进行运行时修复。API 异常时返回预设降级提示（含 disclaimer）。
+5. **整合 Agent（动态 Prompt 与结构化生成）**：接收各子 Agent 输出与 RAG 检索结果，执行动态 Prompt 构建。若某模态缺失，Prompt 将明确指示 LLM “未提供XXX，请在建议中优先考虑完善相关确诊检查”。调用 DeepSeek API 强制 JSON 输出，并引入 `json-repair` 库对非标 JSON 进行运行时修复。设置 15 秒超时中断防止长时阻塞，API 异常或修复失败时返回预设降级提示（含 disclaimer），保障前端契约的稳定交付。
 
 ### 3.2 主索引映射与标准协议的数据集成机制
 
@@ -177,7 +177,7 @@ DermaIntegrate/
 │   ├── models/                  # SQLAlchemy ORM 模型定义（Task多模态映射表）
 │   ├── agents/                  # Multi-Agent 交互逻辑
 │   │   ├── vlm_agent.py         # 图像Agent：VLM 形态学特征提取与降级策略
-│   │   ├── clinical_agent.py    # 病历Agent：结构化映射与 LLM (DeepSeek) 文本解析
+│   │   ├── clinical_agent.py    # 病历Agent：结构化映射与 LLM (DeepSeek) 文本解析 (含防漂移自重试)
 │   │   ├── lab_agent.py         # 化验Agent：基于指南的分期规则引擎与跨模态依赖
 │   │   └── integration_agent.py # 整合Agent：动态 Prompt 构建与结构化报告生成
 │   ├── cnn/                     # LesionExtractor (当前高斯占位，阶段9替换为 ONNX UNet) 与视觉定位逻辑
@@ -247,7 +247,7 @@ opencv-python-headless==4.9.0.80 # 图像处理与掩膜叠加（Headless 版，
 torch==2.1.0+cpu               # 当前占位所需，阶段9 ONNX替换后将移除
 torchvision==0.16.0+cpu        # 当前占位所需，阶段9 ONNX替换后将移除
 # onnxruntime==1.17.0          # [阶段9引入] 高性能 CPU 推理引擎 (替代 PyTorch 执行 UNet 推理)
-# json-repair==0.25.0          # [阶段9引入] LLM 输出 JSON 结构修复库
+json-repair==0.60.1            # LLM 输出 JSON 结构运行时修复库
 SQLAlchemy==2.0.25             # ORM 映射
 aiomysql==0.2.0                # 异步 MySQL 驱动
 python-dotenv==1.0.0           # 环境变量配置加载
@@ -287,10 +287,10 @@ INTEGRATION_BASE_URL=https://api.deepseek.com
 INTEGRATION_MODEL=deepseek-v4-flash
 
 # --- 降级开关配置 ---
-# [当前主干状态] 必须设为 true！真实 Agent 算法(阶段9)尚未合入，关闭 Mock 将导致推理报错
-# 阶段 9 算法实质化落地后，方可改为 false
+# 设为 true 时，将拦截真实 VLM 调用并返回预设 Mock 数据，便于前端联调或无网络环境测试
+# 当前阶段 9 病历/化验/整合 Agent 算法已实质化落地，设为 false 可调用真实 LLM
 USE_MOCK_VLM=true
-USE_MOCK_INTEGRATION=true
+USE_MOCK_INTEGRATION=false
 
 # --- RAG 向量数据库配置 ---
 QDRANT_HOST=localhost
