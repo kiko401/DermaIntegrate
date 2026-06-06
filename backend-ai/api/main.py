@@ -200,13 +200,22 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
 
             evidence_filename = f"{image_uid}_evidence.png"
             evidence_path = os.path.join(settings.STATIC_DIR, "heatmaps", evidence_filename)
-            lesion_extractor.generate(original_image_path, evidence_path, cancel_event=cancel_event)
+
+            # 核心修改：接收 generate 返回的特征字典
+            visual_features = lesion_extractor.generate(original_image_path, evidence_path, cancel_event=cancel_event)
             evidence_url = f"/ai-static/heatmaps/{evidence_filename}"
 
             if cancel_event.is_set(): raise InterruptedError()
             morphology_dict = vlm_agent.analyze(original_image_path, evidence_path, cancel_event=cancel_event)
 
-            image_result = {"image_url": evidence_url, "morphology": morphology_dict}
+            # 组装完整的图像结果
+            image_result = {
+                "image_url": evidence_url,
+                "morphology": morphology_dict,
+                # 将视觉特征注入，供整合 Agent 使用
+                "coverage": visual_features.get("coverage", 0) if visual_features else 0,
+                "location": visual_features.get("location", "未知") if visual_features else "未知"
+            }
             queue.put_nowait(("step", {"step": "image_done", "message": "视觉定位与形态学完成", "data": image_result}))
 
         # 2. 病历 Agent 按需触发 (接入真实 LLM 解析)
@@ -279,10 +288,10 @@ async def health(db: AsyncSession = Depends(get_db)):
 
 @app.post("/upload", status_code=202, response_model=UploadIngestResponse, tags=["Task"])
 async def upload_data(
-        file: Optional[UploadFile] = File(None),  # 必须加 Optional 才能真正可选！
-        clinical_text: str = Form(None),  # 新增：病历自由文本
-        clinical_json: str = Form(None),  # 新增：结构化病历 JSON 字符串
-        lab_json: str = Form(None),  # 新增：化验数据 JSON 字符串
+        file: Optional[UploadFile] = File(None),       # 必须加 Optional
+        clinical_text: Optional[str] = Form(None),     # 修复：必须使用 Optional[str]
+        clinical_json: Optional[str] = Form(None),     # 修复：必须使用 Optional[str]
+        lab_json: Optional[str] = Form(None),          # 修复：必须使用 Optional[str]
         db: AsyncSession = Depends(get_db)
 ):
     """多模态数据上传：接收图片、病历文本/JSON、化验JSON，统一生成 task_id"""

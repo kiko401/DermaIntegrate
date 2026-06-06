@@ -1,92 +1,141 @@
+import os
 import cv2
 import numpy as np
-import os
 import logging
+import onnxruntime as ort
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class LesionExtractor:
-    """
-    病灶视觉定位提取器。
-    当前版本：使用高斯模糊伪掩码作为占位符，验证工程管线。
-    未来版本：加载训练好的 U-Net 权重，执行精确的像素级分割推理。
-    """
-
     def __init__(self):
-        # TODO: 未来在这里加载 U-Net 模型权重
-        # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # self.model = UNet().to(self.device)
-        # self.model.load_state_dict(torch.load('unet_weights.pth'))
-        # self.model.eval()
-        logger.info("LesionExtractor initialized (Currently using MOCK Gaussian Mask).")
+        self.session = None
+        # 尝试加载 ONNX 模型
+        model_path = os.path.join(os.path.dirname(__file__), "unet_weights.onnx")
 
-    def generate(self, image_path: str, output_path: str, cancel_event=None) -> str:
-        """
-        提取病灶视觉证据并保存叠加图
-        :param image_path: 输入原图路径
-        :param output_path: 叠加图输出路径
-        :param cancel_event: 线程取消事件，用于断连时终止推理
-        :return: 输出路径
-        """
-        # === 步级终止检查 ===
-        if cancel_event and cancel_event.is_set():
-            logger.info("LesionExtractor: 任务已取消，终止视觉定位生成")
-            raise InterruptedError()
-        # ====================
+        if os.path.exists(model_path):
+            try:
+                # 针对 CPU 优化
+                sess_options = ort.SessionOptions()
+                sess_options.intra_op_num_threads = 2
+                sess_options.inter_op_num_threads = 1
+                self.session = ort.InferenceSession(model_path, sess_options=sess_options,
+                                                    providers=['CPUExecutionProvider'])
+                logger.info(f"Successfully loaded ONNX model from {model_path}")
+            except Exception as e:
+                logger.error(f"Failed to load ONNX model: {e}. Falling back to Gaussian placeholder.")
+                self.session = None
+        else:
+            logger.warning(f"ONNX model not found at {model_path}. Falling back to Gaussian placeholder.")
 
-        img_cv2 = cv2.imread(image_path)
-        if img_cv2 is None:
-            raise ValueError(f"无法读取图片: {image_path}")
+    def generate(self, input_path: str, output_path: str, cancel_event=None):
+        """生成病灶定位图与特征提取"""
+        if cancel_event and cancel_event.is_set(): raise InterruptedError()
 
-        h, w = img_cv2.shape[:2]
+        if self.session:
+            return self._generate_onnx(input_path, output_path, cancel_event)
+        else:
+            return self._generate_gaussian_placeholder(input_path, output_path, cancel_event)
 
-        # ================= 核心占位逻辑：生成伪 Mask =================
-        # 在图像中心生成一个椭圆形的高斯概率分布，模拟 U-Net 输出的概率图
-        center_x, center_y = w // 2, h // 3  # 稍微偏上，更符合常见皮肤病灶位置
-        axes_length = (w // 3, h // 3)  # 椭圆长短轴
+    def _generate_onnx(self, input_path: str, output_path: str, cancel_event=None):
+        """真实的 ONNX UNet 推理逻辑"""
+        try:
+            # 1. 读取并预处理原图
+            img = cv2.imread(input_path)
+            if img is None: raise ValueError(f"Failed to read image: {input_path}")
 
-        # 创建空白 mask
-        mask = np.zeros((h, w), dtype=np.float32)
+            orig_h, orig_w = img.shape[:2]
+            input_img = cv2.resize(img, (384, 384))
+            input_img = input_img.astype(np.float32) / 255.0
+            input_img = np.transpose(input_img, (2, 0, 1))  # HWC -> CHW
+            input_img = np.expand_dims(input_img, axis=0)  # Add batch dim
 
-        # 绘制一个粗椭圆作为基底
-        cv2.ellipse(mask, (center_x, center_y), axes_length, 0, 0, 360, 1.0, -1)
+            if cancel_event and cancel_event.is_set(): raise InterruptedError()
 
-        # 高斯模糊平滑边缘，模拟概率图的渐变
+            # 2. ONNX 推理
+            input_name = self.session.get_inputs()[0].name
+            output = self.session.run(None, {input_name: input_img})[0][0][0]  # 取出概率图
+
+            if cancel_event and cancel_event.is_set(): raise InterruptedError()
+
+            # 3. 后处理：Sigmoid -> 阈值 -> Resize回原尺寸
+            probs = 1 / (1 + np.exp(-output))  # Sigmoid
+            mask = (probs > 0.5).astype(np.uint8) * 255
+            mask_resized = cv2.resize(mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+
+            # 4. 最大连通域提取 (极重要：剔除离散假阳性噪声)
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_resized, connectivity=8)
+            if num_labels > 1:
+                # 找到面积最大的连通域 (排除背景0)
+                max_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+                final_mask = np.where(labels == max_label, 255, 0).astype(np.uint8)
+            else:
+                final_mask = mask_resized  # 如果没找到，用原mask
+
+            # 5. 特征计算 (新增输出)
+            total_pixels = orig_h * orig_w
+            lesion_pixels = np.sum(final_mask > 0)
+            coverage = lesion_pixels / total_pixels
+
+            # 计算重心确定位置 (上/下/左/右/中心)
+            location = "中心"
+            if lesion_pixels > 0:
+                cx, cy = centroids[max_label] if num_labels > 1 else (orig_w / 2, orig_h / 2)
+                rel_x, rel_y = cx / orig_w, cy / orig_h
+                if rel_y < 0.4:
+                    location = "上"
+                elif rel_y > 0.6:
+                    location = "下"
+                if rel_x < 0.4:
+                    location = "左" if rel_y >= 0.4 and rel_y <= 0.6 else "左上" if rel_y < 0.4 else "左下"
+                elif rel_x > 0.6:
+                    location = "右" if rel_y >= 0.4 and rel_y <= 0.6 else "右上" if rel_y < 0.4 else "右下"
+
+            # 6. 热力图叠加：Jet 色图 + 0.5 透明度叠加
+            colored_mask = cv2.applyColorMap(final_mask, cv2.COLORMAP_JET)
+            overlay = cv2.addWeighted(img, 0.5, colored_mask, 0.5, 0)
+
+            cv2.imwrite(output_path, overlay)
+
+            # 返回特征字典 (重要改造：不再只返回路径，而是返回结构化特征)
+            return {
+                "coverage": round(float(coverage), 4),
+                "location": location
+            }
+
+        except InterruptedError:
+            raise
+        except Exception as e:
+            logger.error(f"ONNX inference failed: {e}. Falling back to Gaussian.")
+            return self._generate_gaussian_placeholder(input_path, output_path, cancel_event)
+
+    def _generate_gaussian_placeholder(self, input_path: str, output_path: str, cancel_event=None):
+        """高斯模糊掩膜占位符逻辑 (降级兜底)"""
+        logger.warning("Using Gaussian placeholder for lesion extraction.")
+        img = cv2.imread(input_path)
+        if img is None:
+            raise ValueError(f"Failed to read image: {input_path}")
+
+        h, w = img.shape[:2]
+        mask = np.zeros(img.shape[:2], dtype=np.float32)
+
+        # 生成随机高斯椭圆
+        center = (int(w * 0.5), int(h * 0.5))
+        axes = (int(w * 0.3), int(h * 0.3))
+        cv2.ellipse(mask, center, axes, 0, 0, 360, 1.0, -1)
+
         mask = cv2.GaussianBlur(mask, (51, 51), 0)
+        mask = (mask * 255).astype(np.uint8)
 
-        # 二值化，设定阈值为 0.3，大于 0.3 的区域被认为是病灶
-        _, binary_mask = cv2.threshold(mask, 0.3, 1.0, cv2.THRESH_BINARY)
-        # ===========================================================
+        # 改为 Jet 色图叠加，与真实模型输出对齐
+        colored_mask = cv2.applyColorMap(mask, cv2.COLORMAP_JET)
+        overlay = cv2.addWeighted(img, 0.5, colored_mask, 0.5, 0)
 
-        # TODO: 未来替换为真实 U-Net 推理逻辑
-        # === 步级终止检查 (真实UNet推理前必须检查) ===
-        # if cancel_event and cancel_event.is_set():
-        #     logger.info("LesionExtractor: 任务已取消，终止UNet推理")
-        #     raise InterruptedError()
-        # ==============================================
-        # input_tensor = self.transform(img_cv2).unsqueeze(0).to(self.device)
-        # with torch.no_grad():
-        #     pred_mask = self.model(input_tensor).squeeze().cpu().numpy()
-        # binary_mask = (pred_mask > 0.5).astype(np.float32)
+        cv2.imwrite(output_path, overlay)
 
-        # 将 Mask 转为红色半透明蒙版叠加到原图
-        overlay = img_cv2.copy()
-        # 构建红色蒙版 (B=0, G=0, R=255)
-        red_overlay = np.zeros_like(img_cv2)
-        red_overlay[:, :, 2] = 255  # R通道
-
-        # 只在 mask 为 1 的区域叠加红色
-        mask_3channel = np.stack([binary_mask] * 3, axis=-1).astype(np.uint8)
-        overlay = cv2.bitwise_and(red_overlay, red_overlay, mask=mask_3channel[:, :, 0].astype(np.uint8))
-
-        # 加权混合原图和红色蒙版
-        alpha = 0.4  # 红色透明度
-        superimposed_img = cv2.addWeighted(img_cv2, 1, overlay, alpha, 0)
-
-        # 保存结果
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        cv2.imwrite(output_path, superimposed_img)
-
-        logger.info(f"Lesion evidence image generated and saved to: {output_path}")
-        return output_path
+        # 兜底时返回占位特征
+        return {
+            "coverage": 0.25,
+            "location": "中心"
+        }
