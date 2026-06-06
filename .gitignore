@@ -1,4 +1,4 @@
-# Python
+# =============== Python 编译与虚拟环境 ===============
 __pycache__/
 *.py[cod]
 *$py.class
@@ -7,22 +7,26 @@ __pycache__/
 env/
 *.egg-info/
 
-# 环境配置（包含密码，不提交）
+# =============== 环境配置（包含密码密钥，严禁提交） ===============
 .env
 
-# 运行时生成的文件（不上传大文件和生成物）
+# =============== 运行时生成的文件 ===============
+# 用户上传的原始文件和 AI 生成的图片绝对不能进 Git 仓库
 backend-ai/uploads/
-backend-ai/static/images/
-backend-ai/static/heatmaps/
+backend-ai/static/
 
-# IDE
+# =============== 阶段性测试与临时脚本 ===============
+backend-ai/test_*.py
+backend-ai/test_data/
+backend-ai/diagnose_color.py
+backend-ai/test_sse.html
+
+# =============== IDE 与编辑器配置 ===============
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# 系统文件
+# =============== 操作系统生成文件 ===============
 .DS_Store
 Thumbs.db
-
-__pycache__/
