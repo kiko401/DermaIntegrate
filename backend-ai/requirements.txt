@@ -5,8 +5,13 @@ pydantic==2.5.0
 aiofiles==23.2.1
 pydicom==3.0.2
 Pillow==12.2.0
-numpy==2.4.6
+numpy==1.26.2
 httpx==0.28.1
-openai==2.41.0
+openai==2.40.0
 qdrant-client==1.18.0
-sentence-transformers==5.5.1
+sentence-transformers==2.7.0
+transformers==4.36.1  # 显式固定版本，防止pip拉取4.5x+导致与torch 2.1.0不兼容
+opencv-python-headless==4.9.0.80
+SQLAlchemy==2.0.25
+aiomysql==0.2.0
+python-dotenv==1.0.0
