@@ -13,8 +13,10 @@ class RAGKnowledgeBase:
         # 加载本地向量化模型
         self.embedder = SentenceTransformer('BAAI/bge-small-zh-v1.5')
 
-        # 使用 Qdrant 内存模式，无需启动 Docker，非常适合当前开发测试
-        self.client = QdrantClient(":memory:")
+        # 切换 Qdrant 连接逻辑：Docker 环境连接容器名，本地连接 localhost
+        qdrant_host = "qdrant" if os.getenv("DOCKER_ENV") == "true" else "localhost"
+        self.client = QdrantClient(host=qdrant_host, port=6333)
+
         self.collection_name = "derma_knowledge"
         self.docs_dir = docs_dir
 

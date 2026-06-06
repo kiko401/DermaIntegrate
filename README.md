@@ -1,7 +1,7 @@
 # DermaIntegrate: 皮肤病多源数据集成与智能辅助诊断系统
 
 **许可协议**：MIT License 
-**运行环境**：Python 3.12+ / Java 17+ (Spring Boot 3.x+) / Node 18+ 
+**运行环境**：Python 3.11 / Java 17+ (Spring Boot 3.x+) / Node 18+ 
 **系统架构**：基于 API 契约的模块解耦，推理服务与应用服务进程级隔离与独立部署
 
 ---
@@ -60,7 +60,7 @@
 
 1. **特征提取与显著性视觉定位生成**：当前阶段采用 `LesionExtractor` 类实现视觉定位。针对预训练 ResNet50 的 Grad-CAM 在非专科数据上热力图缺乏医学意义的问题，系统当前使用高斯模糊掩膜作为占位符，生成红色半透明椭圆覆盖图，为后续自训练 UNet 预留了标准的 `generate(input_path, output_path)` 接口。替换真实 UNet 权重后，将输出精确的病灶分割掩码叠加图，提供客观视觉定位。
 2. **形态学结构化约束与诊断结论剥离**：将定位图与原图共同输入视觉语言模型（DeepSeek-VL2）。为规避生成式模型无约束推断带来的事实偏移，系统通过 Prompt 设计强制模型输出 JSON 格式的形态学描述（如边缘不规则、色素网络变异等）。此外，工程解析层实现正则过滤方法（`_filter_diagnosis`），剥离模型输出中夹带在描述字段内的诊断性陈述，确保形态描述的客观性。
-3. **RAG 文献补充与辅助证据链构建**：因 `llama-index` 最新版与 Python 3.12 及 `pydantic 2.5` 存在依赖冲突，系统采用 `SentenceTransformers` + `qdrant-client` 原生实现 RAG 检索。利用 `BAAI/bge-small-zh-v1.5` 模型将查询向量化，从 Qdrant 向量知识库中召回相关医学文献片段并拼接上下文。系统最终交付医生的辅助视图包含：原图、定位标注图、客观形态描述、文献参考。
+3. **RAG 文献补充与辅助证据链构建**：因 `llama-index` 最新版与 Python 3.11 及 `pydantic 2.5` 存在依赖冲突，系统采用 `SentenceTransformers` + `qdrant-client` 原生实现 RAG 检索。利用 `BAAI/bge-small-zh-v1.5` 模型将查询向量化，从 Qdrant 向量知识库中召回相关医学文献片段并拼接上下文。系统最终交付医生的辅助视图包含：原图、定位标注图、客观形态描述、文献参考。
 4. **证据链完整性校验与降级策略**：在工程逻辑层，系统强制校验证据组件的存在性。若视觉定位生成失败或 RAG 无有效文献支撑，系统判定证据链断裂，抛出 `DiagnosisUncertainException` 异常，前端执行降级提示。同时，针对 VLM API 不可用或超时的场景，系统实现降级开关（读取环境变量 `USE_MOCK_VLM`），当开关开启或 API 调用异常时，自动捕获错误并返回预设的 Mock JSON，保障基础流程的连贯性。
 
 ### 3.2 主索引映射与标准协议的数据集成机制
@@ -202,19 +202,25 @@ cd DermaIntegrate
 <summary>核心依赖与版本控制</summary>
 
 ```text
-# 智能推理域 Python 核心依赖 (Python 3.12+)
-# 注意：torch 需在 Dockerfile 中单独安装 CPU 版本，不写入 requirements.txt
+# 智能推理域 Python 核心依赖 (Python 3.11)
+# ⚠️ 注意：torch 与 torchvision 需在 Dockerfile 中单独安装 CPU 版本，严禁写入 requirements.txt
 fastapi==0.109.0               # 异步 Web 框架
-uvicorn==0.27.0                # ASGI 服务器
-qdrant-client==1.18.0          # Qdrant 向量数据库客户端
-sentence-transformers==2.3.1   # 文本向量化模型加载
-pydicom==2.4.3                 # DICOM 医学影像解析与元数据提取
-Pillow==10.1.0                 # 图像处理与色彩空间转换
-numpy==1.26.2                  # 数值计算与像素归一化
+uvicorn[standard]==0.27.0      # ASGI 服务器
+python-multipart==0.0.6        # 表单处理
+pydantic==2.5.0                # 数据校验
+aiofiles==23.2.1               # 异步文件操作
+pydicom==3.0.2                 # DICOM 医学影像解析与元数据提取
+Pillow==12.2.0                 # 图像处理与色彩空间转换
+numpy==1.26.2                  # 数值计算与像素归一化（必须<=1.26.x以兼容 torch 2.1.0）
 httpx==0.28.1                  # 异步 HTTP 客户端 (用于离线摄取)
-openai>=1.0.0                  # DeepSeek API 兼容客户端依赖
+openai==2.40.0                 # DeepSeek API 兼容客户端依赖
+qdrant-client==1.18.0          # Qdrant 向量数据库客户端
+sentence-transformers==2.7.0   # 文本向量化模型加载（降级以兼容 torch 2.1.0）
+transformers==4.36.1           # NLP 模型库（显式固定，防止 5.x 与 torch 2.1.0 底层 API 不兼容）
+opencv-python-headless==4.9.0.80 # 图像处理与掩膜叠加（Headless 版，Docker 无 GUI 依赖）
+SQLAlchemy==2.0.25             # ORM 映射
+aiomysql==0.2.0                # 异步 MySQL 驱动
 python-dotenv==1.0.0           # 环境变量配置加载
-opencv-python==4.9.0.80        # 图像处理与掩膜叠加
 
 # 应用平台域 Java 核心依赖 (基于 Spring Boot 3.x)
 org.springframework.boot:spring-boot-starter-webflux    # 响应式非阻塞 WebClient
@@ -226,6 +232,7 @@ mysql:8.0                      # 关系型数据库
 qdrant/qdrant:latest           # 向量数据库
 redis:7                        # 分布式缓存（应用域使用）
 ```
+
 ### 5.2 参数配置
 
 在启动服务前，需在相关模块配置必要参数：
