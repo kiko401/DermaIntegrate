@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List
 
-from fastapi import FastAPI, Request, UploadFile, File, Form, Depends
+from fastapi import FastAPI, Request, UploadFile, File, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================
-# Pydantic 模型定义 (严格对齐 api-contract.yaml)
+# Pydantic 模型定义 (严格对齐 v2.0 契约)
 # ==========================================
 class ErrorResponse(BaseModel):
     error: str
@@ -60,11 +60,7 @@ class ErrorResponse(BaseModel):
 
 class UploadIngestResponse(BaseModel):
     task_id: str
-    image_uid: str
-    filename: Optional[str] = None
-    content_type: Optional[str] = None
     status: str
-    message: str
 
 
 class IngestRequest(BaseModel):
@@ -82,7 +78,7 @@ class DicomTags(BaseModel):
 class ImageMetadataResponse(BaseModel):
     image_uid: str
     format: str = "PNG"
-    url: Optional[str] = None  # 修改：DICOM可能为null
+    url: Optional[str] = None
     status: str
     error_message: Optional[str] = None
     width: Optional[int] = None
@@ -91,39 +87,55 @@ class ImageMetadataResponse(BaseModel):
     original_dicom_tags: Optional[DicomTags] = None
 
 
-class VisualEvidence(BaseModel):
-    heatmap_url: str
-    image_url: str
-    lesion_region: List[int] = Field(..., min_length=4, max_length=4)
+# ===== 新增多模态结构化报告模型 =====
+class KeyConcern(BaseModel):
+    item: str
+    source_id: str
 
 
-class Morphology(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    border: str
-    pigment_network: str
-    color_distribution: str
-    diameter: Optional[str] = None
-    symmetry: Optional[str] = None
-    vascular_pattern: Optional[str] = None
-
-
-class RagCitation(BaseModel):
-    title: str
-    source: Optional[str] = None
-    relevance: float
-    excerpt: Optional[str] = None
+class Recommendation(BaseModel):
+    item: str
+    source_id: str
 
 
 class SSEResultEvent(BaseModel):
     task_id: str
-    image_uid: str
-    visual_evidence: VisualEvidence
-    morphology: Morphology
-    rag_citations: List[RagCitation]
-    confidence: float
-    status: str = "completed"
+    risk_level: str
+    key_concerns: List[KeyConcern]
+    recommendations: List[Recommendation]
+    differential: List[str]
     disclaimer: str
-    completed_at: str
+    status: str = "completed"
+
+
+# ==========================================
+# 整合 Agent 骨架与 Mock 机制 (阶段 8)
+# ==========================================
+def run_integration_agent(task_id: str, image_result: dict, clinical_result: dict, lab_result: dict,
+                          rag_passages: list):
+    """
+    整合 Agent：当前阶段走 Mock 逻辑，保障工程端联调。
+    后续阶段 9 会替换为真实 LLM 调用。
+    """
+    logger.info(f"Running MOCK Integration Agent for task: {task_id}")
+
+    # 根据 Prompt 是否缺失动态生成 Mock 提示
+    missing_modalities = []
+    if not image_result: missing_modalities.append("图像")
+    if not clinical_result: missing_modalities.append("病历")
+    if not lab_result: missing_modalities.append("化验")
+
+    risk_msg = "数据不足无法评估" if missing_modalities else "中危 (Mock)"
+    concern_text = f"缺乏{'、'.join(missing_modalities)}信息，建议完善相关检查" if missing_modalities else "Mock关注要点"
+
+    return SSEResultEvent(
+        task_id=task_id,
+        risk_level=risk_msg,
+        key_concerns=[KeyConcern(item=concern_text, source_id="R00")],
+        recommendations=[Recommendation(item="请完善相关检查 (Mock建议)", source_id="R00")],
+        differential=["Mock黑色素瘤", "Mock色素痣"],
+        disclaimer="本建议仅供辅助参考，最终诊断由执业医师结合临床判断"
+    )
 
 
 # ==========================================
@@ -158,7 +170,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="DermaIntegrate AI Backend",
-    description="智能推理域 API，严格遵循 api-contract.yaml",
+    description="智能推理域 API，严格遵循 v2.0 契约",
     lifespan=lifespan,
 )
 
@@ -196,50 +208,52 @@ def create_error_response(status_code: int, error: str, error_code: str, message
     )
 
 
-def run_pipeline_with_cancel(task_id: str, image_uid: str, original_image_path: str, img_record_url: str,
+def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_image_path: Optional[str],
+                             clinical_text: Optional[str], clinical_json: Optional[str], lab_json: Optional[str],
                              cancel_event: threading.Event, queue: asyncio.Queue, rag_kb: RAGKnowledgeBase):
     """
-    可取消的同步推理管线包装，在独立子线程中执行。
-    通过 queue 推送中间步级状态，实现真正的流式输出。
+    可取消的多模态推理管线包装，在独立子线程中执行。
+    支持按需触发模态 Agent，并推送语义化步级状态。
     """
+    image_result, clinical_result, lab_result = None, None, None
+
     try:
-        # Step 1: 视觉依据 - 调用 LesionExtractor
-        if cancel_event.is_set(): raise InterruptedError()
-        evidence_filename = f"{image_uid}_evidence.png"
-        evidence_path = os.path.join(settings.STATIC_DIR, "heatmaps", evidence_filename)
-        lesion_extractor.generate(original_image_path, evidence_path, cancel_event=cancel_event)
-        evidence_url = f"/ai-static/heatmaps/{evidence_filename}"
-        # 推送 Step 1 状态及产出物
-        queue.put_nowait(("step", {"step": 1, "stage": "gradcam", "msg": "视觉定位完成", "progress": 0.4,
-                                   "data": {"image_url": evidence_url}}))
+        # 1. 图像 Agent (按需触发)
+        if image_uid and original_image_path:
+            if cancel_event.is_set(): raise InterruptedError()
 
-        # Step 2: 形态描述 - 调用 VLMAgent
-        if cancel_event.is_set(): raise InterruptedError()
-        morphology_dict = vlm_agent.analyze(original_image_path, evidence_path, cancel_event=cancel_event)
-        # 推送 Step 2 状态及产出物
-        queue.put_nowait(("step", {"step": 2, "stage": "vlm_analysis", "msg": "形态学分析完成", "progress": 0.6,
-                                   "data": morphology_dict}))
+            evidence_filename = f"{image_uid}_evidence.png"
+            evidence_path = os.path.join(settings.STATIC_DIR, "heatmaps", evidence_filename)
+            lesion_extractor.generate(original_image_path, evidence_path, cancel_event=cancel_event)
+            evidence_url = f"/ai-static/heatmaps/{evidence_filename}"
 
-        # Step 3: 文献检索 - 调用 RAGKnowledgeBase
-        if cancel_event.is_set(): raise InterruptedError()
-        query_text = " ".join([f"{k}:{v}" for k, v in morphology_dict.items()])
-        rag_results = rag_kb.retrieve(query_text, top_k=2)
-        # 推送 Step 3 状态及产出物
-        queue.put_nowait(("step", {"step": 3, "stage": "rag_retrieval", "msg": "检索相关医学文献完成", "progress": 0.8,
-                                   "data": {"citations": rag_results}}))
+            if cancel_event.is_set(): raise InterruptedError()
+            morphology_dict = vlm_agent.analyze(original_image_path, evidence_path, cancel_event=cancel_event)
 
-        # 校验逻辑
-        if not morphology_dict or not rag_results:
-            raise DiagnosisUncertainException("证据链断裂：缺乏足够的形态学或文献依据")
+            image_result = {"image_url": evidence_url, "morphology": morphology_dict}
+            queue.put_nowait(("step", {"step": "image_done", "msg": "视觉定位与形态学完成", "data": image_result}))
+
+        # 2. 病历 Agent (按需触发，当前阶段直接回传原文或简单解析)
+        if clinical_json or clinical_text:
+            if cancel_event.is_set(): raise InterruptedError()
+            # 阶段 8 骨架：直接将输入作为结果传递，阶段 9 替换为真实 Clinical Agent
+            clinical_result = {"raw_json": clinical_json, "raw_text": clinical_text}
+            queue.put_nowait(("step", {"step": "clinical_done", "msg": "病历结构化解析完成", "data": clinical_result}))
+
+        # 3. 化验 Agent (按需触发，当前阶段直接回传原文或简单解析)
+        if lab_json:
+            if cancel_event.is_set(): raise InterruptedError()
+            # 阶段 8 骨架：直接将输入作为结果传递，阶段 9 替换为真实 Lab Agent
+            clinical_result = {"raw_json": lab_json}
+            queue.put_nowait(("step", {"step": "lab_done", "msg": "化验规则引擎完成", "data": clinical_result}))
+
+        # 4. 整合 Agent (必触发)
+        if cancel_event.is_set(): raise InterruptedError()
+        # RAG 暂时不传给 Mock Agent，避免干扰
+        final_report = run_integration_agent(task_id, image_result, clinical_result, lab_result, [])
 
         # 管线执行成功，推送最终数据组装标记
-        queue.put_nowait(("final_data", {
-            "image_uid": image_uid,
-            "evidence_url": evidence_url,
-            "img_record_url": img_record_url,
-            "morphology_dict": morphology_dict,
-            "rag_results": rag_results
-        }))
+        queue.put_nowait(("final_data", final_report.model_dump()))
 
     except InterruptedError:
         logger.info(f"Pipeline execution cancelled for task: {task_id}")
@@ -268,115 +282,111 @@ async def health(db: AsyncSession = Depends(get_db)):
         return {"service": "backend-ai", "status": "DEGRADED", "db": "disconnected"}
 
 
-@app.post("/upload", status_code=202, response_model=UploadIngestResponse, tags=["Image"])
-async def upload_image(
-        file: UploadFile = File(...),
-        patient_id: Optional[str] = Form(None),
-        study_uid: Optional[str] = Form(None),
+@app.post("/upload", status_code=202, response_model=UploadIngestResponse, tags=["Task"])
+async def upload_data(
+        file: Optional[UploadFile] = File(None),     # 必须加 Optional 才能真正可选！
+        clinical_text: str = Form(None),             # 新增：病历自由文本
+        clinical_json: str = Form(None),             # 新增：结构化病历 JSON 字符串
+        lab_json: str = Form(None),                  # 新增：化验数据 JSON 字符串
         db: AsyncSession = Depends(get_db)
 ):
-    """上传影像：所有文件先落 uploads/，普通图片复制到 static/images/，DICOM转码后存入"""
+    """多模态数据上传：接收图片、病历文本/JSON、化验JSON，统一生成 task_id"""
+
+    # 1. 校验：至少要有一个数据传入
+    if not file and not clinical_text and not clinical_json and not lab_json:
+        raise HTTPException(status_code=400, detail="至少需要提供一项模态数据 (图片、病历或化验)")
+
     task_id = str(uuid.uuid4())
-    image_uid = f"img_{uuid.uuid4().hex[:16]}"
+    image_uid = None  # 默认无图片
 
-    content = await file.read()
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if not ext:
-        ext = ".png"
-
-    # 1. 所有原始文件先落 uploads/（原始文件保全）
-    raw_filename = f"{image_uid}_{file.filename or 'unknown'}"
-    raw_path = os.path.join(settings.UPLOAD_DIR, raw_filename)
-    with open(raw_path, "wb") as f:
-        f.write(content)
-
-    # 2. 判断类型，决定路由
-    is_dicom = file.content_type == "application/dicom" or ext == ".dcm"
-
-    # 初始化入库所需的变量
-    img_status = "processing"
+    # 2. 文件处理逻辑 (仅当 file 存在时执行)
+    img_status = "ready"  # 如果没有图片，默认 ready
     img_url = None
-    img_format = ext.lstrip(".").upper() if ext else "PNG"
+    img_format = None
     img_width = None
     img_height = None
     dicom_tags_json = None
     error_msg = None
 
-    if is_dicom:
-        img_format = "DICOM"
-        try:
-            # 调用 DicomParser 进行同步转码
-            parser = DicomParser(raw_path)
+    if file:
+        image_uid = f"img_{uuid.uuid4().hex[:16]}"
+        content = await file.read()
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        if not ext: ext = ".png"
 
-            # 转码并保存到 static/images/
-            static_filename = f"{image_uid}.png"
+        # 原始文件落盘
+        raw_filename = f"{image_uid}_{file.filename or 'unknown'}"
+        raw_path = os.path.join(settings.UPLOAD_DIR, raw_filename)
+        with open(raw_path, "wb") as f:
+            f.write(content)
+
+        # 判断类型，决定路由
+        is_dicom = file.content_type == "application/dicom" or ext == ".dcm"
+        img_status = "processing"  # 有图片时，状态先置为处理中
+
+        if is_dicom:
+            img_format = "DICOM"
+            try:
+                parser = DicomParser(raw_path)
+                static_filename = f"{image_uid}.png"
+                static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
+                img = parser.save_as_png(static_path)
+
+                img_status = "ready"
+                img_url = f"/ai-static/images/{static_filename}"
+                img_format = "PNG"
+                img_width = img.width
+                img_height = img.height
+                dicom_tags_json = parser.metadata_dict
+            except DicomParseException as e:
+                img_status = "failed"
+                error_msg = str(e)
+        else:
+            static_filename = f"{image_uid}{ext}"
             static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
-            img = parser.save_as_png(static_path)
+            shutil.copy(raw_path, static_path)
 
-            # 转码成功，更新状态和字段
             img_status = "ready"
             img_url = f"/ai-static/images/{static_filename}"
-            img_format = "PNG"  # 转码后格式变为PNG
-            img_width = img.width
-            img_height = img.height
-            dicom_tags_json = parser.metadata_dict
+            img_format = ext.lstrip(".").upper()
+            img_width = 1024  # 兜底值
+            img_height = 768
 
-            logger.info(f"DICOM 转码成功: image_uid={image_uid}")
+        # 图片入库
+        image = ImageDB(
+            image_uid=image_uid,
+            task_id=task_id,
+            format=img_format,
+            url=img_url,
+            status=img_status,
+            error_message=error_msg,
+            width=img_width,
+            height=img_height,
+            original_dicom_tags=dicom_tags_json,
+            created_at=datetime.now(timezone.utc)
+        )
+        db.add(image)
 
-        except DicomParseException as e:
-            # 转码失败，记录错误，状态标记为 failed
-            img_status = "failed"
-            error_msg = str(e)
-            logger.error(f"DICOM 转码失败: image_uid={image_uid}, error={e}")
-    else:
-        # 普通图片：复制到 static/images/，直接可访问
-        static_filename = f"{image_uid}{ext}"
-        static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
-        shutil.copy(raw_path, static_path)
-
-        img_status = "ready"
-        img_url = f"/ai-static/images/{static_filename}"
-        # 普通图片暂不获取真实宽高，阶段5用PIL读取替换
-        img_width = 1024
-        img_height = 768
-
-    # 3. 入库
+    # 3. 任务入库 (包含多模态上下文)
     task = TaskDB(
         task_id=task_id,
         image_uid=image_uid,
         status="queued",
+        clinical_text=clinical_text,
+        clinical_json=clinical_json,
+        lab_json=lab_json,
         created_at=datetime.now(timezone.utc)
     )
     db.add(task)
-
-    image = ImageDB(
-        image_uid=image_uid,
-        task_id=task_id,
-        format=img_format,
-        url=img_url,
-        status=img_status,
-        error_message=error_msg,
-        width=img_width,
-        height=img_height,
-        original_dicom_tags=dicom_tags_json,
-        created_at=datetime.now(timezone.utc)
-    )
-    db.add(image)
     await db.commit()
 
-    logger.info(f"Upload accepted: task_id={task_id}, image_uid={image_uid}, status={img_status}")
+    logger.info(
+        f"Upload accepted: task_id={task_id}, image_uid={image_uid}, has_clinical={bool(clinical_json or clinical_text)}, has_lab={bool(lab_json)}")
 
-    return UploadIngestResponse(
-        task_id=task_id,
-        image_uid=image_uid,
-        filename=file.filename,
-        content_type=file.content_type or "application/octet-stream",
-        status="accepted",
-        message="影像已接收，预处理启动中" if is_dicom else "影像已就绪"
-    )
+    return UploadIngestResponse(task_id=task_id, status="accepted")
 
 
-@app.post("/ingest", status_code=202, response_model=UploadIngestResponse, tags=["Image"])
+@app.post("/ingest", status_code=202, response_model=UploadIngestResponse, tags=["Task"])
 async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
     """离线摄取：下载URL资源，执行DICOM转码并入库"""
     task_id = str(uuid.uuid4())
@@ -390,26 +400,21 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
     img_height = None
     dicom_tags_json = None
     error_msg = None
-    raw_path = None
 
     try:
-        # 1. 异步下载文件
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(req.image_source)
-            response.raise_for_status()  # 检查HTTP状态码
+            response.raise_for_status()
             content = response.content
 
-        # 2. 原始文件落盘 uploads/
         ext = os.path.splitext(req.image_source)[1].lower() or ".dcm"
         raw_filename = f"{image_uid}_ingest{ext}"
         raw_path = os.path.join(settings.UPLOAD_DIR, raw_filename)
         with open(raw_path, "wb") as f:
             f.write(content)
 
-        # 3. 执行 DICOM 转码 (复用 DicomParser 逻辑)
         try:
             parser = DicomParser(raw_path)
-
             static_filename = f"{image_uid}.png"
             static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
             img = parser.save_as_png(static_path)
@@ -420,21 +425,14 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
             img_width = img.width
             img_height = img.height
             dicom_tags_json = parser.metadata_dict
-
-            logger.info(f"Ingest DICOM 转码成功: image_uid={image_uid}")
-
         except DicomParseException as e:
             img_status = "failed"
             error_msg = str(e)
-            logger.error(f"Ingest DICOM 转码失败: image_uid={image_uid}, error={e}")
 
     except httpx.HTTPError as e:
-        # 下载失败处理
         img_status = "failed"
         error_msg = f"文件下载失败: {str(e)}"
-        logger.error(f"Ingest 下载失败: source={req.image_source}, error={e}")
 
-    # 4. 入库
     task = TaskDB(
         task_id=task_id,
         image_uid=image_uid,
@@ -450,7 +448,7 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
         url=img_url,
         status=img_status,
         error_message=error_msg,
-        width=img_width if img_width else 1024,  # 兜底默认值
+        width=img_width if img_width else 1024,
         height=img_height if img_height else 768,
         original_dicom_tags=dicom_tags_json,
         created_at=datetime.now(timezone.utc)
@@ -458,16 +456,7 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
     db.add(image)
     await db.commit()
 
-    logger.info(f"Ingest task created: task_id={task_id}, source={req.image_source}, status={img_status}")
-
-    return UploadIngestResponse(
-        task_id=task_id,
-        image_uid=image_uid,
-        filename=req.image_source.split("/")[-1],
-        content_type="application/dicom",
-        status="accepted",
-        message="摄取任务已接受，DICOM解析启动中"
-    )
+    return UploadIngestResponse(task_id=task_id, status="accepted")
 
 
 @app.get("/images/{image_uid}", response_model=ImageMetadataResponse, tags=["Image"])
@@ -503,22 +492,27 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
     if not task:
         return create_error_response(404, "NotFound", "TASK_NOT_FOUND", "task_id 不存在")
 
+    # 获取多模态上下文
     image_uid = task.image_uid
+    clinical_text = task.clinical_text
+    clinical_json = task.clinical_json
+    lab_json = task.lab_json
+
     task.status = "running"
     await db.commit()
 
-    # 获取图像信息
-    img_result = await db.execute(select(ImageDB).where(ImageDB.image_uid == image_uid))
-    img_record = img_result.scalar_one_or_none()
+    # 获取图像物理路径 (如果有)
+    original_image_path = None
+    if image_uid:
+        img_result = await db.execute(select(ImageDB).where(ImageDB.image_uid == image_uid))
+        img_record = img_result.scalar_one_or_none()
 
-    if not img_record or not img_record.url:
-        return create_error_response(400, "Bad Request", "IMAGE_NOT_READY", "影像尚未准备就绪")
+        if not img_record or not img_record.url or img_record.status != "ready":
+            return create_error_response(400, "Bad Request", "IMAGE_NOT_READY", "影像尚未准备就绪或处理失败")
 
-    # 构建绝对路径 (从 url 转换)
-    relative_path = img_record.url.replace("/ai-static/", "")
-    original_image_path = os.path.join(settings.STATIC_DIR, relative_path)
+        relative_path = img_record.url.replace("/ai-static/", "")
+        original_image_path = os.path.join(settings.STATIC_DIR, relative_path)
 
-    # 获取 RAG 实例
     rag_kb = request.app.state.rag_kb
 
     async def event_generator():
@@ -528,73 +522,53 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
         # 启动子线程执行耗时推理管线
         inference_thread = threading.Thread(
             target=run_pipeline_with_cancel,
-            args=(task_id, image_uid, original_image_path, img_record.url, cancel_event, queue, rag_kb),
+            args=(task_id, image_uid, original_image_path,
+                  clinical_text, clinical_json, lab_json,
+                  cancel_event, queue, rag_kb),
             daemon=True
         )
         inference_thread.start()
 
         try:
             while True:
-                # 1. 优先检查前端是否断连
                 if await request.is_disconnected():
                     cancel_event.set()
                     logger.warning(f"Client disconnected. Aborting task: {task_id}")
                     break
 
-                # 2. 尝试从队列获取子线程传递的消息（非阻塞）
                 try:
                     event_type, data = queue.get_nowait()
 
                     if event_type == "step":
-                        # 中间步骤实时推送
                         yield f"event: step\ndata: {json.dumps(data)}\n\n"
                     elif event_type == "error":
-                        # 异常降级推送
                         yield f"event: error\ndata: {json.dumps(data)}\n\n"
                         break
                     elif event_type == "final_data":
-                        # 收到最终数据，执行组装与入库，推送 result 事件
+                        # 收到最终数据，执行入库，推送 result 事件
                         try:
-                            result_event = SSEResultEvent(
-                                task_id=task_id,
-                                image_uid=data["image_uid"],
-                                visual_evidence=VisualEvidence(
-                                    heatmap_url=data["evidence_url"],
-                                    image_url=data["img_record_url"],
-                                    lesion_region=[120, 80, 300, 250]  # 占位符区域
-                                ),
-                                morphology=Morphology(**data["morphology_dict"]),
-                                rag_citations=[
-                                    RagCitation(title=f"文献片段 {i + 1}", source="本地知识库", relevance=0.9,
-                                                excerpt=txt)
-                                    for i, txt in enumerate(data["rag_results"])],
-                                confidence=0.85,
-                                disclaimer="本结果仅为AI辅助证据，最终诊断裁量权归临床医生所有。",
-                                completed_at=datetime.now(timezone.utc).isoformat()
-                            )
+                            result_event = SSEResultEvent(**data)
 
-                            # 保存特征到数据库
                             try:
                                 async with async_session() as session:
-                                    img_res = await session.execute(
-                                        select(ImageDB).where(ImageDB.image_uid == image_uid))
-                                    img = img_res.scalar_one()
-                                    img.status = "ready"
+                                    # 更新 Task 状态
+                                    task_res = await session.execute(select(TaskDB).where(TaskDB.task_id == task_id))
+                                    db_task = task_res.scalar_one()
+                                    db_task.status = "completed"
+                                    db_task.completed_at = datetime.now(timezone.utc)
 
-                                    # 检查是否已存在该 image_uid 的特征记录，防止重复 INSERT 导致主键冲突
+                                    # 保存特征 (以 task_id 为主键)
                                     feat_res = await session.execute(
-                                        select(FeatureDB).where(FeatureDB.image_uid == image_uid))
+                                        select(FeatureDB).where(FeatureDB.task_id == task_id))
                                     existing_feature = feat_res.scalar_one_or_none()
 
                                     if existing_feature:
-                                        # 已存在则更新
                                         existing_feature.ai_features = result_event.model_dump()
-                                        existing_feature.created_at = datetime.now(timezone.utc)
+                                        existing_feature.image_uid = image_uid  # 同步更新关联的 image_uid
                                     else:
-                                        # 不存在则新增
                                         feature = FeatureDB(
-                                            image_uid=image_uid,
                                             task_id=task_id,
+                                            image_uid=image_uid,
                                             ai_features=result_event.model_dump(),
                                             created_at=datetime.now(timezone.utc)
                                         )
@@ -612,26 +586,24 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                             break
 
                 except asyncio.QueueEmpty:
-                    # 3. 队列空说明子线程还在计算，发送心跳保活
                     yield f"event: heartbeat\ndata: {{}}\n\n"
-                    await asyncio.sleep(0.1)  # 释放事件循环，避免CPU空转
+                    await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
-            # 处理服务端主动取消协程的情况
             cancel_event.set()
         finally:
-            # 确保子线程结束（设置超时防止卡死）
             inference_thread.join(timeout=2.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@app.get("/features/{image_uid}", response_model=SSEResultEvent, tags=["Diagnosis"])
-async def get_historical_features(image_uid: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(FeatureDB).where(FeatureDB.image_uid == image_uid))
+# 路由修改：从 /features/{image_uid} 改为 /features/{task_id}
+@app.get("/features/{task_id}", response_model=SSEResultEvent, tags=["Diagnosis"])
+async def get_historical_features(task_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(FeatureDB).where(FeatureDB.task_id == task_id))
     feature = result.scalar_one_or_none()
 
     if not feature:
-        return create_error_response(404, "NotFound", "FEATURE_NOT_FOUND", "该影像尚无成功的推理结果")
+        return create_error_response(404, "NotFound", "FEATURE_NOT_FOUND", "该任务尚无成功的推理结果")
 
     return SSEResultEvent(**feature.ai_features)
