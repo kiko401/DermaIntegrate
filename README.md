@@ -8,7 +8,7 @@
 
 ## 摘要
 
-本项目面向皮肤病专科门诊场景，解决临床业务中多源异构数据孤岛与医疗 AI 缺乏可解释性的问题，构建数据集成与可解释辅助诊断系统。在数据集成层面，针对 HIS、PACS、LIS 等系统数据异构与标识不一的问题，采用主索引映射与 FHIR R4 标准协议，实现跨系统异构数据的归一化接入与逻辑聚合，构建患者全生命周期临床视图；在 AI 辅助层面，针对端到端模型直接输出诊断结论缺乏推断依据的问题，提出基于显著性区域定位与检索增强的可解释机制：通过病灶视觉定位模型提供客观视觉依据，约束视觉语言模型输出结构化形态学描述，并融合 RAG 检索构建辅助证据链，将算法推断过程透明化，诊断裁量权交由临床医生。工程层面，系统针对医学影像前端解析瓶颈、DICOM 标签不规范风险与长时 AI 推理引发的资源占用问题，分别实现了基于成像特性的防御性后端转码、前端轻量渲染机制，以及基于 SSE 的异步响应代理与断连感知计算资源回收机制，并在智能推理域 4C4G 低资源云服务器环境下，通过 Swap 与容器限制实现稳定部署，保障临床环境下的系统可用性。
+本项目面向皮肤病专科门诊场景，解决临床业务中多源异构数据孤岛与医疗 AI 缺乏可解释性的问题，构建数据集成与可解释辅助诊断系统。在数据集成层面，针对 HIS、PACS、LIS 等系统数据异构与标识不一的问题，采用主索引映射与 FHIR R4 标准协议，实现跨系统异构数据的归一化接入与逻辑聚合，构建患者全生命周期临床视图；在 AI 辅助层面，针对端到端模型直接输出诊断结论缺乏推断依据的问题，提出基于显著性区域定位与检索增强的可解释机制：通过病灶视觉定位模型提供客观视觉依据，约束视觉语言模型输出结构化形态学描述，并融合 RAG 检索构建辅助证据链，将算法推断过程透明化，诊断裁量权交由临床医生。工程层面，系统针对医学影像前端解析瓶颈、DICOM 标签不规范风险与长时 AI 推理引发的资源占用问题，分别实现了基于成像特性的防御性后端转码、前端轻量渲染机制，以及基于 SSE 的异步响应代理与断连感知计算资源回收机制，并在智能推理域 4C4G 低资源云服务器环境下，通过 Swap、容器限制与国内镜像源注入实现稳定部署，保障临床环境下的系统可用性。
 
 ---
 
@@ -29,7 +29,7 @@
 
 系统遵循“推理计算与业务流转解耦”原则，划分两大进程级隔离服务域：**智能推理域**负责 AI 推理、特征提取与影像预处理；**应用平台域**负责数据集成归一、标准协议接入与前端交互。
 
-```text
+```markdown
 ③ 表现层（应用平台域 - React 18 + AntD + ECharts）
   ├─ 医生工作站 (患者全生命周期临床视图聚合展示)
   ├─ 影像滑动对比组件 (原图/标注图叠加渲染)
@@ -133,6 +133,10 @@ def run_pipeline_with_cancel(cancel_event):
 
 - **推理域数据库初始化解耦与存储映射**：智能推理域 Python 端仅负责 ORM 映射与异步增删改查，移除同步建库建表逻辑，需在推理域的 `docker-compose.yml` 中配置 `MYSQL_DATABASE: derma_ai` 确保数据库自动创建。推理域采用 SQLAlchemy ORM 映射表结构，针对影像资源设立 `status` 字段标识处理状态（`processing`/`ready`），`url` 字段记录转码后路径，`original_dicom_tags` 字段以 JSON 形式存储 DICOM 元数据，`width` 与 `height` 记录真实影像维度。
 - **智能推理域 4C4G 低资源部署策略**：在 4 核 4G 的智能推理域云服务器环境下，首先在宿主机配置 4GB Swap 虚拟内存防止系统 OOM；其次通过推理域 `docker-compose.yml` 强制限制基础组件内存上限（如 MySQL 限制 512M，Qdrant 限制 512M），给 FastAPI + PyTorch 预留计算空间；深度学习框架强制指定 CPU 版本（如 `torch==2.1.0+cpu`），剔除冗余的 CUDA 库，将镜像体积压缩至可部署范围；智能推理域 FastAPI 服务仅开启 1 个 Worker，避免多进程加载模型耗尽内存。
+- **云端低资源环境部署约束**：
+  1. **镜像基础版本约束**：因 `torch==2.1.0+cpu` 与 `transformers==4.36.1` 在 Python 3.12 下存在底层 API 兼容性断层，Dockerfile 基础镜像必须采用 `python:3.11-slim`。
+  2. **向量化模型源配置**：国内云服务器部署时，需配置 `HF_ENDPOINT` 环境变量（如 `https://hf-mirror.com`），确保 `bge-small-zh-v1.5` 模型正常拉取，避免 RAG 初始化超时。
+  3. **无头模式依赖**：Docker 容器无 GUI 环境，`requirements.txt` 中必须使用 `opencv-python-headless` 替代 `opencv-python`，规避运行时依赖冲突。
 
 ---
 
@@ -172,7 +176,7 @@ DermaIntegrate/
 ├── frontend/                    # [应用平台域] 表现层
 │   ├── components/              # 影像滑动对比组件 (原图与病灶标注图叠加渲染)
 │   ├── hooks/                   # useSSE 状态机封装与断线重试逻辑
-│   └── views/                   # 医生工作站界面与 AI 辅助诊断流式对话框
+│   └─ views/                   # 医生工作站界面与 AI 辅助诊断流式对话框
 │
 ├── infra/                       # [推理域定义拓扑，应用域主导实施]
 │   ├── docker-compose.yml       # 智能推理域微服务编排、容器内存限制与自动建库配置
@@ -235,39 +239,50 @@ redis:7                        # 分布式缓存（应用域使用）
 
 ### 5.2 参数配置
 
-在启动服务前，需在相关模块配置必要参数：
+在启动服务前，需在相关模块配置必要参数。**请严格区分智能推理域与应用平台域的数据库与网络边界**。
 
-**1. 智能推理域配置**：在 `backend-ai/.env` 中配置大模型接口参数、推理域数据库连接与降级开关：
+**1. 智能推理域配置**：在 `backend-ai/.env` 中配置大模型接口参数、推理域数据库连接与降级开关（可参考 `backend-ai/.env.example`）：
 ```env
-# 智能推理域数据库连接配置 (需与推理域 docker-compose 映射端口一致，若本地 3306 被占用，映射为 3307 则此处同步修改)
+# --- 推理域数据库配置 (独立于应用域数据库) ---
+# [本地开发] 映射到宿主机 3307 端口，连接推理域专属库 derma_ai
 DATABASE_URL=mysql+aiomysql://root:root_password@localhost:3307/derma_ai
+# [Docker部署] 请注释掉上面一行，启用下面这行（使用容器名 mysql 和内部端口 3306）
+# DATABASE_URL=mysql+aiomysql://root:root_password@mysql:3306/derma_ai
 
-# 视觉语言模型配置：DeepSeek-VL2 (用于形态学描述)
+# --- 视觉语言模型配置：DeepSeek-VL2 (用于形态学描述) ---
 VLM_API_KEY=your_deepseek_api_key
 VLM_BASE_URL=https://api.deepseek.com
 VLM_MODEL=deepseek-vl2
 
-# RAG 向量数据库配置
+# --- 降级开关配置 ---
+# 设为 true 时，将拦截真实 VLM 调用并返回预设 Mock 数据，便于前端联调
+USE_MOCK_VLM=true
+
+# --- RAG 向量数据库配置 ---
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
 QDRANT_COLLECTION=derma_knowledge
 
-# 降级开关配置：当设置为 true 时，VLM 调用将被拦截并返回 Mock 数据
-USE_MOCK_VLM=true
-
-# Docker 环境标识 (用于 Qdrant 连接逻辑，容器内设为 true 连接 qdrant 容器名)
+# --- Docker 环境标识 (极其关键！) ---
+# [本地开发] 设为 false，代码将连接 localhost 的 Qdrant
+# [Docker部署] 必须设为 true，代码将连接 Qdrant 容器名 (覆盖上方 QDRANT_HOST)
 DOCKER_ENV=false
+
+# --- HuggingFace 镜像源 (国内云服务器部署必填) ---
+# 解决国内服务器无法下载 bge-small-zh-v1.5 模型的问题
+HF_ENDPOINT=https://hf-mirror.com
 ```
 
 **2. 应用平台域配置**：在 `backend-app/src/main/resources/application.yml` 中配置应用域数据库与智能推理域路由：
 ```yaml
 spring:
   datasource:
+    # 注意：此为应用域独立数据库 derma_integrate，默认 3306 端口，与推理域 derma_ai 物理隔离
     url: jdbc:mysql://localhost:3306/derma_integrate?useSSL=false&characterEncoding=utf8
     username: root
     password: root_password
 
-# 智能推理域路由地址
+# 智能推理域路由地址 (云端部署时替换为公网 IP 及 Nginx 代理路径)
 ai:
   pipeline:
     base-url: http://localhost:8000
@@ -293,6 +308,37 @@ cd backend-ai
 python init_rag.py
 uvicorn api.main:app --reload --port 8000
 # 可使用 Postman 上传真实 .dcm 文件测试转码，或触发 SSE 流测试推理管线与降级逻辑
+```
+
+**智能推理域云端极限部署（4C4G 服务器）**：
+适用于智能推理域独立上云部署，应用平台域通过公网 IP 跨域调用。
+```bash
+# 1. 宿主机 Swap 配置 (防 OOM)
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# 2. 克隆代码并进入 (云端仅需保留 backend-ai 与 infra 目录即可)
+git clone https://github.com/yourname/DermaIntegrate.git && cd DermaIntegrate
+
+# 3. 修改 .env 配置
+# 务必启用 Docker 部署专用的 DATABASE_URL、设置 DOCKER_ENV=true、设置 HF_ENDPOINT
+cd backend-ai && cp .env.example .env && nano .env 
+
+# 4. 启动容器 (需在 infra 目录下)
+cd ../infra
+sudo docker-compose up -d
+
+# 5. 初始化 RAG 知识库 (首次启动需手动执行)
+sudo docker exec -it derma-fastapi python init_rag.py
+
+# 6. 配置 Nginx 反向代理
+sudo apt install nginx
+# 新建 /etc/nginx/conf.d/derma.conf，需包含以下核心路由：
+# - client_max_body_size 5m; (解决医学影像上传限制)
+# - location /ai/ 代理至 8000 端口，开启 proxy_buffering off 与 proxy_read_timeout 300s (保障 SSE 流)
+# - location /ai-static/ 代理至 8000 端口 (保障热力图与原图公网可访问)
+# - location = /openapi.json 代理至 8000 端口 (保障 Swagger UI 正常加载)
+sudo nginx -s reload
 ```
 
 **应用平台域独立调试**：
