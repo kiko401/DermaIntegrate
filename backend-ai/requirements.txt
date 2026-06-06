@@ -5,14 +5,15 @@ pydantic==2.5.0
 aiofiles==23.2.1
 pydicom==3.0.2
 Pillow==12.2.0
-numpy==1.26.2
+numpy==1.26.4                  # 数值计算与像素归一化 (1.x最终版，满足onnxruntime>=1.26.3且兼容OpenCV)
 httpx==0.28.1
 openai==2.40.0
 qdrant-client==1.18.0
 sentence-transformers==2.7.0
-transformers==4.36.1  # 显式固定版本，防止pip拉取4.5x+导致与torch 2.1.0不兼容
+transformers==4.36.1           # 显式固定版本，防止pip拉取4.5x+导致与torch 2.1.0不兼容
 opencv-python-headless==4.9.0.80
 SQLAlchemy==2.0.25
 aiomysql==0.2.0
 python-dotenv==1.0.0
-json-repair==0.60.1
+json-repair==0.60.1            # LLM 输出 JSON 结构运行时修复库
+onnxruntime==1.17.0            # 高性能 CPU 推理引擎 (替代 PyTorch 执行 UNet 推理)
