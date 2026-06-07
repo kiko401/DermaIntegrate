@@ -149,15 +149,25 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
     if braf is None and t_stage_str in ["T3a", "T3b", "T4a", "T4b"]:
         result["missing_data_warnings"].append("晚期患者建议完善BRAF/NRAS基因检测以指导靶向治疗")
 
-    # ---- 跨模态依赖逻辑：肢端型附加建议 (保留) ----
+    # ---- 跨模态依赖逻辑：特殊部位附加建议 ----
     if location_from_clinical and isinstance(location_from_clinical, str):
+        # 1. 肢端型判定
         acral_keywords = ["足底", "手掌", "甲下", "足", "手", "趾", "指"]
         if any(keyword in location_from_clinical for keyword in acral_keywords):
             result["treatment_recommendations"].append(
                 "肢端型黑色素瘤侵袭性可能更强，建议密切随访及考虑基因检测(如KIT突变)")
-            # 如果没有分期，给一个基本的风险提示
             if result["t_stage"] == "无法分期":
                 result["missing_data_warnings"].append("肢端病灶缺乏病理深度，建议优先活检")
+
+        # 2. 黏膜型判定 (极重要临床保守原则)
+        # 黏膜型黑色素瘤具有极强的侵袭性，预后极差，且 KIT 突变率远高于皮肤型
+        mucosal_keywords = ["口", "鼻", "唇", "生殖", "黏膜", "肛"]
+        if any(keyword in location_from_clinical for keyword in mucosal_keywords):
+            result["treatment_recommendations"].append(
+                "黏膜型黑色素瘤侵袭性强，预后较差，强烈建议完善KIT等基因检测指导靶向治疗")
+            # 即使无法分期，只要是黏膜型，必须视为高危并强烈建议活检
+            if result["t_stage"] == "无法分期":
+                result["missing_data_warnings"].append("黏膜病灶预后极差，强烈建议优先活检明确病理")
 
     # 如果没有任何建议和警告，给出常规随访提示
     if not result["treatment_recommendations"] and not result["missing_data_warnings"]:

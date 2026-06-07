@@ -65,15 +65,19 @@ def _build_dynamic_prompt(image_result: dict, clinical_result: dict, pathology_r
             "3. 必须以严格的 JSON 格式输出，包含以下键：risk_level, key_concerns, recommendations, differential, disclaimer, status。\n"
             "4. 【终极全中文约束】你的输出必须 100% 使用专业且规范的中文！严禁在任何字段中夹杂英文（如不得输出 melanoma、BRAF、SLNB，必须替换为 黑色素瘤、BRAF基因、前哨淋巴结活检）。所有的建议必须以中文医学规范表述。\n\n"
             "【输入证据】：\n" + "\n".join(evidence_parts) + "\n\n"
-                                                          "【输出格式要求】：\n"
-                                                          "{\n"
-                                                          '  "risk_level": "极高危/高危/中高危/中危/低危/数据不足无法评估",\n'
-                                                          '  "key_concerns": [{"item": "关注要点1", "source_id": "R00"}, {"item": "关注要点2", "source_id": "R00"}],\n'
-                                                          '  "recommendations": [{"item": "建议检查1", "source_id": "R00"}, {"item": "建议检查2", "source_id": "R00"}],\n'
-                                                          '  "differential": ["鉴别诊断1", "鉴别诊断2"],\n'
-                                                          '  "disclaimer": "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断",\n'
-                                                          '  "status": "complete 或 incomplete"\n'
-                                                          "}"
+            "【输出格式要求】：\n"
+            "{\n"
+            '  "risk_level": "极高危/高危/中高危/中危/低危/数据不足无法评估",\n'
+            '  "key_concerns": [{"item": "关注要点1", "source_id": "[NCCN-13]"}, {"item": "关注要点2", "source_id": "[WHW-27]"}],\n'
+            '  "recommendations": [{"item": "建议检查1", "source_id": "[AJCC-05]"}, {"item": "建议检查2", "source_id": "[JB-01]"}],\n'
+            '  "differential": ["鉴别诊断1", "鉴别诊断2"],\n'
+            '  "disclaimer": "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断",\n'
+            '  "status": "complete 或 incomplete"\n'
+            "}\n\n"
+            "【严格引用约束（极重要）】：\n"
+            "1. 你的输出中 key_concerns 和 recommendations 的每一项，必须包含 source_id 字段。\n"
+            "2. source_id 的值必须严格照抄上述【权威指南参考】中每条文本开头的编号！例如 \"[AJCC-05]\", \"[NCCN-13]\", \"[WHW-27]\", \"[JB-01]\"。必须包含方括号！\n"
+            "3. 严禁捏造不存在的编号，如果无法对应，source_id 填写 \"R00\"。"
     )
     return prompt
 
