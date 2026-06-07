@@ -103,7 +103,7 @@ class SSEResultEvent(BaseModel):
     recommendations: List[Recommendation]
     differential: List[str]
     disclaimer: str
-    status: str = "completed"
+    status: str = "complete"
 
 
 # ==========================================
