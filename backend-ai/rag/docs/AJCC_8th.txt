@@ -1,0 +1,5 @@
+[AJCC-01] AJCC 8th：T1期黑色素瘤定义为Breslow厚度≤1.0mm且无溃疡，或Breslow厚度<0.8mm伴溃疡。{{tags:病理,T1,MEL}}
+[AJCC-02] AJCC 8th：T2期黑色素瘤定义为Breslow厚度>1.0-2.0mm且无溃疡，或Breslow厚度0.8-1.0mm伴溃疡。{{tags:病理,T2,MEL}}
+[AJCC-03] AJCC 8th：T3期黑色素瘤定义为Breslow厚度>2.0-4.0mm且无溃疡，或Breslow厚度1.0-2.0mm伴溃疡。{{tags:病理,T3,MEL}}
+[AJCC-04] AJCC 8th：T4期黑色素瘤定义为Breslow厚度>4.0mm且无溃疡，或Breslow厚度>2.0mm伴溃疡。{{tags:病理,T4,高危,MEL}}
+[AJCC-05] AJCC 8th：对于T1b期及以上（厚度>=0.8mm伴溃疡，或厚度>=1.0mm无溃疡）的患者，强烈建议行前哨淋巴结活检（SLNB）以明确淋巴结状态。{{tags:病理,T1,T2,高危,MEL}}

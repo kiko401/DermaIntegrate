@@ -34,9 +34,9 @@ from preprocessing.dicom_parser import DicomParser, DicomParseException
 # 新增阶段5 AI 管线导入
 from cnn.lesion_extractor import LesionExtractor
 from agents.vlm_agent import VLMAgent
-from agents.clinical_agent import parse_clinical_data  # 新增：病历 Agent
-from agents.lab_agent import evaluate_lab_data  # 新增：化验 Agent
-from agents.integration_agent import run_integration_agent  # 新增：整合 Agent (从独立模块导入)
+from agents.clinical_agent import parse_clinical_data  # 病历 Agent (v3.1 PAD-UFES-20)
+from agents.pathology_agent import evaluate_pathology_data  # 病理与分子 Agent (v3.1 替换原化验 Agent)
+from agents.integration_agent import run_integration_agent  # 整合 Agent (v3.1 全中文防线)
 from rag.knowledge_base import RAGKnowledgeBase
 
 # 新增阶段6 自定义异常导入
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================
-# Pydantic 模型定义 (严格对齐 v2.0 契约)
+# Pydantic 模型定义 (严格对齐 v2.0/v3.1 契约)
 # ==========================================
 class ErrorResponse(BaseModel):
     error: str
@@ -111,9 +111,6 @@ class SSEResultEvent(BaseModel):
     status: str = "completed"
 
 
-# (旧的 Mock run_integration_agent 函数已从此处删除，移至 agents/integration_agent.py)
-
-
 # ==========================================
 # FastAPI 初始化与配置
 # ==========================================
@@ -146,7 +143,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="DermaIntegrate AI Backend",
-    description="智能推理域 API，严格遵循 v2.0 契约",
+    description="智能推理域 API，严格遵循 v3.1 契约",
     lifespan=lifespan,
 )
 
@@ -189,9 +186,9 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
                              cancel_event: threading.Event, queue: asyncio.Queue, rag_kb: RAGKnowledgeBase):
     """
     可取消的多模态推理管线包装，在独立子线程中执行。
-    支持按需触发模态 Agent，并推送语义化步级状态。
+    支持按需触发模态 Agent，并推送语义化步级状态。对齐 v3.1 契约。
     """
-    image_result, clinical_result, lab_result = None, None, None
+    image_result, clinical_result, pathology_result = None, None, None
 
     try:
         # 1. 图像 Agent (按需触发)
@@ -201,29 +198,25 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
             evidence_filename = f"{image_uid}_evidence.png"
             evidence_path = os.path.join(settings.STATIC_DIR, "heatmaps", evidence_filename)
 
-            # 核心修改：接收 generate 返回的特征字典
             visual_features = lesion_extractor.generate(original_image_path, evidence_path, cancel_event=cancel_event)
             evidence_url = f"/ai-static/heatmaps/{evidence_filename}"
 
             if cancel_event.is_set(): raise InterruptedError()
             morphology_dict = vlm_agent.analyze(original_image_path, evidence_path, cancel_event=cancel_event)
 
-            # 组装完整的图像结果
             image_result = {
                 "image_url": evidence_url,
                 "morphology": morphology_dict,
-                # 将视觉特征注入，供整合 Agent 使用
                 "coverage": visual_features.get("coverage", 0) if visual_features else 0,
                 "location": visual_features.get("location", "未知") if visual_features else "未知"
             }
             queue.put_nowait(("step", {"step": "image_done", "message": "视觉定位与形态学完成", "data": image_result}))
 
-        # 2. 病历 Agent 按需触发 (接入真实 LLM 解析)
+        # 2. 病历 Agent 按需触发 (对齐 PAD-UFES-20 新 Schema)
         if clinical_json or clinical_text:
             if cancel_event.is_set(): raise InterruptedError()
             logger.info(f"Task {task_id}: Running Clinical Agent...")
 
-            # 安全处理 clinical_json 的数据类型 (SQLAlchemy 可能返回 dict 或 str)
             c_json_str = None
             if clinical_json:
                 c_json_str = clinical_json if isinstance(clinical_json, str) else json.dumps(clinical_json)
@@ -235,29 +228,37 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
             queue.put_nowait(
                 ("step", {"step": "clinical_done", "message": "病历结构化解析完成", "data": clinical_result}))
 
-        # 3. 化验 Agent 按需触发 (接入真实规则引擎与跨模态依赖)
+        # 3. 病理与分子 Agent 按需触发
         if lab_json:
             if cancel_event.is_set(): raise InterruptedError()
-            logger.info(f"Task {task_id}: Running Lab Agent...")
+            logger.info(f"Task {task_id}: Running Pathology Agent...")
 
-            # 安全处理 lab_json 的数据类型 (化验 Agent 需要接收 dict)
-            lab_dict = lab_json if isinstance(lab_json, dict) else json.loads(lab_json)
+            path_dict = lab_json if isinstance(lab_json, dict) else json.loads(lab_json)
 
-            # 跨模态依赖核心逻辑：从病历 Agent 的结果中提取病灶位置
             lesion_location = None
-            if clinical_result and clinical_result.get("lesion"):
-                lesion_location = clinical_result.get("lesion", {}).get("location")
+            if clinical_result and clinical_result.get("lesion_clinical"):
+                lesion_location = clinical_result.get("lesion_clinical", {}).get("region")
 
-            lab_result = evaluate_lab_data(lab_json=lab_dict, location_from_clinical=lesion_location)
-            queue.put_nowait(("step", {"step": "lab_done", "message": "化验规则引擎完成", "data": lab_result}))
+            pathology_result = evaluate_pathology_data(pathology_json=path_dict, location_from_clinical=lesion_location)
+            queue.put_nowait(("step", {"step": "pathology_done", "message": "病理与分子规则引擎完成", "data": pathology_result}))
 
-        # 4. 整合 Agent (必触发，调用真实独立模块)
+        # 4. RAG 两阶段检索 (基于多模态特征召回带 ID 的专科指南)
+        rag_passages = []
+        if rag_kb:
+            if cancel_event.is_set(): raise InterruptedError()
+            try:
+                # 传入各 Agent 的输出，供 RAG 提取标签和构造查询
+                rag_passages = rag_kb.retrieve(image_result, clinical_result, pathology_result, top_k=3)
+                logger.info(f"Task {task_id}: Retrieved {len(rag_passages)} RAG passages.")
+            except Exception as e:
+                logger.error(f"Task {task_id}: RAG retrieval failed: {e}. Proceeding without RAG.")
+
+        # 5. 整合 Agent (必触发，传入 pathology_result 和 RAG 检索结果)
         if cancel_event.is_set(): raise InterruptedError()
-        # RAG 暂时不传，避免干扰
-        final_report_dict = run_integration_agent(task_id, image_result, clinical_result, lab_result, [])
+        final_report_dict = run_integration_agent(task_id, image_result, clinical_result, pathology_result, rag_passages)
 
         # 管线执行成功，推送最终数据组装标记
-        queue.put_nowait(("final_data", final_report_dict))  # 直接传 dict，不再 .model_dump()
+        queue.put_nowait(("final_data", final_report_dict))
 
     except InterruptedError:
         logger.info(f"Pipeline execution cancelled for task: {task_id}")

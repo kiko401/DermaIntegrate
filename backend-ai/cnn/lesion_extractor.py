@@ -66,31 +66,45 @@ class LesionExtractor:
 
             # 4. 最大连通域提取 (极重要：剔除离散假阳性噪声)
             num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_resized, connectivity=8)
+
+            final_mask = mask_resized
+            max_label = -1
+
             if num_labels > 1:
                 # 找到面积最大的连通域 (排除背景0)
                 max_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
                 final_mask = np.where(labels == max_label, 255, 0).astype(np.uint8)
-            else:
-                final_mask = mask_resized  # 如果没找到，用原mask
 
-            # 5. 特征计算 (新增输出)
+            # 5. 特征计算
             total_pixels = orig_h * orig_w
             lesion_pixels = np.sum(final_mask > 0)
-            coverage = lesion_pixels / total_pixels
+            coverage = lesion_pixels / total_pixels if total_pixels > 0 else 0.0
 
-            # 计算重心确定位置 (上/下/左/右/中心)
+            # 计算重心确定位置 (严格输出纯中文方位)
             location = "中心"
             if lesion_pixels > 0:
-                cx, cy = centroids[max_label] if num_labels > 1 else (orig_w / 2, orig_h / 2)
+                # 使用最大连通域的重心，如果没有则用图像中心
+                cx, cy = centroids[max_label] if max_label != -1 else (orig_w / 2, orig_h / 2)
                 rel_x, rel_y = cx / orig_w, cy / orig_h
-                if rel_y < 0.4:
+
+                # 优化后的九宫格方位判定逻辑 (0.4 和 0.6 作为边界阈值)
+                if rel_x < 0.4 and rel_y < 0.4:
+                    location = "左上"
+                elif rel_x > 0.6 and rel_y < 0.4:
+                    location = "右上"
+                elif rel_x < 0.4 and rel_y > 0.6:
+                    location = "左下"
+                elif rel_x > 0.6 and rel_y > 0.6:
+                    location = "右下"
+                elif rel_x < 0.4:
+                    location = "左"
+                elif rel_x > 0.6:
+                    location = "右"
+                elif rel_y < 0.4:
                     location = "上"
                 elif rel_y > 0.6:
                     location = "下"
-                if rel_x < 0.4:
-                    location = "左" if rel_y >= 0.4 and rel_y <= 0.6 else "左上" if rel_y < 0.4 else "左下"
-                elif rel_x > 0.6:
-                    location = "右" if rel_y >= 0.4 and rel_y <= 0.6 else "右上" if rel_y < 0.4 else "右下"
+                # 其他情况默认保持 "中心"
 
             # 6. 热力图叠加：Jet 色图 + 0.5 透明度叠加
             colored_mask = cv2.applyColorMap(final_mask, cv2.COLORMAP_JET)
@@ -98,7 +112,7 @@ class LesionExtractor:
 
             cv2.imwrite(output_path, overlay)
 
-            # 返回特征字典 (重要改造：不再只返回路径，而是返回结构化特征)
+            # 返回特征字典 (对齐全中文契约)
             return {
                 "coverage": round(float(coverage), 4),
                 "location": location
@@ -134,7 +148,7 @@ class LesionExtractor:
 
         cv2.imwrite(output_path, overlay)
 
-        # 兜底时返回占位特征
+        # 兜底时返回占位特征 (对齐全中文契约)
         return {
             "coverage": 0.25,
             "location": "中心"

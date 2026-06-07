@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import copy
 from openai import OpenAI
 from config import settings
 
@@ -8,97 +9,139 @@ logger = logging.getLogger(__name__)
 
 MAX_LLM_RETRIES = 2  # 最大重试次数
 
-# 严格对齐实验方案的标准空 Schema
+# ==========================================================
+# 1. 对齐 PAD-UFES-20 的标准空 Schema (v3.1 契约)
+# ==========================================================
 EMPTY_CLINICAL_SCHEMA = {
-    "demographics": {"age": None, "gender": None, "skin_phototype": None},
-    "lesion": {"location": None, "diameter_mm": None, "duration_months": None, "elevation": None, "evolution": None},
-    "history": {"family_melanoma": None, "sun_exposure": None, "previous_cancer": None},
-    "symptoms": {"bleeding": None, "itching": None, "pain": None, "ulceration": None},
-    "abcd": {"asymmetry": None, "border_irregular": None, "color_variegation": None, "diameter_gt6mm": None,
-             "evolution": None}
+    "patient_info": {"age": None, "gender": None, "fitzpatrick_skin_type": None},
+    "lifestyle_history": {"smoke": None, "drink": None, "pesticide_exposure": None},
+    "family_history": {"background_father": None, "background_mother": None},
+    "personal_history": {"skin_cancer_history": None, "other_cancer_history": None},
+    "lesion_clinical": {
+        "region": None, "diameter_1_mm": None, "diameter_2_mm": None,
+        "elevation": None, "biopsed": None
+    },
+    "lesion_symptoms": {"itch": None, "hurt": None, "changed": None, "bleed": None, "grew": None}
 }
 
-# 定义常见英文漂移的黑名单 (小写)
-ENGLISH_BLACKLIST = ["male", "female", "left", "right", "sole", "palm", "yes", "no", "true", "false"]
+# ==========================================================
+# 2. 强制中文映射表 (核心防漂移与跨模态依赖保障)
+# ==========================================================
+GENDER_MAP = {"male": "男", "female": "女", "m": "男", "f": "女"}
+REGION_MAP = {
+    "ABDOMEN": "腹部", "BACK": "背部", "CHEST": "胸部", "FACE": "面部",
+    "FOOT": "足部", "FOREARM": "前臂", "HAND": "手部", "LATERAL CHEST": "侧胸",
+    "LOWER LIMB": "下肢", "NECK": "颈部", "NOSE": "鼻部", "SCALP": "头皮",
+    "THIGH": "大腿", "UPPER LIMB": "上肢", "EAR": "耳部", "LIP": "唇部"
+}
 
+# 扩充英文漂移黑名单 (针对 PAD-UFES-20 常见英文字段)
+ENGLISH_BLACKLIST = [
+    "male", "female", "m", "f",
+    "left", "right", "sole", "palm", "scalp", "face", "abdomen", "back", "foot", "hand",
+    "yes", "no", "neck", "ear", "chest", "arm", "leg"
+    # 注意：移除了 "true" 和 "false"，因为 JSON 原生布尔值是合法的
+]
+
+def _is_truthy(value) -> bool:
+    """防御性布尔值判定，兼容各种变体"""
+    if isinstance(value, bool): return value
+    if isinstance(value, (int, float)): return value > 0
+    if isinstance(value, str): return value.strip().lower() in ["true", "1", "有", "是", "yes"]
+    return False
+
+def _map_gender(raw_gender) -> str:
+    """性别强制中文映射"""
+    if not raw_gender: return None
+    val = str(raw_gender).lower().strip()
+    return GENDER_MAP.get(val, raw_gender) # 映射命中返中文，未命中保留原值(可能是中文)
+
+def _map_region(raw_region) -> str:
+    """部位强制中文映射 (极重要：确保肢端型规则触发)"""
+    if not raw_region: return None
+    val = str(raw_region).upper().strip()
+    return REGION_MAP.get(val, raw_region)
 
 def _validate_clinical_data(data: dict) -> str:
     """
-    校验 LLM 输出的临床数据是否符合规范。
-    返回错误信息字符串，如果无误则返回空字符串。
+    校验 LLM 输出的临床数据是否符合规范 (保留原有优秀设计，升级校验规则)
     """
     if not isinstance(data, dict):
         return "输出不是有效的 JSON 字典"
 
-    # 1. 检查是否包含必须的顶层键
-    required_keys = ["demographics", "lesion", "history", "symptoms", "abcd"]
+    # 1. 检查是否包含必须的顶层键 (对齐新 Schema)
+    required_keys = ["patient_info", "lifestyle_history", "family_history", "personal_history", "lesion_clinical", "lesion_symptoms"]
     for key in required_keys:
         if key not in data:
             return f"缺少必须的顶层键: {key}"
 
-    # 2. 语义漂移检查：严禁英文输出
+    # 2. 语义漂移检查：严禁英文输出 (防止 LLM 将中文翻译为英文)
     json_str = json.dumps(data, ensure_ascii=False).lower()
     for word in ENGLISH_BLACKLIST:
-        # 简单粗暴但有效：检查 JSON 字符串中是否包含黑名单词汇
         if f'"{word}"' in json_str or f": {word}" in json_str or f": \"{word}" in json_str:
-            return f"检测到非法英文输出: '{word}'，必须严格使用中文"
+            return f"检测到非法英文输出: '{word}'，必须严格使用中文（如 male->男, foot->足部）"
 
     return ""  # 验证通过
 
-
 def _clean_llm_json_response(text: str) -> str:
-    """清洗 LLM 返回的 Markdown 格式包裹的 JSON"""
+    """清洗 LLM 返回的 Markdown 格式包裹的 JSON (保留原有设计)"""
     text = text.strip()
     match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     if match:
         return match.group(1).strip()
     return text
 
-
 def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None) -> dict:
     """
-    双通道病历解析 (含 LLM 自重试与校验机制)
+    双通道病历解析 (对齐 PAD-UFES-20，含强制中文映射与 LLM 自重试机制)
     """
-    # 通道 1：结构化 JSON 直接映射 (逻辑不变)
+    # 通道 1：结构化 JSON 直接映射 (通常来自前端表单或数据集 CSV 行)
     if clinical_json_str:
         try:
-            data = json.loads(clinical_json_str)
-            mapped_data = EMPTY_CLINICAL_SCHEMA.copy()
+            data = json.loads(clinical_json_str) if isinstance(clinical_json_str, str) else clinical_json_str
+            # 极重要：必须深拷贝，防止多请求修改污染全局 Schema
+            mapped_data = copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
 
-            demographics = data.get("demographics", {})
-            if demographics:
-                mapped_data["demographics"]["age"] = demographics.get("age")
-                mapped_data["demographics"]["gender"] = demographics.get("gender")
-                mapped_data["demographics"]["skin_phototype"] = demographics.get("skin_phototype")
+            pi = data.get("patient_info", {})
+            mapped_data["patient_info"]["age"] = pi.get("age")
+            mapped_data["patient_info"]["gender"] = _map_gender(pi.get("gender"))
+            mapped_data["patient_info"]["fitzpatrick_skin_type"] = pi.get("fitzpatrick_skin_type")
 
-            lesion = data.get("lesion", {})
-            if lesion:
-                mapped_data["lesion"]["location"] = lesion.get("location")
-                mapped_data["lesion"]["diameter_mm"] = lesion.get("diameter_mm")
-                mapped_data["lesion"]["duration_months"] = lesion.get("duration_months")
-                mapped_data["lesion"]["elevation"] = lesion.get("elevation")
-                mapped_data["lesion"]["evolution"] = lesion.get("evolution")
+            lh = data.get("lifestyle_history", {})
+            mapped_data["lifestyle_history"]["smoke"] = _is_truthy(lh.get("smoke"))
+            mapped_data["lifestyle_history"]["drink"] = _is_truthy(lh.get("drink"))
+            mapped_data["lifestyle_history"]["pesticide_exposure"] = _is_truthy(lh.get("pesticide_exposure"))
 
-            history = data.get("history", {})
-            if history:
-                mapped_data["history"]["family_melanoma"] = history.get("family_melanoma")
-                mapped_data["history"]["sun_exposure"] = history.get("sun_exposure")
-                mapped_data["history"]["previous_cancer"] = history.get("previous_cancer")
+            fh = data.get("family_history", {})
+            mapped_data["family_history"]["background_father"] = fh.get("background_father")
+            mapped_data["family_history"]["background_mother"] = fh.get("background_mother")
 
-            symptoms = data.get("symptoms", {})
-            if symptoms:
-                mapped_data["symptoms"]["bleeding"] = symptoms.get("bleeding")
-                mapped_data["symptoms"]["itching"] = symptoms.get("itching")
-                mapped_data["symptoms"]["pain"] = symptoms.get("pain")
-                mapped_data["symptoms"]["ulceration"] = symptoms.get("ulceration")
+            ph = data.get("personal_history", {})
+            mapped_data["personal_history"]["skin_cancer_history"] = _is_truthy(ph.get("skin_cancer_history"))
+            mapped_data["personal_history"]["other_cancer_history"] = _is_truthy(ph.get("other_cancer_history"))
 
-            logger.info("Successfully parsed structured clinical_json.")
+            lc = data.get("lesion_clinical", {})
+            # 部位强制中文转换
+            mapped_data["lesion_clinical"]["region"] = _map_region(lc.get("region"))
+            mapped_data["lesion_clinical"]["diameter_1_mm"] = lc.get("diameter_1_mm") or lc.get("diameter_1")
+            mapped_data["lesion_clinical"]["diameter_2_mm"] = lc.get("diameter_2_mm") or lc.get("diameter_2")
+            mapped_data["lesion_clinical"]["elevation"] = _is_truthy(lc.get("elevation"))
+            mapped_data["lesion_clinical"]["biopsed"] = _is_truthy(lc.get("biopsed"))
+
+            ls = data.get("lesion_symptoms", {})
+            mapped_data["lesion_symptoms"]["itch"] = _is_truthy(ls.get("itch"))
+            mapped_data["lesion_symptoms"]["hurt"] = _is_truthy(ls.get("hurt"))
+            mapped_data["lesion_symptoms"]["changed"] = _is_truthy(ls.get("changed"))
+            mapped_data["lesion_symptoms"]["bleed"] = _is_truthy(ls.get("bleed"))
+            mapped_data["lesion_symptoms"]["grew"] = _is_truthy(ls.get("grew"))
+
+            logger.info("Successfully parsed and mapped structured clinical_json.")
             return mapped_data
         except Exception as e:
             logger.error(f"Failed to parse clinical_json: {e}. Falling back to empty schema.")
-            return EMPTY_CLINICAL_SCHEMA
+            return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
 
-    # 通道 2：自由文本 LLM 提取 (加入自重试机制)
+    # 通道 2：自由文本 LLM 提取 (保留带反馈的自重试机制)
     if clinical_text:
         client = OpenAI(
             api_key=settings.INTEGRATION_API_KEY,
@@ -106,14 +149,18 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
         )
 
         base_prompt = f"""
-你是一个严谨的皮肤病专科病历结构化提取助手。请从以下自由文本中提取关键临床特征，并严格按照提供的 JSON Schema 输出。
+你是一个严谨的皮肤病专科病历结构化提取助手。请从医生输入的自由文本中提取关键临床特征，并严格按照提供的 JSON Schema 输出。
 如果文本中未提及某字段，请将该字段设为 null。严禁输出任何诊断结论，只提取客观描述。
 
 严格遵循以下规则：
 1. 必须以纯JSON格式输出，不要有任何其他文字说明。
-2. JSON必须包含以下键：demographics, lesion, history, symptoms, abcd (及其子键)。
-3. 绝对禁止输出任何诊断性结论（如：提示黑色素瘤、疑似恶性等），只描述你看到的客观形态。
-4. 【极其重要】所有提取的值必须使用中文输出（如“男”、“左足底”），严禁将中文翻译为英文（如禁止输出 male, left sole）！
+2. JSON必须包含以下顶层键：patient_info, lifestyle_history, family_history, personal_history, lesion_clinical, lesion_symptoms。
+3. 绝对禁止输出任何诊断性结论（如：提示黑色素瘤、疑似恶性等），只描述你看到的客观形态和病史。
+4. 【极其重要】所有提取的值必须严格使用纯中文！
+   - 性别必须输出“男”或“女”，严禁输出 male/female/M/F。
+   - 解剖部位必须输出中文，如“足底”、“头皮”、“腹部”，严禁输出 foot/scalp/abdomen。
+   - 布尔值请严格使用 JSON 原生格式 true 或 false (小写且无引号)，严禁输出 "是"/"否"/"yes"/"no" 等字符串。
+违反上述任一规则将导致系统崩溃，请务必遵守！
 
 输出 Schema 格式如下：
 {json.dumps(EMPTY_CLINICAL_SCHEMA, ensure_ascii=False)}
@@ -126,7 +173,7 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
 
         for attempt in range(MAX_LLM_RETRIES):
             try:
-                # 拼接反馈信息到 Prompt
+                # 拼接反馈信息到 Prompt (原有优秀设计)
                 current_prompt = base_prompt
                 if feedback_msg:
                     current_prompt += f"\n\n【重要纠正】：你上一次的输出违反了规则，错误原因为：'{feedback_msg}'。请务必修正并重新输出！"
@@ -156,9 +203,9 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
                 logger.error(f"LLM clinical extraction API error (Attempt {attempt + 1}): {e}")
                 feedback_msg = f"API调用或解析异常: {str(e)}"
 
-        # 如果达到最大重试次数仍然失败，降级兜底
+        # 如果达到最大重试次数仍然失败，降级兜底 (原有优秀设计)
         logger.error(f"Max retries ({MAX_LLM_RETRIES}) reached. Falling back to EMPTY schema.")
-        return EMPTY_CLINICAL_SCHEMA
+        return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
 
-    # 什么数据都没传，返回空 Schema
-    return EMPTY_CLINICAL_SCHEMA
+    # 什么数据都没传，返回深拷贝的空 Schema
+    return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
