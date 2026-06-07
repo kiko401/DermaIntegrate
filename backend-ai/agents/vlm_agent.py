@@ -31,15 +31,17 @@ class VLMAgent:
 
     def _filter_diagnosis(self, text: str) -> str:
         """
-        核心安全机制：正则剥离模型输出中夹带的诊断性陈述。
-        禁止出现如：提示黑色素瘤、疑似恶性等诊断词汇。
+        核心安全机制：正则剥离模型输出中夹带的中英文诊断性陈述。
+        禁止出现如：提示黑色素瘤、疑似恶性、melanoma 等词汇。
         """
         diagnosis_patterns = [
             r"提示[^\s，。；]*?(瘤|癌|恶性|良性|病变|感染|炎)",
             r"疑似[^\s，。；]*?(瘤|癌|恶性|良性|病变|感染|炎)",
             r"考虑[^\s，。；]*?(瘤|癌|恶性|良性|病变|感染|炎)",
             r"建议[^\s，。；]*(活检|切除|手术|治疗)",
-            r"诊断[为是][^\s，。；]*"
+            r"诊断[为是][^\s，。；]*",
+            # 新增：拦截常见英文诊断词漂移
+            r"\b(melanoma|carcinoma|malignant|benign|dysplasia|neoplasm|lesion)\b"
         ]
         filtered_text = text
         for pattern in diagnosis_patterns:
@@ -69,14 +71,14 @@ class VLMAgent:
             orig_b64 = self._encode_image_to_base64(original_image_path)
             evi_b64 = self._encode_image_to_base64(evidence_image_path)
 
-            # 核心改造：角色降级 Prompt
+            # 核心改造：全中文 + 角色降级 Prompt
             prompt = (
                 "你是一个严谨的皮肤科形态学观察助手。你的任务是对比原图和病灶定位图，提取客观的形态学特征。\n"
                 "严格遵循以下规则：\n"
                 "1. 必须以纯JSON格式输出，不要有任何其他文字说明。\n"
-                "2. JSON必须包含以下键：border(边界), pigment_network(色素网络), color_distribution(颜色分布), vascular_pattern(血管模式), special_structures(特殊结构如蓝白幕、 globules等)。\n"
-                "3. 【极其重要】你只是特征提取器，绝对禁止输出任何诊断性结论（如：提示黑色素瘤、疑似恶性、建议活检等），只描述你看到的客观形态（如：边缘不规则、色素网缺失等）。\n"
-                "4. 所有输出必须使用中文。\n"
+                "2. JSON必须包含以下键：border(边界), pigment_network(色素网络), color_distribution(颜色分布), vascular_pattern(血管模式), special_structures(特殊结构如蓝白幕、小球等)。\n"
+                "3. 【极其重要】你只是特征提取器，绝对禁止输出任何诊断性结论（如：提示黑色素瘤、疑似恶性、建议活检、melanoma等），只描述你看到的客观形态。\n"
+                "4. 所有输出的值必须严格使用纯中文专业术语！严禁夹杂英文（如禁止输出 irregular, atypical, dots, globules，必须输出 不规则, 非典型, 点状, 小球状）。\n"
                 "输出示例：{\"border\": \"不规则且边界模糊\", \"pigment_network\": \"非典型色素网络增粗\", \"color_distribution\": \"多色不均匀，可见红白区\", \"vascular_pattern\": \"点状不规则血管\", \"special_structures\": \"可见蓝白幕结构\"}"
             )
 
@@ -99,7 +101,7 @@ class VLMAgent:
             result_text = response.choices[0].message.content
             result_dict = json.loads(result_text)
 
-            # 二次防御：正则剥离
+            # 二次防御：正则剥离中英文诊断词
             for key, value in result_dict.items():
                 if isinstance(value, str):
                     result_dict[key] = self._filter_diagnosis(value)
