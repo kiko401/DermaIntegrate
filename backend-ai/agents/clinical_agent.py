@@ -32,15 +32,16 @@ REGION_MAP = {
     "ABDOMEN": "腹部", "BACK": "背部", "CHEST": "胸部", "FACE": "面部",
     "FOOT": "足部", "FOREARM": "前臂", "HAND": "手部", "LATERAL CHEST": "侧胸",
     "LOWER LIMB": "下肢", "NECK": "颈部", "NOSE": "鼻部", "SCALP": "头皮",
-    "THIGH": "大腿", "UPPER LIMB": "上肢", "EAR": "耳部", "LIP": "唇部"
+    "THIGH": "大腿", "UPPER LIMB": "上肢", "EAR": "耳部", "LIP": "唇部",
+    "ORAL": "口腔", "NASAL": "鼻腔", "LIP": "唇部", "GENITAL": "生殖器"
 }
 
 # 扩充英文漂移黑名单 (针对 PAD-UFES-20 常见英文字段)
 ENGLISH_BLACKLIST = [
-    "male", "female", "m", "f",
+    "male", "female",  # 移除了 "m" 和 "f"，防止误伤布尔值缩写
     "left", "right", "sole", "palm", "scalp", "face", "abdomen", "back", "foot", "hand",
     "yes", "no", "neck", "ear", "chest", "arm", "leg"
-    # 注意：移除了 "true" 和 "false"，因为 JSON 原生布尔值是合法的
+    # 注意：移除了 "true" 和 "false"，防止误拦 JSON 原生布尔值
 ]
 
 def _is_truthy(value) -> bool:

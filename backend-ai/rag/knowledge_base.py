@@ -73,11 +73,15 @@ class RAGKnowledgeBase:
         """
         filter_tags = ["通用"]  # 默认必须有通用标签兜底，防止空召回
 
-        # 1. 部位映射：肢端型
+        # 1. 部位映射
         if clinical_result and clinical_result.get("lesion_clinical"):
             region = clinical_result.get("lesion_clinical", {}).get("region") or ""
+            # 肢端型
             if any(kw in region for kw in ["手", "足", "甲"]):
                 filter_tags.append("肢端")
+            # 黏膜型 (兼容"黏膜"和"粘膜"，防止 LLM 漂移或前端传错)
+            if any(kw in region for kw in ["口", "鼻", "唇", "生殖", "黏膜", "粘膜", "肛"]):
+                filter_tags.append("黏膜")
 
         # 2. 病理分期映射
         if pathology_result:
@@ -102,12 +106,23 @@ class RAGKnowledgeBase:
     def _build_multimodal_query(self, image_result: dict, clinical_result: dict, pathology_result: dict) -> str:
         """
         构造多模态复合查询向量：将关键特征拼接为自然语言查询。
+        引入查询增强：将硬匹配提取的强特征标签反注到查询中，提升专科条目召回率。
         """
         query_parts = []
 
+        # --- 查询增强：基于特征映射结果强化语义 ---
+        region = ""
+        if clinical_result and clinical_result.get("lesion_clinical"):
+            region = clinical_result.get("lesion_clinical", {}).get("region") or ""
+
+        if any(kw in region for kw in ["手", "足", "甲"]):
+            query_parts.append("肢端型黑色素瘤")  # 强信号注入
+        elif any(kw in region for kw in ["口", "鼻", "唇", "生殖", "黏膜", "粘膜", "肛"]):
+            query_parts.append("黏膜型黑色素瘤")  # 强信号注入
+
+        # --- 原有的特征拼接逻辑 ---
         # 临床特征
         if clinical_result and clinical_result.get("lesion_clinical"):
-            region = clinical_result.get("lesion_clinical", {}).get("region")
             if region: query_parts.append(f"病灶位于{region}")
 
         # 视觉特征
