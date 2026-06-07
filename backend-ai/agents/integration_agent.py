@@ -2,16 +2,14 @@ import json
 import logging
 from openai import OpenAI
 import json_repair
-from config import settings  # 引入配置中心
+from config import settings
 
 logger = logging.getLogger(__name__)
-
 
 def _build_dynamic_prompt(image_result: dict, clinical_result: dict, pathology_result: dict) -> str:
     """
     根据输入数据的存在与否动态拼接 Prompt。
-    若某模态缺失，明确指示 LLM 在建议中优先考虑完善相关检查。
-    严格对齐 v3.1 全中文契约。
+    严格对齐 v3.2 综合研判锚定契约。
     """
     evidence_parts = []
 
@@ -25,9 +23,8 @@ def _build_dynamic_prompt(image_result: dict, clinical_result: dict, pathology_r
     else:
         evidence_parts.append("【视觉证据】：未提供影像信息，请在建议中优先考虑完善皮肤镜或皮损局部拍照检查。")
 
-    # 2. 病历特征 (对齐 PAD-UFES-20 的新 Schema 结构)
+    # 2. 病历特征
     if clinical_result:
-        # 过滤掉全为 None 的二级字典，让 LLM 聚焦有效信息
         filtered_clinical = {}
         for k, v in clinical_result.items():
             if isinstance(v, dict) and any(sv is not None for sv in v.values()):
@@ -40,7 +37,7 @@ def _build_dynamic_prompt(image_result: dict, clinical_result: dict, pathology_r
     else:
         evidence_parts.append("【临床特征】：未提供临床信息，请在建议中优先考虑详细询问病史及查体。")
 
-    # 3. 病理与分子规则 (对齐 TCGA-SKCM/AJCC 8th 新逻辑)
+    # 3. 病理与分子规则
     if pathology_result:
         t_stage = pathology_result.get("t_stage", "未提供")
         treatments = pathology_result.get("treatment_recommendations", [])
@@ -61,23 +58,23 @@ def _build_dynamic_prompt(image_result: dict, clinical_result: dict, pathology_r
             "你是一个严谨的皮肤病专科辅助诊断AI助手。你的任务是根据提供的多模态证据，综合分析并输出结构化的辅助诊断报告。\n\n"
             "【核心约束】：\n"
             "1. 严禁输出终局诊断结论（如“确诊为黑色素瘤”），你只能提供风险分层和鉴别诊断建议。\n"
-            "2. 如果某项证据缺失，你必须在建议中明确指出“缺乏XXX信息，建议优先完善相关检查”，切勿编造缺失信息。\n"
+            "2. 综合研判原则：如果【病理与分子规则】中已给出明确的T分期或病理诊断结论，必须以此作为风险分层和建议的核心依据。对于视觉或临床特征的缺失，请客观提示“建议完善相关检查”，但不应因此否定或降级已有的病理分期结论，避免过度保守导致延误病情。\n"
             "3. 必须以严格的 JSON 格式输出，包含以下键：risk_level, key_concerns, recommendations, differential, disclaimer, status。\n"
             "4. 【终极全中文约束】你的输出必须 100% 使用专业且规范的中文！严禁在任何字段中夹杂英文（如不得输出 melanoma、BRAF、SLNB，必须替换为 黑色素瘤、BRAF基因、前哨淋巴结活检）。所有的建议必须以中文医学规范表述。\n\n"
             "【输入证据】：\n" + "\n".join(evidence_parts) + "\n\n"
             "【输出格式要求】：\n"
             "{\n"
             '  "risk_level": "极高危/高危/中高危/中危/低危/数据不足无法评估",\n'
-            '  "key_concerns": [{"item": "关注要点1", "source_id": "[NCCN-13]"}, {"item": "关注要点2", "source_id": "[WHW-27]"}],\n'
-            '  "recommendations": [{"item": "建议检查1", "source_id": "[AJCC-05]"}, {"item": "建议检查2", "source_id": "[JB-01]"}],\n'
+            '  "key_concerns": [{"item": "关注要点1", "source_id": "[参考编号1]"}, {"item": "关注要点2", "source_id": "[参考编号2]"}],\n'
+            '  "recommendations": [{"item": "建议检查1", "source_id": "[参考编号3]"}, {"item": "建议检查2", "source_id": "R00"}],\n'
             '  "differential": ["鉴别诊断1", "鉴别诊断2"],\n'
             '  "disclaimer": "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断",\n'
             '  "status": "complete 或 incomplete"\n'
             "}\n\n"
             "【严格引用约束（极重要）】：\n"
             "1. 你的输出中 key_concerns 和 recommendations 的每一项，必须包含 source_id 字段。\n"
-            "2. source_id 的值必须严格照抄上述【权威指南参考】中每条文本开头的编号！例如 \"[AJCC-05]\", \"[NCCN-13]\", \"[WHW-27]\", \"[JB-01]\"。必须包含方括号！\n"
-            "3. 严禁捏造不存在的编号，如果无法对应，source_id 填写 \"R00\"。"
+            "2. source_id 的值必须严格照抄上述【权威指南参考】中每条文本开头的编号！必须包含方括号！例如参考中第一条是\"[NCCN-13] ...\"，则填\"[NCCN-13]\"。\n"
+            "3. 绝对禁止凭空捏造参考中不存在的编号！如果该建议无法对应到参考中的具体编号，source_id 必须填写 \"R00\"。"
     )
     return prompt
 
@@ -86,11 +83,7 @@ def run_integration_agent(task_id: str, image_result: dict, clinical_result: dic
                           rag_passages: list) -> dict:
     """
     整合 Agent：融合多源特征，生成结构化报告。
-    如果 USE_MOCK_INTEGRATION=true 则走 Mock，否则调用真实 LLM。
-    返回符合 SSEResultEvent 契约的字典。
     """
-
-    # 兜底降级报告
     def get_fallback_report(risk_msg="AI 推理异常", concern_msg="整合推理失败，请结合临床经验判断"):
         return {
             "task_id": task_id,
@@ -102,7 +95,6 @@ def run_integration_agent(task_id: str, image_result: dict, clinical_result: dic
             "status": "incomplete"
         }
 
-    # 1. 判断是否走 Mock (使用 settings 规范读取)
     if settings.USE_MOCK_INTEGRATION:
         logger.info(f"Running MOCK Integration Agent for task: {task_id}")
         missing_modalities = []
@@ -113,7 +105,6 @@ def run_integration_agent(task_id: str, image_result: dict, clinical_result: dic
         risk_msg = "数据不足无法评估" if missing_modalities else "中危 (Mock)"
         concern_text = f"缺乏{'、'.join(missing_modalities)}信息，建议完善相关检查" if missing_modalities else "Mock关注要点"
 
-        # 动态判定 status
         is_complete = not missing_modalities and (
                     pathology_result is not None and pathology_result.get("t_stage") not in ["未提供", "无法分期"])
 
@@ -127,7 +118,6 @@ def run_integration_agent(task_id: str, image_result: dict, clinical_result: dic
             "status": "complete" if is_complete else "incomplete"
         }
 
-    # 2. 真实 LLM 调用逻辑
     logger.info(f"Running REAL Integration Agent for task: {task_id}")
     try:
         client = OpenAI(
@@ -137,7 +127,6 @@ def run_integration_agent(task_id: str, image_result: dict, clinical_result: dic
 
         prompt = _build_dynamic_prompt(image_result, clinical_result, pathology_result)
 
-        # 如果有 RAG 结果，附加在 Prompt 末尾 (为 Step 6 预留接口)
         if rag_passages:
             rag_text = "\n".join(rag_passages)
             prompt += f"\n\n【权威指南参考】（必须基于以下参考作答并照抄编号）：\n{rag_text}"
@@ -152,16 +141,13 @@ def run_integration_agent(task_id: str, image_result: dict, clinical_result: dic
 
         result_str = response.choices[0].message.content
 
-        # 3. 解析与容错 (引入 json-repair 兜底)
         try:
             parsed_data = json.loads(result_str)
         except json.JSONDecodeError:
             logger.warning(f"LLM output JSON decode failed, attempting json-repair. Raw: {result_str[:100]}...")
             parsed_data = json_repair.loads(result_str)
 
-        # 4. 数据契约对齐 (严格保障前端渲染不崩溃)
-        # 动态评估 status 字段：如果缺乏核心病理，或者 LLM 判定数据不足，标记为 incomplete
-        is_incomplete_by_data = (pathology_result is None or pathology_result.get("t_stage") in ["未提供", "无法分期"])
+        is_incomplete_by_data = (pathology_result is None or pathology_result.get("t_stage") in ["未提供", "无法分期", "非黑色素瘤病变"])
         llm_status = parsed_data.get("status", "incomplete").lower()
 
         final_status = "incomplete" if is_incomplete_by_data or llm_status == "incomplete" else "complete"
@@ -177,7 +163,6 @@ def run_integration_agent(task_id: str, image_result: dict, clinical_result: dic
             "status": final_status
         }
 
-        # 确保列表内的字典包含必须的键
         for item in final_data["key_concerns"]:
             if isinstance(item, dict): item.setdefault("source_id", "R00")
         for item in final_data["recommendations"]:

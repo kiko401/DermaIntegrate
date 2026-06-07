@@ -1,3 +1,4 @@
+# backend-ai/config.py
 import os
 from dotenv import load_dotenv
 
@@ -20,9 +21,10 @@ class Settings:
     INTEGRATION_BASE_URL: str = os.getenv("INTEGRATION_BASE_URL", "https://api.deepseek.com")
     INTEGRATION_MODEL: str = os.getenv("INTEGRATION_MODEL", "deepseek-v4-flash")
 
-    # 降级开关配置
+    # 🚨 降级开关配置：默认设为 false (故障安全原则)
+    # 只有在 .env 中显式写明 USE_MOCK_VLM=true 时才会走 Mock 逻辑
     USE_MOCK_VLM: bool = os.getenv("USE_MOCK_VLM", "false").lower() == "true"
-    USE_MOCK_INTEGRATION: bool = os.getenv("USE_MOCK_INTEGRATION", "true").lower() == "true"
+    USE_MOCK_INTEGRATION: bool = os.getenv("USE_MOCK_INTEGRATION", "false").lower() == "true"
 
 
 settings = Settings()
