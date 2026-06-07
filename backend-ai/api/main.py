@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-# 新增 httpx 导入，用于 4.3 离线摄取
 import httpx
 
 from config import settings
@@ -28,22 +27,19 @@ from models.database import (
     AIFeature as FeatureDB,
 )
 
-# 新增 DicomParser 导入，用于 4.2 和 4.3 转码
 from preprocessing.dicom_parser import DicomParser, DicomParseException
 
-# 新增阶段5 AI 管线导入
 from cnn.lesion_extractor import LesionExtractor
 from agents.vlm_agent import VLMAgent
-from agents.clinical_agent import parse_clinical_data  # 病历 Agent (v3.1 PAD-UFES-20)
-from agents.pathology_agent import evaluate_pathology_data  # 病理与分子 Agent (v3.1 替换原化验 Agent)
-from agents.integration_agent import run_integration_agent  # 整合 Agent (v3.1 全中文防线)
+from agents.clinical_agent import parse_clinical_data
+from agents.pathology_agent import evaluate_pathology_data
+from agents.integration_agent import run_integration_agent
 from rag.knowledge_base import RAGKnowledgeBase
 
-# 新增阶段6 自定义异常导入
 from exceptions import ModelInferenceException, DiagnosisUncertainException
 
 # ==========================================
-# 日志配置（替换所有 print）
+# 日志配置
 # ==========================================
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
@@ -53,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================
-# Pydantic 模型定义 (严格对齐 v2.0/v3.1 契约)
+# Pydantic 模型定义
 # ==========================================
 class ErrorResponse(BaseModel):
     error: str
@@ -90,7 +86,6 @@ class ImageMetadataResponse(BaseModel):
     original_dicom_tags: Optional[DicomTags] = None
 
 
-# ===== 新增多模态结构化报告模型 =====
 class KeyConcern(BaseModel):
     item: str
     source_id: str
@@ -121,7 +116,7 @@ os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """生命周期：探测数据库连接 & 预加载 RAG 模型"""
+    """生命周期：探测数据库连接 & 挂载 RAG 检索器"""
     try:
         async with async_session() as session:
             await session.execute(select(ImageDB).limit(1))
@@ -130,13 +125,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"Database connection failed: {e}")
         raise RuntimeError("Database not ready") from e
 
-    # 预加载 RAG 知识库（耗时操作，仅启动时执行一次）
+    # 🚨 核心修复：API启动时只需实例化连接 Qdrant 的检索器
+    # 不需要重新执行向量化入库，那是 init_rag.py 离线干的活
     try:
-        app.state.rag_kb = RAGKnowledgeBase(docs_dir="./rag/docs")
-        app.state.rag_kb.init_from_documents()
-        logger.info("RAG Knowledge Base loaded OK")
+        app.state.rag_kb = RAGKnowledgeBase()
+        logger.info("RAG Knowledge Base connector initialized OK")
     except Exception as e:
-        logger.error(f"RAG Knowledge Base load failed: {e}")
+        logger.error(f"RAG Knowledge Base init failed: {e}")
+        app.state.rag_kb = None  # 降级处理，防止启动崩溃
 
     yield
 
@@ -157,7 +153,7 @@ app.add_middleware(
 app.mount("/ai-static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
 
-# 全局异常处理器：拦截证据链断裂异常，返回422
+# 全局异常处理器
 @app.exception_handler(DiagnosisUncertainException)
 async def diagnosis_uncertain_handler(request: Request, exc: DiagnosisUncertainException):
     return JSONResponse(
@@ -186,12 +182,11 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
                              cancel_event: threading.Event, queue: asyncio.Queue, rag_kb: RAGKnowledgeBase):
     """
     可取消的多模态推理管线包装，在独立子线程中执行。
-    支持按需触发模态 Agent，并推送语义化步级状态。对齐 v3.1 契约。
     """
     image_result, clinical_result, pathology_result = None, None, None
 
     try:
-        # 1. 图像 Agent (按需触发)
+        # 1. 图像 Agent
         if image_uid and original_image_path:
             if cancel_event.is_set(): raise InterruptedError()
 
@@ -212,7 +207,7 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
             }
             queue.put_nowait(("step", {"step": "image_done", "message": "视觉定位与形态学完成", "data": image_result}))
 
-        # 2. 病历 Agent 按需触发 (对齐 PAD-UFES-20 新 Schema)
+        # 2. 病历 Agent
         if clinical_json or clinical_text:
             if cancel_event.is_set(): raise InterruptedError()
             logger.info(f"Task {task_id}: Running Clinical Agent...")
@@ -228,7 +223,7 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
             queue.put_nowait(
                 ("step", {"step": "clinical_done", "message": "病历结构化解析完成", "data": clinical_result}))
 
-        # 3. 病理与分子 Agent 按需触发
+        # 3. 病理与分子 Agent
         if lab_json:
             if cancel_event.is_set(): raise InterruptedError()
             logger.info(f"Task {task_id}: Running Pathology Agent...")
@@ -242,22 +237,20 @@ def run_pipeline_with_cancel(task_id: str, image_uid: Optional[str], original_im
             pathology_result = evaluate_pathology_data(pathology_json=path_dict, location_from_clinical=lesion_location)
             queue.put_nowait(("step", {"step": "pathology_done", "message": "病理与分子规则引擎完成", "data": pathology_result}))
 
-        # 4. RAG 两阶段检索 (基于多模态特征召回带 ID 的专科指南)
+        # 4. RAG 两阶段检索
         rag_passages = []
         if rag_kb:
             if cancel_event.is_set(): raise InterruptedError()
             try:
-                # 传入各 Agent 的输出，供 RAG 提取标签和构造查询
                 rag_passages = rag_kb.retrieve(image_result, clinical_result, pathology_result, top_k=3)
                 logger.info(f"Task {task_id}: Retrieved {len(rag_passages)} RAG passages.")
             except Exception as e:
                 logger.error(f"Task {task_id}: RAG retrieval failed: {e}. Proceeding without RAG.")
 
-        # 5. 整合 Agent (必触发，传入 pathology_result 和 RAG 检索结果)
+        # 5. 整合 Agent
         if cancel_event.is_set(): raise InterruptedError()
         final_report_dict = run_integration_agent(task_id, image_result, clinical_result, pathology_result, rag_passages)
 
-        # 管线执行成功，推送最终数据组装标记
         queue.put_nowait(("final_data", final_report_dict))
 
     except InterruptedError:
@@ -289,23 +282,19 @@ async def health(db: AsyncSession = Depends(get_db)):
 
 @app.post("/upload", status_code=202, response_model=UploadIngestResponse, tags=["Task"])
 async def upload_data(
-        file: Optional[UploadFile] = File(None),       # 必须加 Optional
-        clinical_text: Optional[str] = Form(None),     # 修复：必须使用 Optional[str]
-        clinical_json: Optional[str] = Form(None),     # 修复：必须使用 Optional[str]
-        lab_json: Optional[str] = Form(None),          # 修复：必须使用 Optional[str]
+        file: Optional[UploadFile] = File(None),
+        clinical_text: Optional[str] = Form(None),
+        clinical_json: Optional[str] = Form(None),
+        lab_json: Optional[str] = Form(None),
         db: AsyncSession = Depends(get_db)
 ):
-    """多模态数据上传：接收图片、病历文本/JSON、化验JSON，统一生成 task_id"""
-
-    # 1. 校验：至少要有一个数据传入
     if not file and not clinical_text and not clinical_json and not lab_json:
         raise HTTPException(status_code=400, detail="至少需要提供一项模态数据 (图片、病历或化验)")
 
     task_id = str(uuid.uuid4())
-    image_uid = None  # 默认无图片
+    image_uid = None
 
-    # 2. 文件处理逻辑 (仅当 file 存在时执行)
-    img_status = "ready"  # 如果没有图片，默认 ready
+    img_status = "ready"
     img_url = None
     img_format = None
     img_width = None
@@ -319,15 +308,13 @@ async def upload_data(
         ext = os.path.splitext(file.filename or "")[1].lower()
         if not ext: ext = ".png"
 
-        # 原始文件落盘
         raw_filename = f"{image_uid}_{file.filename or 'unknown'}"
         raw_path = os.path.join(settings.UPLOAD_DIR, raw_filename)
         with open(raw_path, "wb") as f:
             f.write(content)
 
-        # 判断类型，决定路由
         is_dicom = file.content_type == "application/dicom" or ext == ".dcm"
-        img_status = "processing"  # 有图片时，状态先置为处理中
+        img_status = "processing"
 
         if is_dicom:
             img_format = "DICOM"
@@ -354,50 +341,34 @@ async def upload_data(
             img_status = "ready"
             img_url = f"/ai-static/images/{static_filename}"
             img_format = ext.lstrip(".").upper()
-            img_width = 1024  # 兜底值
+            img_width = 1024
             img_height = 768
 
-        # 图片入库
         image = ImageDB(
-            image_uid=image_uid,
-            task_id=task_id,
-            format=img_format,
-            url=img_url,
-            status=img_status,
-            error_message=error_msg,
-            width=img_width,
-            height=img_height,
-            original_dicom_tags=dicom_tags_json,
-            created_at=datetime.now(timezone.utc)
+            image_uid=image_uid, task_id=task_id, format=img_format, url=img_url, status=img_status,
+            error_message=error_msg, width=img_width, height=img_height,
+            original_dicom_tags=dicom_tags_json, created_at=datetime.now(timezone.utc)
         )
         db.add(image)
 
-    # 3. 任务入库 (包含多模态上下文)
     task = TaskDB(
-        task_id=task_id,
-        image_uid=image_uid,
-        status="queued",
-        clinical_text=clinical_text,
-        clinical_json=clinical_json,
-        lab_json=lab_json,
+        task_id=task_id, image_uid=image_uid, status="queued",
+        clinical_text=clinical_text, clinical_json=clinical_json, lab_json=lab_json,
         created_at=datetime.now(timezone.utc)
     )
     db.add(task)
     await db.commit()
 
-    logger.info(
-        f"Upload accepted: task_id={task_id}, image_uid={image_uid}, has_clinical={bool(clinical_json or clinical_text)}, has_lab={bool(lab_json)}")
+    logger.info(f"Upload accepted: task_id={task_id}, image_uid={image_uid}, has_clinical={bool(clinical_json or clinical_text)}, has_lab={bool(lab_json)}")
 
     return UploadIngestResponse(task_id=task_id, status="accepted")
 
 
 @app.post("/ingest", status_code=202, response_model=UploadIngestResponse, tags=["Task"])
 async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
-    """离线摄取：下载URL资源，执行DICOM转码并入库"""
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
 
-    # 初始化入库所需的变量
     img_status = "processing"
     img_url = None
     img_format = "DICOM"
@@ -438,25 +409,13 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)):
         img_status = "failed"
         error_msg = f"文件下载失败: {str(e)}"
 
-    task = TaskDB(
-        task_id=task_id,
-        image_uid=image_uid,
-        status="queued",
-        created_at=datetime.now(timezone.utc)
-    )
+    task = TaskDB(task_id=task_id, image_uid=image_uid, status="queued", created_at=datetime.now(timezone.utc))
     db.add(task)
 
     image = ImageDB(
-        image_uid=image_uid,
-        task_id=task_id,
-        format=img_format,
-        url=img_url,
-        status=img_status,
-        error_message=error_msg,
-        width=img_width if img_width else 1024,
-        height=img_height if img_height else 768,
-        original_dicom_tags=dicom_tags_json,
-        created_at=datetime.now(timezone.utc)
+        image_uid=image_uid, task_id=task_id, format=img_format, url=img_url, status=img_status,
+        error_message=error_msg, width=img_width if img_width else 1024, height=img_height if img_height else 768,
+        original_dicom_tags=dicom_tags_json, created_at=datetime.now(timezone.utc)
     )
     db.add(image)
     await db.commit()
@@ -477,15 +436,9 @@ async def get_image(image_uid: str, db: AsyncSession = Depends(get_db)):
         dicom_tags = DicomTags(**image.original_dicom_tags)
 
     return ImageMetadataResponse(
-        image_uid=image.image_uid,
-        format=image.format,
-        url=image.url,
-        status=image.status,
-        error_message=image.error_message,
-        width=image.width,
-        height=image.height,
-        color_space=image.color_space or "sRGB",
-        original_dicom_tags=dicom_tags
+        image_uid=image.image_uid, format=image.format, url=image.url, status=image.status,
+        error_message=image.error_message, width=image.width, height=image.height,
+        color_space=image.color_space or "sRGB", original_dicom_tags=dicom_tags
     )
 
 
@@ -497,7 +450,6 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
     if not task:
         return create_error_response(404, "NotFound", "TASK_NOT_FOUND", "task_id 不存在")
 
-    # 获取多模态上下文
     image_uid = task.image_uid
     clinical_text = task.clinical_text
     clinical_json = task.clinical_json
@@ -506,7 +458,6 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
     task.status = "running"
     await db.commit()
 
-    # 获取图像物理路径 (如果有)
     original_image_path = None
     if image_uid:
         img_result = await db.execute(select(ImageDB).where(ImageDB.image_uid == image_uid))
@@ -524,7 +475,6 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
         cancel_event = threading.Event()
         queue = asyncio.Queue()
 
-        # 启动子线程执行耗时推理管线
         inference_thread = threading.Thread(
             target=run_pipeline_with_cancel,
             args=(task_id, image_uid, original_image_path,
@@ -550,30 +500,25 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                         yield f"event: error\ndata: {json.dumps(data)}\n\n"
                         break
                     elif event_type == "final_data":
-                        # 收到最终数据，执行入库，推送 result 事件
                         try:
                             result_event = SSEResultEvent(**data)
 
                             try:
                                 async with async_session() as session:
-                                    # 更新 Task 状态
                                     task_res = await session.execute(select(TaskDB).where(TaskDB.task_id == task_id))
                                     db_task = task_res.scalar_one()
                                     db_task.status = "completed"
                                     db_task.completed_at = datetime.now(timezone.utc)
 
-                                    # 保存特征 (以 task_id 为主键)
-                                    feat_res = await session.execute(
-                                        select(FeatureDB).where(FeatureDB.task_id == task_id))
+                                    feat_res = await session.execute(select(FeatureDB).where(FeatureDB.task_id == task_id))
                                     existing_feature = feat_res.scalar_one_or_none()
 
                                     if existing_feature:
                                         existing_feature.ai_features = result_event.model_dump()
-                                        existing_feature.image_uid = image_uid  # 同步更新关联的 image_uid
+                                        existing_feature.image_uid = image_uid
                                     else:
                                         feature = FeatureDB(
-                                            task_id=task_id,
-                                            image_uid=image_uid,
+                                            task_id=task_id, image_uid=image_uid,
                                             ai_features=result_event.model_dump(),
                                             created_at=datetime.now(timezone.utc)
                                         )
@@ -602,7 +547,6 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-# 路由修改：从 /features/{image_uid} 改为 /features/{task_id}
 @app.get("/features/{task_id}", response_model=SSEResultEvent, tags=["Diagnosis"])
 async def get_historical_features(task_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(FeatureDB).where(FeatureDB.task_id == task_id))

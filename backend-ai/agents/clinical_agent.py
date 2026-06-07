@@ -33,7 +33,11 @@ REGION_MAP = {
     "FOOT": "足部", "FOREARM": "前臂", "HAND": "手部", "LATERAL CHEST": "侧胸",
     "LOWER LIMB": "下肢", "NECK": "颈部", "NOSE": "鼻部", "SCALP": "头皮",
     "THIGH": "大腿", "UPPER LIMB": "上肢", "EAR": "耳部", "LIP": "唇部",
-    "ORAL": "口腔", "NASAL": "鼻腔", "LIP": "唇部", "GENITAL": "生殖器"
+    "ORAL": "口腔", "NASAL": "鼻腔", "GENITAL": "生殖器",
+    # 🚨 新增：补全 LLM 常见自由文本输出与大词的映射，确保病理 Agent 触发
+    "SOLE": "足底", "PALM": "手掌", "HEEL": "足跟",
+    "FINGER": "手指", "TOE": "足趾", "NAIL": "甲床", "THUMB": "拇指",
+    "BIG TOE": "拇趾", "GREAT TOE": "拇趾"
 }
 
 # 扩充英文漂移黑名单 (针对 PAD-UFES-20 常见英文字段)
@@ -44,6 +48,17 @@ ENGLISH_BLACKLIST = [
     # 注意：移除了 "true" 和 "false"，防止误拦 JSON 原生布尔值
 ]
 
+# 🚨 新增：后置部位语义清洗映射表（极重要：确保跨模态触发词 100% 对齐）
+# 将口语/俗称/细粒度词，清洗为包含病理 Agent 触发核心词的规范中文
+REGION_NORMALIZATION_MAP = {
+    "脚": "足", "脚底": "足底", "脚跟": "足跟", "脚趾": "足趾", "脚背": "足背",
+    "大拇趾": "拇趾", "大脚趾": "拇趾",
+    "手掌心": "手掌", "手心": "手掌", "手指头": "手指", "大拇指": "拇指",
+    "鼻翼": "鼻部", "鼻侧": "鼻部", "鼻腔内": "鼻腔",
+    "口腔内": "口腔", "嘴唇": "唇部", "下唇": "唇部", "上唇": "唇部",
+}
+
+
 def _is_truthy(value) -> bool:
     """防御性布尔值判定，兼容各种变体"""
     if isinstance(value, bool): return value
@@ -51,17 +66,42 @@ def _is_truthy(value) -> bool:
     if isinstance(value, str): return value.strip().lower() in ["true", "1", "有", "是", "yes"]
     return False
 
+
 def _map_gender(raw_gender) -> str:
     """性别强制中文映射"""
     if not raw_gender: return None
     val = str(raw_gender).lower().strip()
-    return GENDER_MAP.get(val, raw_gender) # 映射命中返中文，未命中保留原值(可能是中文)
+    return GENDER_MAP.get(val, raw_gender)  # 映射命中返中文，未命中保留原值(可能是中文)
+
+
+def _normalize_region_for_triggers(region_str: str) -> str:
+    """
+    后置语义清洗：将 LLM 输出的细粒度/口语部位，清洗为包含病理触发核心词的规范中文。
+    例如："左脚底" -> "左足底" (确保包含"足"字，触发肢端逻辑)
+    """
+    if not region_str:
+        return None
+
+    for old, new in REGION_NORMALIZATION_MAP.items():
+        region_str = region_str.replace(old, new)
+
+    return region_str
+
 
 def _map_region(raw_region) -> str:
-    """部位强制中文映射 (极重要：确保肢端型规则触发)"""
+    """部位强制中文映射 + 触发词深度清洗"""
     if not raw_region: return None
     val = str(raw_region).upper().strip()
-    return REGION_MAP.get(val, raw_region)
+
+    # 1. 先查静态映射表 (针对结构化 JSON 输入的大词，如 FOOT->足部)
+    mapped = REGION_MAP.get(val, raw_region)
+
+    # 2. 如果没命中映射表（说明是 LLM 自由文本输出的中文，如"左脚底"），进行后置语义清洗
+    if mapped == raw_region:
+        mapped = _normalize_region_for_triggers(mapped)
+
+    return mapped
+
 
 def _validate_clinical_data(data: dict) -> str:
     """
@@ -71,7 +111,8 @@ def _validate_clinical_data(data: dict) -> str:
         return "输出不是有效的 JSON 字典"
 
     # 1. 检查是否包含必须的顶层键 (对齐新 Schema)
-    required_keys = ["patient_info", "lifestyle_history", "family_history", "personal_history", "lesion_clinical", "lesion_symptoms"]
+    required_keys = ["patient_info", "lifestyle_history", "family_history", "personal_history", "lesion_clinical",
+                     "lesion_symptoms"]
     for key in required_keys:
         if key not in data:
             return f"缺少必须的顶层键: {key}"
@@ -84,6 +125,7 @@ def _validate_clinical_data(data: dict) -> str:
 
     return ""  # 验证通过
 
+
 def _clean_llm_json_response(text: str) -> str:
     """清洗 LLM 返回的 Markdown 格式包裹的 JSON (保留原有设计)"""
     text = text.strip()
@@ -91,6 +133,7 @@ def _clean_llm_json_response(text: str) -> str:
     if match:
         return match.group(1).strip()
     return text
+
 
 def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None) -> dict:
     """
@@ -122,7 +165,7 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
             mapped_data["personal_history"]["other_cancer_history"] = _is_truthy(ph.get("other_cancer_history"))
 
             lc = data.get("lesion_clinical", {})
-            # 部位强制中文转换
+            # 部位强制中文转换 + 语义清洗
             mapped_data["lesion_clinical"]["region"] = _map_region(lc.get("region"))
             mapped_data["lesion_clinical"]["diameter_1_mm"] = lc.get("diameter_1_mm") or lc.get("diameter_1")
             mapped_data["lesion_clinical"]["diameter_2_mm"] = lc.get("diameter_2_mm") or lc.get("diameter_2")
@@ -190,9 +233,14 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
                 cleaned_str = _clean_llm_json_response(result_str)
                 parsed_data = json.loads(cleaned_str)
 
-                # ===== 核心校验逻辑 =====
+                # ===== 核心校验与清洗逻辑 =====
                 validation_error = _validate_clinical_data(parsed_data)
                 if not validation_error:
+                    # 🚨 校验通过后，必须对 LLM 输出的部位进行一次后置清洗，确保触发词对齐
+                    if parsed_data.get("lesion_clinical", {}).get("region"):
+                        raw_region = parsed_data["lesion_clinical"]["region"]
+                        parsed_data["lesion_clinical"]["region"] = _normalize_region_for_triggers(raw_region)
+
                     logger.info(f"Successfully extracted clinical_text using LLM (Attempt {attempt + 1}).")
                     return parsed_data
                 else:
