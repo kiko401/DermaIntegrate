@@ -21,6 +21,21 @@ backend-ai/test_data/
 backend-ai/diagnose_color.py
 backend-ai/test_sse.html
 
+# =============== Node 依赖 ===============
+node_modules/
+
+# =============== 密钥与证书（严禁提交） ===============
+*.pem
+*.key
+*.p12
+*.pfx
+
+# =============== Obsidian 编辑器配置 ===============
+.obsidian/
+
+# =============== Claude Code 会话数据 ===============
+.claudian/
+
 # =============== IDE 与编辑器配置 ===============
 .idea/
 .vscode/
