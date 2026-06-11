@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DermaIntegrate - 联调测试页面</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }
+        .section { margin-bottom: 30px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .section h3 { margin-top: 0; color: #333; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input, textarea, button { width: 100%; padding: 8px; box-sizing: border-box; }
+        textarea { height: 80px; resize: vertical; }
+        button { background: #007cba; color: white; border: none; padding: 12px; cursor: pointer; border-radius: 4px; }
+        button:hover { background: #005a8b; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 4px; }
+        .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .status.info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .events { background: #f8f9fa; padding: 15px; border: 1px solid #dee2e6; border-radius: 4px; max-height: 400px; overflow-y: auto; }
+        .event-item { padding: 8px; margin: 5px 0; border-left: 4px solid #007cba; background: white; }
+        .event-step { border-left-color: #28a745; }
+        .event-result { border-left-color: #17a2b8; }
+        .event-error { border-left-color: #dc3545; }
+        .json-display { font-family: monospace; font-size: 12px; background: #f1f1f1; padding: 8px; border-radius: 3px; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DermaIntegrate - 联调测试页面</h1>
+        <p>Phase 0 联调验证：Node/Express 代理层 → AI 推理域 SSE 流式通信测试</p>
+
+        <!-- 健康检查 -->
+        <div class="section">
+            <h3>1. 健康检查</h3>
+            <button onclick="checkHealth()">检查 AI 服务连接</button>
+            <div id="healthResult"></div>
+        </div>
+
+        <!-- 多模态数据上传 -->
+        <div class="section">
+            <h3>2. 多模态数据上传</h3>
+            <form id="uploadForm">
+                <div class="form-group">
+                    <label for="clinicalText">病历自由文本：</label>
+                    <textarea id="clinicalText" placeholder="患者左足底出现黑色斑块，逐渐增大..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="clinicalJson">结构化病历 JSON：</label>
+                    <textarea id="clinicalJson" placeholder='{"patient_info":{"age":65,"gender":"男"},"lesion_clinical":{"region":"左足底","diameter_1_mm":15.0}}'></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="labJson">病理数据 JSON：</label>
+                    <textarea id="labJson" placeholder='{"breslow_thickness_mm":5.2,"ulceration":true,"braf_mutation":"突变型"}'></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="imageFile">皮肤镜图像（可选）：</label>
+                    <input type="file" id="imageFile" accept="image/*,.dcm">
+                </div>
+                <button type="submit" id="uploadBtn">发起 AI 诊断</button>
+            </form>
+            <div id="uploadResult"></div>
+        </div>
+
+        <!-- SSE 流式结果 -->
+        <div class="section">
+            <h3>3. AI 诊断流式结果</h3>
+            <div id="streamStatus"></div>
+            <div id="streamEvents" class="events" style="display:none;">
+                <div id="eventsList"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentEventSource = null;
+
+        async function checkHealth() {
+            const resultDiv = document.getElementById('healthResult');
+            resultDiv.innerHTML = '<div class="status info">检查中...</div>';
+
+            try {
+                const response = await fetch('/api/health/ai');
+                const data = await response.json();
+
+                if (data.ok) {
+                    resultDiv.innerHTML = `
+                        <div class="status success">
+                            <strong>AI 服务连接正常</strong><br>
+                            服务地址: ${data.ai_base_url}<br>
+                            响应时间: ${data.response_time_ms}ms<br>
+                            服务状态: ${data.upstream.status}
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="status error">
+                            <strong>AI 服务连接失败</strong><br>
+                            服务地址: ${data.ai_base_url}<br>
+                            错误: ${data.error || '未知错误'}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="status error">
+                        <strong>请求失败</strong><br>
+                        错误: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const uploadBtn = document.getElementById('uploadBtn');
+            const resultDiv = document.getElementById('uploadResult');
+
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '上传中...';
+            resultDiv.innerHTML = '<div class="status info">正在上传数据...</div>';
+
+            // 关闭之前的 SSE 连接
+            if (currentEventSource) {
+                currentEventSource.close();
+                currentEventSource = null;
+            }
+
+            try {
+                const formData = new FormData();
+
+                const clinicalText = document.getElementById('clinicalText').value.trim();
+                const clinicalJson = document.getElementById('clinicalJson').value.trim();
+                const labJson = document.getElementById('labJson').value.trim();
+                const imageFile = document.getElementById('imageFile').files[0];
+
+                if (clinicalText) formData.append('clinical_text', clinicalText);
+                if (clinicalJson) formData.append('clinical_json', clinicalJson);
+                if (labJson) formData.append('lab_json', labJson);
+                if (imageFile) formData.append('file', imageFile);
+
+                const response = await fetch('/api/tasks/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(`上传失败: ${data.message || data.error || '未知错误'}`);
+                }
+
+                resultDiv.innerHTML = `
+                    <div class="status success">
+                        <strong>上传成功</strong><br>
+                        Task ID: <code>${data.task_id}</code><br>
+                        状态: ${data.status}
+                    </div>
+                `;
+
+                // 启动 SSE 流
+                startStreaming(data.task_id);
+
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="status error">
+                        <strong>上传失败</strong><br>
+                        错误: ${error.message}
+                    </div>
+                `;
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '发起 AI 诊断';
+            }
+        });
+
+        function startStreaming(taskId) {
+            const statusDiv = document.getElementById('streamStatus');
+            const eventsDiv = document.getElementById('streamEvents');
+            const eventsList = document.getElementById('eventsList');
+
+            statusDiv.innerHTML = '<div class="status info">正在连接 SSE 流...</div>';
+            eventsDiv.style.display = 'block';
+            eventsList.innerHTML = '';
+
+            currentEventSource = new EventSource(`/api/tasks/${taskId}/stream`);
+
+            currentEventSource.onopen = function(event) {
+                statusDiv.innerHTML = '<div class="status success">SSE 连接已建立，等待 AI 推理结果...</div>';
+            };
+
+            currentEventSource.addEventListener('step', function(event) {
+                const data = JSON.parse(event.data);
+                addEventToList('step', '步骤事件', data);
+            });
+
+            currentEventSource.addEventListener('result', function(event) {
+                const data = JSON.parse(event.data);
+                addEventToList('result', '最终结果', data);
+                statusDiv.innerHTML = `<div class="status success">AI 诊断完成！状态: ${data.status}</div>`;
+                currentEventSource.close();
+            });
+
+            currentEventSource.addEventListener('error', function(event) {
+                const data = JSON.parse(event.data);
+                addEventToList('error', '错误事件', data);
+                statusDiv.innerHTML = `<div class="status error">推理出错: ${data.message}</div>`;
+                currentEventSource.close();
+            });
+
+            currentEventSource.addEventListener('heartbeat', function(event) {
+                // 心跳事件，不显示
+            });
+
+            currentEventSource.onerror = function(event) {
+                statusDiv.innerHTML = '<div class="status error">SSE 连接错误或断开</div>';
+                currentEventSource.close();
+            };
+        }
+
+        function addEventToList(type, title, data) {
+            const eventsList = document.getElementById('eventsList');
+            const eventDiv = document.createElement('div');
+            eventDiv.className = `event-item event-${type}`;
+
+            const timestamp = new Date().toLocaleTimeString();
+            eventDiv.innerHTML = `
+                <strong>[${timestamp}] ${title}</strong>
+                <div class="json-display">${JSON.stringify(data, null, 2)}</div>
+            `;
+
+            eventsList.appendChild(eventDiv);
+            eventsList.scrollTop = eventsList.scrollHeight;
+        }
+
+        // 页面加载时自动检查健康状态
+        window.addEventListener('load', checkHealth);
+    </script>
+</body>
+</html>
