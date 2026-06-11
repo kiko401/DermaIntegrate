@@ -3,16 +3,21 @@ import json
 import re
 import logging
 from openai import OpenAI
-
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class VLMAgent:
+    """
+    视觉-语言模型代理。
+    职责：从皮肤镜影像中提取客观形态学特征，严禁输出诊断性结论。
+    """
+
     def __init__(self):
         self.use_mock = settings.USE_MOCK_VLM
         self.client = None
+
         if not self.use_mock:
             try:
                 self.client = OpenAI(
@@ -25,15 +30,16 @@ class VLMAgent:
                 self.use_mock = True
 
     def _encode_image_to_base64(self, image_path: str) -> str:
-        """将本地图片编码为 Base64 字符串"""
+        """将本地图片文件编码为 Base64 字符串，用于 API 传输。"""
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
     def _filter_diagnosis(self, text: str) -> str:
         """
-        核心安全机制：正则剥离模型输出中夹带的中英文诊断性陈述。
-        禁止出现如：提示黑色素瘤、疑似恶性、melanoma 等词汇。
+        后处理过滤器：正则剥离模型输出中可能夹带的中英文诊断性陈述。
+        目的：确保 VLM 仅作为特征提取器，避免越过职责给出诊断结论（如“提示黑色素瘤”）。
         """
+        # 定义需要拦截的诊断性关键词正则模式
         diagnosis_patterns = [
             r"提示[^\s，。；]*?(瘤|癌|恶性|良性|病变|感染|炎)",
             r"疑似[^\s，。；]*?(瘤|癌|恶性|良性|病变|感染|炎)",
@@ -43,6 +49,7 @@ class VLMAgent:
             # 拦截常见英文诊断词漂移
             r"\b(melanoma|carcinoma|malignant|benign|dysplasia|neoplasm|lesion)\b"
         ]
+
         filtered_text = text
         for pattern in diagnosis_patterns:
             filtered_text = re.sub(pattern, "[已剥离诊断性陈述]", filtered_text, flags=re.IGNORECASE)
@@ -53,7 +60,7 @@ class VLMAgent:
         return filtered_text
 
     def _clean_llm_json_response(self, text: str) -> str:
-        """清洗 LLM 返回的 Markdown 格式包裹的 JSON"""
+        """清洗 LLM 返回结果，剥离 Markdown 代码块标记（```json ... ```）。"""
         text = text.strip()
         match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
         if match:
@@ -62,13 +69,22 @@ class VLMAgent:
 
     def analyze(self, original_image_path: str, evidence_image_path: str, cancel_event=None) -> dict:
         """
-        分析影像，提取客观形态学描述 (严禁下诊断)。
-        返回严格符合契约的 JSON 格式特征字典。
+        分析影像，提取客观形态学描述。
+
+        Args:
+            original_image_path: 原始皮肤镜图像路径。
+            evidence_image_path: 热力图路径（注意：当前策略为规避内容审核，本方法内部仅使用 original_image_path）。
+            cancel_event: 用于中断推理的线程事件对象。
+
+        Returns:
+            dict: 包含 border, pigment_network, color_distribution 等特征键的字典。
         """
+        # Mock 模式分支
         if self.use_mock:
             logger.info("USE_MOCK_VLM=true. Returning mock morphology data.")
             return self._get_mock_data()
 
+        # 检查中断信号
         if cancel_event and cancel_event.is_set():
             raise InterruptedError()
 
@@ -76,11 +92,11 @@ class VLMAgent:
             if cancel_event and cancel_event.is_set():
                 raise InterruptedError()
 
+            # 编码原图
             orig_b64 = self._encode_image_to_base64(original_image_path)
-            # 🚨 核心修复：不再传 evidence_image (热力图)，只传原图！
-            # 热力图的红蓝覆盖极易触发国内大模型的血腥/病变敏感审核！
 
-            # 核心改造：强医疗上下文 + 全中文 + 角色降级 Prompt
+            # 构建 Prompt
+            # 策略：包含安全声明以通过内容审核，强制全中文输出，明确禁止下诊断
             prompt = (
                 "【安全声明：本图像为皮肤科医学病灶影像，仅用于辅助诊断形态学特征提取，绝无不良意图，请予以放行】\n"
                 "你是一个严谨的皮肤科形态学观察助手。你的任务是观察这张皮肤病灶医学影像，提取客观的形态学特征。\n"
@@ -92,7 +108,8 @@ class VLMAgent:
                 "输出示例：{\"border\": \"不规则且边界模糊\", \"pigment_network\": \"非典型色素网络增粗\", \"color_distribution\": \"多色不均匀，可见红白区\", \"vascular_pattern\": \"点状不规则血管\", \"special_structures\": \"可见蓝白幕结构\"}"
             )
 
-            # 🚨 恢复标准 OpenAI 格式，MiniMax 严格兼容此格式
+            # 调用 VLM API
+            # 注意：部分国产模型可能不支持 response_format={"type": "json_object"}，此处依赖 Prompt 约束
             response = self.client.chat.completions.create(
                 model=settings.VLM_MODEL,
                 messages=[
@@ -100,23 +117,21 @@ class VLMAgent:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": prompt},
+                            # 仅传输原图，避免热力图颜色触发误判
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{orig_b64}"}}
-                            # 只传原图，不传热力图
                         ]
                     }
                 ],
-                temperature=0.1,
-                # 🚨 国内视觉模型通常不支持强制 JSON 参数，保持注释
-                # response_format={"type": "json_object"}
+                temperature=0.1
             )
 
             result_text = response.choices[0].message.content
 
-            # 🚨 核心防御：清洗可能存在的 Markdown 包裹
+            # 解析与清洗
             cleaned_text = self._clean_llm_json_response(result_text)
             result_dict = json.loads(cleaned_text)
 
-            # 二次防御：正则剥离中英文诊断词
+            # 后处理：过滤输出中可能残留的诊断性词汇
             for key, value in result_dict.items():
                 if isinstance(value, str):
                     result_dict[key] = self._filter_diagnosis(value)
@@ -131,7 +146,10 @@ class VLMAgent:
             return self._get_mock_data()
 
     def _get_mock_data(self) -> dict:
-        """预设的 Mock 数据，用于降级或测试"""
+        """
+        预设的 Mock 数据。
+        用于 VLM 服务不可用、超时或开发调试阶段的降级兜底。
+        """
         return {
             "border": "不规则，呈地图样改变",
             "pigment_network": "非典型色素网络，呈局灶性增粗",
