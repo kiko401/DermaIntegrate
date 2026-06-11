@@ -31,9 +31,30 @@ backend-ai/test_data/
 backend-ai/diagnose_color.py
 backend-ai/test_sse.html
 
-# ==========================================================
-# IDE 与编辑器配置
-# ==========================================================
+# =============== Node 依赖 ===============
+node_modules/
+
+# =============== 密钥与证书（严禁提交） ===============
+*.pem
+*.key
+*.p12
+*.pfx
+
+# =============== Obsidian 编辑器配置 ===============
+.obsidian/
+
+# =============== Claude Code 会话数据 ===============
+.claudian/
+
+# =============== 本地辅助文档（AI 协作 / 学习 / 面试，不属于工程交付） ===============
+CLAUDE.md
+docs/session-log.md
+docs/interview-qa.md
+docs/knowledge-base.md
+docs/writing-rules.md
+docs/ai-mistakes.md
+
+# =============== IDE 与编辑器配置 ===============
 .idea/
 .vscode/
 *.swp
