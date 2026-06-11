@@ -3,15 +3,22 @@ uvicorn[standard]==0.27.0
 python-multipart==0.0.6
 pydantic==2.5.0
 aiofiles==23.2.1
-pydicom==3.0.2
-Pillow==12.2.0
-numpy==1.26.2
-httpx==0.28.1
-openai==2.40.0
-qdrant-client==1.18.0
-sentence-transformers==2.7.0
-transformers==4.36.1  # 显式固定版本，防止pip拉取4.5x+导致与torch 2.1.0不兼容
-opencv-python-headless==4.9.0.80
+
 SQLAlchemy==2.0.25
 aiomysql==0.2.0
-python-dotenv==1.0.0
+
+pydicom==3.0.2
+Pillow==12.2.0
+numpy==1.26.4                      # 1.x 最终版，满足 onnxruntime>=1.26.3 需求且兼容 OpenCV
+opencv-python-headless==4.9.0.80    # 无头模式，适合服务器环境
+
+onnxruntime==1.17.0                # 高性能 CPU 推理引擎，用于 UNet 分割模型
+sentence-transformers==2.7.0
+transformers==4.36.1               # 锁定版本，防止与 torch 2.1.0 发生依赖冲突
+
+openai==2.40.0                      # 兼容 DeepSeek/MiniMax 等 OpenAI 协议接口
+qdrant-client==1.18.0              # Qdrant 向量数据库客户端
+json-repair==0.60.1                 # 运行时修复 LLM 输出的破损 JSON
+
+httpx==0.28.1                      # 异步 HTTP 客户端
+python-dotenv==1.0.0                # 环境变量加载
