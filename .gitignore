@@ -36,6 +36,14 @@ node_modules/
 # =============== Claude Code 会话数据 ===============
 .claudian/
 
+# =============== 本地辅助文档（AI 协作 / 学习 / 面试，不属于工程交付） ===============
+CLAUDE.md
+docs/session-log.md
+docs/interview-qa.md
+docs/knowledge-base.md
+docs/writing-rules.md
+docs/ai-mistakes.md
+
 # =============== IDE 与编辑器配置 ===============
 .idea/
 .vscode/
