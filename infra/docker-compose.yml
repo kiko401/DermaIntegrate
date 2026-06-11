@@ -4,7 +4,8 @@ services:
   mysql:
     image: mysql:8.0
     container_name: derma-mysql
-    mem_limit: 512m
+    restart: unless-stopped
+    mem_limit: 512m  # 内存限制
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: derma_ai
@@ -25,7 +26,8 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: derma-qdrant
-    mem_limit: 512m
+    restart: unless-stopped
+    mem_limit: 512m  # 内存限制
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -36,6 +38,7 @@ services:
   redis:
     image: redis:7
     container_name: derma-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
@@ -46,7 +49,8 @@ services:
       context: ../backend-ai
       dockerfile: Dockerfile
     container_name: derma-fastapi
-    mem_limit: 2g
+    restart: unless-stopped
+    mem_limit: 2g  # FastAPI + PyTorch 需要较多内存
     ports:
       - "8000:8000"
     environment:
