@@ -7,6 +7,11 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# 🚨 极重要：必须与训练时的预处理完全一致！
+# ProbEdge-LiteSeg 训练时使用了 ImageNet 标准化，部署推理必须加上，否则输出全黑！
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
 
 class LesionExtractor:
     def __init__(self):
@@ -47,7 +52,11 @@ class LesionExtractor:
 
             orig_h, orig_w = img.shape[:2]
             input_img = cv2.resize(img, (384, 384))
+
+            # 🚨 核心修复：补齐 ImageNet 归一化 (与训练时对齐)
             input_img = input_img.astype(np.float32) / 255.0
+            input_img = (input_img - IMAGENET_MEAN) / IMAGENET_STD
+
             input_img = np.transpose(input_img, (2, 0, 1))  # HWC -> CHW
             input_img = np.expand_dims(input_img, axis=0)  # Add batch dim
 
@@ -59,8 +68,10 @@ class LesionExtractor:
 
             if cancel_event and cancel_event.is_set(): raise InterruptedError()
 
-            # 3. 后处理：Sigmoid -> 阈值 -> Resize回原尺寸
-            probs = 1 / (1 + np.exp(-output))  # Sigmoid
+            # 3. 后处理：直接阈值化 -> Resize回原尺寸
+            # 🚨 核心修复：导出的 ONNX 已封装 Sigmoid，output 值域在 [0, 1]，严禁再次计算 Sigmoid！
+            # 防御性截断：防止极少数算子精度溢出导致值略微超出 [0, 1]
+            probs = np.clip(output, 0.0, 1.0)
             mask = (probs > 0.5).astype(np.uint8) * 255
             mask_resized = cv2.resize(mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
 
@@ -82,9 +93,8 @@ class LesionExtractor:
 
             # 计算重心确定位置 (严格输出纯中文方位)
             location = "中心"
-            if lesion_pixels > 0:
-                # 使用最大连通域的重心，如果没有则用图像中心
-                cx, cy = centroids[max_label] if max_label != -1 else (orig_w / 2, orig_h / 2)
+            if lesion_pixels > 0 and max_label != -1:
+                cx, cy = centroids[max_label]
                 rel_x, rel_y = cx / orig_w, cy / orig_h
 
                 # 优化后的九宫格方位判定逻辑 (0.4 和 0.6 作为边界阈值)
@@ -104,7 +114,6 @@ class LesionExtractor:
                     location = "上"
                 elif rel_y > 0.6:
                     location = "下"
-                # 其他情况默认保持 "中心"
 
             # 6. 热力图叠加：Jet 色图 + 0.5 透明度叠加
             colored_mask = cv2.applyColorMap(final_mask, cv2.COLORMAP_JET)
