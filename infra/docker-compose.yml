@@ -4,7 +4,7 @@ services:
   mysql:
     image: mysql:8.0
     container_name: derma-mysql
-    mem_limit: 512m  # 内存限制
+    mem_limit: 512m
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: derma_ai
@@ -12,7 +12,9 @@ services:
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      # 挂载初始化 SQL 脚本
       - ../backend-ai/sql/init.sql:/docker-entrypoint-initdb.d/01-init-ai.sql
+    # 兼容旧版驱动与字符集设置
     command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
@@ -23,13 +25,14 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: derma-qdrant
-    mem_limit: 512m  # 内存限制
+    mem_limit: 512m
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
 
+  # Redis 服务 (可选，预留用于未来缓存或会话管理)
   redis:
     image: redis:7
     container_name: derma-redis
@@ -40,23 +43,28 @@ services:
 
   fastapi:
     build:
-      context: ../backend-ai  # 指向 Dockerfile 所在的目录
+      context: ../backend-ai
       dockerfile: Dockerfile
     container_name: derma-fastapi
-    mem_limit: 2g  # FastAPI + PyTorch 需要较多内存
+    mem_limit: 2g
     ports:
       - "8000:8000"
     environment:
-      - DOCKER_ENV=true  # 容器内环境标识，连接 Qdrant 和 MySQL 使用容器名
-      - DATABASE_URL=mysql+aiomysql://root:root@mysql:3306/derma_ai  # 注意端口是容器内的3306，host是mysql
+      # 标识容器环境，触发 Python 代码使用容器内网络
+      - DOCKER_ENV=true
+      # 容器内网络连接：使用服务名 'mysql' 作为 host
+      - DATABASE_URL=mysql+aiomysql://root:root@mysql:3306/derma_ai
+      # HuggingFace 镜像源（解决国内网络问题）
+      - HF_ENDPOINT=https://hf-mirror.com
     depends_on:
       mysql:
-        condition: service_healthy  # 必须等 MySQL 完全启动健康后才启动 FastAPI
+        condition: service_healthy
       qdrant:
         condition: service_started
+    # 映射运行时生成的静态资源，便于本地调试查看
     volumes:
-      - ../backend-ai/static:/app/static  # 映射静态资源，方便查看生成的图片
-      - ../backend-ai/uploads:/app/uploads # 映射上传目录
+      - ../backend-ai/static:/app/static
+      - ../backend-ai/uploads:/app/uploads
 
 volumes:
   mysql_data:
