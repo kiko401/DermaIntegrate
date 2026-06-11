@@ -7,11 +7,14 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-MAX_LLM_RETRIES = 2  # 最大重试次数
+# 最大 LLM 解析重试次数，用于应对语义漂移
+MAX_LLM_RETRIES = 2
 
 # ==========================================================
-# 1. 对齐 PAD-UFES-20 的标准空 Schema (v3.1 契约)
+# 1. 临床数据标准 Schema
 # ==========================================================
+# 对齐 PAD-UFES-20 数据集标准，定义皮肤科临床信息的空数据结构。
+# 所有 LLM 提取或前端传入的数据最终都将映射至此结构。
 EMPTY_CLINICAL_SCHEMA = {
     "patient_info": {"age": None, "gender": None, "fitzpatrick_skin_type": None},
     "lifestyle_history": {"smoke": None, "drink": None, "pesticide_exposure": None},
@@ -25,31 +28,35 @@ EMPTY_CLINICAL_SCHEMA = {
 }
 
 # ==========================================================
-# 2. 强制中文映射表 (核心防漂移与跨模态依赖保障)
+# 2. 标准化映射表
 # ==========================================================
+
+# 性别标准化映射：统一转换为中文
 GENDER_MAP = {"male": "男", "female": "女", "m": "男", "f": "女"}
+
+# 部位标准化映射：将英文标准术语映射为中文规范术语
 REGION_MAP = {
     "ABDOMEN": "腹部", "BACK": "背部", "CHEST": "胸部", "FACE": "面部",
     "FOOT": "足部", "FOREARM": "前臂", "HAND": "手部", "LATERAL CHEST": "侧胸",
     "LOWER LIMB": "下肢", "NECK": "颈部", "NOSE": "鼻部", "SCALP": "头皮",
     "THIGH": "大腿", "UPPER LIMB": "上肢", "EAR": "耳部", "LIP": "唇部",
     "ORAL": "口腔", "NASAL": "鼻腔", "GENITAL": "生殖器",
-    # 🚨 新增：补全 LLM 常见自由文本输出与大词的映射，确保病理 Agent 触发
+    # 补充 LLM 常见自由文本输出映射，确保病理 Agent 触发词准确
     "SOLE": "足底", "PALM": "手掌", "HEEL": "足跟",
     "FINGER": "手指", "TOE": "足趾", "NAIL": "甲床", "THUMB": "拇指",
     "BIG TOE": "拇趾", "GREAT TOE": "拇趾"
 }
 
-# 扩充英文漂移黑名单 (针对 PAD-UFES-20 常见英文字段)
+# 英文黑名单：用于校验 LLM 是否违规输出英文（防止中英混杂导致下游 Agent 失效）
 ENGLISH_BLACKLIST = [
-    "male", "female",  # 移除了 "m" 和 "f"，防止误伤布尔值缩写
+    "male", "female",
     "left", "right", "sole", "palm", "scalp", "face", "abdomen", "back", "foot", "hand",
     "yes", "no", "neck", "ear", "chest", "arm", "leg"
-    # 注意：移除了 "true" 和 "false"，防止误拦 JSON 原生布尔值
 ]
 
-# 🚨 新增：后置部位语义清洗映射表（极重要：确保跨模态触发词 100% 对齐）
-# 将口语/俗称/细粒度词，清洗为包含病理 Agent 触发核心词的规范中文
+# 后置部位语义清洗映射表
+# 用途：将 LLM 输出的口语化/俗称部位（如“左脚底”）清洗为包含病理 Agent 核心触发词的规范中文（如“左足底”）。
+# 注意：需避免叠字替换导致的歧义（如避免将“拇指甲”替换为“拇指甲床”导致多字），此处仅保留核心清洗逻辑。
 REGION_NORMALIZATION_MAP = {
     "脚": "足", "脚底": "足底", "脚跟": "足跟", "脚趾": "足趾", "脚背": "足背",
     "大拇趾": "拇趾", "大脚趾": "拇趾",
@@ -60,24 +67,28 @@ REGION_NORMALIZATION_MAP = {
 
 
 def _is_truthy(value) -> bool:
-    """防御性布尔值判定，兼容各种变体"""
-    if isinstance(value, bool): return value
-    if isinstance(value, (int, float)): return value > 0
-    if isinstance(value, str): return value.strip().lower() in ["true", "1", "有", "是", "yes"]
+    """防御性布尔值判定，兼容布尔值、数字及各类字符串表示（是/否/yes/no）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, str):
+        return value.strip().lower() in ["true", "1", "有", "是", "yes"]
     return False
 
 
 def _map_gender(raw_gender) -> str:
-    """性别强制中文映射"""
-    if not raw_gender: return None
+    """性别标准化处理：将输入映射为中文或保留原值。"""
+    if not raw_gender:
+        return None
     val = str(raw_gender).lower().strip()
-    return GENDER_MAP.get(val, raw_gender)  # 映射命中返中文，未命中保留原值(可能是中文)
+    return GENDER_MAP.get(val, raw_gender)
 
 
 def _normalize_region_for_triggers(region_str: str) -> str:
     """
-    后置语义清洗：将 LLM 输出的细粒度/口语部位，清洗为包含病理触发核心词的规范中文。
-    例如："左脚底" -> "左足底" (确保包含"足"字，触发肢端逻辑)
+    后置语义清洗：对部位字符串进行模糊替换，确保包含下游逻辑所需的关键词。
+    例如：将口语化的“脚”替换为“足”，以匹配病理 Agent 的肢端判断逻辑。
     """
     if not region_str:
         return None
@@ -89,14 +100,15 @@ def _normalize_region_for_triggers(region_str: str) -> str:
 
 
 def _map_region(raw_region) -> str:
-    """部位强制中文映射 + 触发词深度清洗"""
-    if not raw_region: return None
+    """部位复合映射：优先查询静态表，未命中则进行后置语义清洗。"""
+    if not raw_region:
+        return None
     val = str(raw_region).upper().strip()
 
-    # 1. 先查静态映射表 (针对结构化 JSON 输入的大词，如 FOOT->足部)
+    # 1. 尝试静态映射表（针对标准英文输入，如 FOOT -> 足部）
     mapped = REGION_MAP.get(val, raw_region)
 
-    # 2. 如果没命中映射表（说明是 LLM 自由文本输出的中文，如"左脚底"），进行后置语义清洗
+    # 2. 若未命中（说明是中文自由文本或非标准输入），执行后置清洗
     if mapped == raw_region:
         mapped = _normalize_region_for_triggers(mapped)
 
@@ -105,29 +117,33 @@ def _map_region(raw_region) -> str:
 
 def _validate_clinical_data(data: dict) -> str:
     """
-    校验 LLM 输出的临床数据是否符合规范 (保留原有优秀设计，升级校验规则)
+    校验 LLM 输出的临床数据质量。
+    检查项：
+    1. JSON 结构完整性。
+    2. 语义合规性：禁止包含英文黑名单词汇，防止中英混杂导致下游检索失败。
     """
     if not isinstance(data, dict):
         return "输出不是有效的 JSON 字典"
 
-    # 1. 检查是否包含必须的顶层键 (对齐新 Schema)
-    required_keys = ["patient_info", "lifestyle_history", "family_history", "personal_history", "lesion_clinical",
-                     "lesion_symptoms"]
+    required_keys = [
+        "patient_info", "lifestyle_history", "family_history",
+        "personal_history", "lesion_clinical", "lesion_symptoms"
+    ]
     for key in required_keys:
         if key not in data:
             return f"缺少必须的顶层键: {key}"
 
-    # 2. 语义漂移检查：严禁英文输出 (防止 LLM 将中文翻译为英文)
+    # 语义漂移检查：严禁英文输出
     json_str = json.dumps(data, ensure_ascii=False).lower()
     for word in ENGLISH_BLACKLIST:
         if f'"{word}"' in json_str or f": {word}" in json_str or f": \"{word}" in json_str:
             return f"检测到非法英文输出: '{word}'，必须严格使用中文（如 male->男, foot->足部）"
 
-    return ""  # 验证通过
+    return ""
 
 
 def _clean_llm_json_response(text: str) -> str:
-    """清洗 LLM 返回的 Markdown 格式包裹的 JSON (保留原有设计)"""
+    """清洗 LLM 返回结果，剥离 Markdown 代码块标记（```json ... ```）。"""
     text = text.strip()
     match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     if match:
@@ -137,13 +153,28 @@ def _clean_llm_json_response(text: str) -> str:
 
 def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None) -> dict:
     """
-    双通道病历解析 (对齐 PAD-UFES-20，含强制中文映射与 LLM 自重试机制)
+    临床数据解析入口（双通道）。
+
+    通道 1：结构化 JSON 解析。适用于前端表单提交或结构化数据库导入。
+            直接映射字段并进行类型转换和标准化。
+
+    通道 2：自由文本 LLM 提取。适用于医生输入的自然语言病历。
+            调用 LLM 提取结构化信息，并包含“校验-反馈-重试”闭环机制以防止语义漂移。
+
+    Args:
+        clinical_json_str: JSON 字符串或字典对象。
+        clinical_text: 自由文本字符串。
+
+    Returns:
+        dict: 符合 EMPTY_CLINICAL_SCHEMA 规范的字典。
     """
-    # 通道 1：结构化 JSON 直接映射 (通常来自前端表单或数据集 CSV 行)
+    # ======================================================
+    # 通道 1：结构化 JSON 解析
+    # ======================================================
     if clinical_json_str:
         try:
             data = json.loads(clinical_json_str) if isinstance(clinical_json_str, str) else clinical_json_str
-            # 极重要：必须深拷贝，防止多请求修改污染全局 Schema
+            # 深拷贝 Schema 防止全局污染
             mapped_data = copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
 
             pi = data.get("patient_info", {})
@@ -165,7 +196,6 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
             mapped_data["personal_history"]["other_cancer_history"] = _is_truthy(ph.get("other_cancer_history"))
 
             lc = data.get("lesion_clinical", {})
-            # 部位强制中文转换 + 语义清洗
             mapped_data["lesion_clinical"]["region"] = _map_region(lc.get("region"))
             mapped_data["lesion_clinical"]["diameter_1_mm"] = lc.get("diameter_1_mm") or lc.get("diameter_1")
             mapped_data["lesion_clinical"]["diameter_2_mm"] = lc.get("diameter_2_mm") or lc.get("diameter_2")
@@ -185,7 +215,9 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
             logger.error(f"Failed to parse clinical_json: {e}. Falling back to empty schema.")
             return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
 
-    # 通道 2：自由文本 LLM 提取 (保留带反馈的自重试机制)
+    # ======================================================
+    # 通道 2：自由文本 LLM 提取（含自重试闭环）
+    # ======================================================
     if clinical_text:
         client = OpenAI(
             api_key=settings.INTEGRATION_API_KEY,
@@ -213,12 +245,12 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
 {clinical_text}
 """
 
-        feedback_msg = ""  # 初始化反馈信息
+        feedback_msg = ""
 
         for attempt in range(MAX_LLM_RETRIES):
             try:
-                # 拼接反馈信息到 Prompt (原有优秀设计)
                 current_prompt = base_prompt
+                # 将上一次的错误信息注入 Prompt 以引导修正
                 if feedback_msg:
                     current_prompt += f"\n\n【重要纠正】：你上一次的输出违反了规则，错误原因为：'{feedback_msg}'。请务必修正并重新输出！"
 
@@ -233,10 +265,10 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
                 cleaned_str = _clean_llm_json_response(result_str)
                 parsed_data = json.loads(cleaned_str)
 
-                # ===== 核心校验与清洗逻辑 =====
+                # 校验数据质量
                 validation_error = _validate_clinical_data(parsed_data)
                 if not validation_error:
-                    # 🚨 校验通过后，必须对 LLM 输出的部位进行一次后置清洗，确保触发词对齐
+                    # 校验通过后，对部位字段进行二次清洗，确保触发词对齐
                     if parsed_data.get("lesion_clinical", {}).get("region"):
                         raw_region = parsed_data["lesion_clinical"]["region"]
                         parsed_data["lesion_clinical"]["region"] = _normalize_region_for_triggers(raw_region)
@@ -244,7 +276,7 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
                     logger.info(f"Successfully extracted clinical_text using LLM (Attempt {attempt + 1}).")
                     return parsed_data
                 else:
-                    # 校验失败，准备重试
+                    # 校验失败，设置错误信息以供下一次重试
                     feedback_msg = validation_error
                     logger.warning(f"Validation failed (Attempt {attempt + 1}): {validation_error}. Retrying...")
 
@@ -252,9 +284,9 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
                 logger.error(f"LLM clinical extraction API error (Attempt {attempt + 1}): {e}")
                 feedback_msg = f"API调用或解析异常: {str(e)}"
 
-        # 如果达到最大重试次数仍然失败，降级兜底 (原有优秀设计)
+        # 达到最大重试次数，返回空 Schema 防止管线阻塞
         logger.error(f"Max retries ({MAX_LLM_RETRIES}) reached. Falling back to EMPTY schema.")
         return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
 
-    # 什么数据都没传，返回深拷贝的空 Schema
+    # 无输入，返回空 Schema
     return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
