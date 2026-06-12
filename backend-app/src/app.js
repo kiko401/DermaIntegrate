@@ -12,6 +12,8 @@ app.use('/api/health', require('./routes/health'));
 app.use('/api/tasks', require('./routes/upload'));
 app.use('/api/tasks', require('./routes/stream'));
 app.use('/ai-static', require('./routes/static'));
+app.use('/api/patients', require('./routes/patients'));
+app.use('/api/patients/:patientId/visits', require('./routes/visits'));
 
 // 根路径提示
 app.get('/', (req, res) => {
