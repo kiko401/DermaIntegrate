@@ -10,8 +10,8 @@ const doctorName = computed(() => {
   } catch { return '' }
 })
 
-function logout() {
-  localStorage.removeItem('auth_token')
+async function logout() {
+  await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
   localStorage.removeItem('doctor_info')
   router.push('/login')
 }

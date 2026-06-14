@@ -1,9 +1,11 @@
 const express = require('express');
+const cookieParser = require('cookie-parser');
 const path = require('path');
 const config = require('./config');
 const { requireAuth } = require('./middleware/auth');
 
 const app = express();
+app.use(cookieParser());
 
 // 静态文件托管：/test/ 路由访问 test/ 目录
 app.use('/test', express.static(path.join(__dirname, '..', '..', 'test')));

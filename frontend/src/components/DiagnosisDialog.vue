@@ -172,76 +172,175 @@ const statusText = computed(() => ({
   closed: '', error: '连接异常',
 }[status.value] ?? ''))
 
+const stepItems = [
+  { title: '图像分析' }, { title: '病历解析' },
+  { title: '病理分期' }, { title: '最终报告' },
+]
+
+const currentStep = computed(() => {
+  if (resultEvent.value) return 4
+  if (pathologyEvent.value) return 3
+  if (clinicalEvent.value) return 2
+  if (imageEvent.value) return 1
+  return 0
+})
+
+const riskClass = computed(() => {
+  const level = resultEvent.value?.data?.risk_level || ''
+  if (level.includes('高') || level.toLowerCase().includes('high')) return 'high'
+  if (level.includes('中') || level.toLowerCase().includes('med')) return 'medium'
+  return 'low'
+})
+
 function handleClose() { close(); clearTimers(); emit('update:open', false) }
 
 onUnmounted(() => { close(); clearTimers() })
 </script>
 
+<style scoped>
+.drawer-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 32px;
+}
+
+.sec-card {
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.sec-card.pending {
+  display: flex;
+  align-items: center;
+  color: #94a3b8;
+  font-size: 13px;
+}
+.sec-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+.sec-text {
+  white-space: pre-wrap;
+  font-size: 13px;
+  margin: 0;
+  font-family: inherit;
+  line-height: 1.75;
+  color: #334155;
+}
+
+/* Final report */
+.report-card {
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  overflow: hidden;
+  margin-top: 8px;
+}
+.risk-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+}
+.risk-banner.risk-high   { background: #fef2f2; }
+.risk-banner.risk-medium { background: #fffbeb; }
+.risk-banner.risk-low    { background: #f0fdf4; }
+
+.risk-label { font-size: 12px; color: #64748b; font-weight: 500; }
+.risk-value { font-size: 20px; font-weight: 800; }
+.risk-banner.risk-high   .risk-value { color: #dc2626; }
+.risk-banner.risk-medium .risk-value { color: #d97706; }
+.risk-banner.risk-low    .risk-value { color: #059669; }
+
+.report-text {
+  white-space: pre-wrap;
+  font-size: 13px;
+  margin: 0;
+  font-family: inherit;
+  line-height: 1.85;
+  color: #1e293b;
+}
+</style>
+
 <template>
-  <a-modal :open="open" title="AI 辅助诊断" width="760px" :footer="null" @cancel="handleClose">
+  <a-drawer
+    :open="open"
+    placement="right"
+    :width="640"
+    :body-style="{ padding: 0, display: 'flex', flexDirection: 'column' }"
+    @close="handleClose"
+  >
+    <template #title>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-weight:600;color:#1e293b">AI 辅助诊断</span>
+        <a-tag v-if="status === 'connecting' || status === 'open'" color="processing" style="margin:0">推理中</a-tag>
+        <a-tag v-else-if="resultEvent" color="success" style="margin:0">完成</a-tag>
+        <a-tag v-else-if="errorEvent" color="error" style="margin:0">错误</a-tag>
+      </div>
+    </template>
 
-    <div v-if="statusText" style="margin-bottom:12px; color:#8c8c8c; font-size:13px">
-      <a-spin v-if="status === 'connecting' || status === 'open'" size="small" style="margin-right:6px" />
-      {{ statusText }}
+    <!-- Progress -->
+    <div style="padding:16px 24px 14px;border-bottom:1px solid #f1f5f9">
+      <a-steps :current="currentStep" size="small" :items="stepItems" />
     </div>
 
-    <a-alert v-if="errorEvent" type="error"
-      :message="errorEvent.data?.message || '推理过程出现错误'" show-icon style="margin-bottom:12px" />
+    <!-- Scrollable content -->
+    <div class="drawer-scroll">
 
-    <!-- 图像分析 -->
-    <template v-if="imageEvent">
-      <a-card size="small" title="🖼️ 图像分析" style="margin-bottom:12px">
-        <div v-if="imageEvent.data?.image_url" style="margin-bottom:8px">
-          <img :src="imageEvent.data.image_url" alt="热力图"
-            style="max-width:100%; max-height:300px; border-radius:4px" />
+      <a-alert v-if="errorEvent" type="error"
+        :message="errorEvent.data?.message || '推理过程出现错误'"
+        show-icon style="margin-bottom:16px" />
+
+      <!-- 图像分析 -->
+      <div v-if="imageEvent" class="sec-card">
+        <div class="sec-label">图像分析</div>
+        <img v-if="imageEvent.data?.image_url" :src="imageEvent.data.image_url"
+          style="max-width:100%;max-height:200px;border-radius:6px;margin-bottom:10px;display:block" />
+        <pre class="sec-text">{{ typedImage }}</pre>
+      </div>
+      <div v-else-if="status === 'open' || status === 'connecting'" class="sec-card pending">
+        <a-spin size="small" style="margin-right:8px" />图像分析中…
+      </div>
+
+      <!-- 病历解析 -->
+      <div v-if="clinicalEvent" class="sec-card">
+        <div class="sec-label">病历解析</div>
+        <pre class="sec-text">{{ typedClinical }}</pre>
+      </div>
+      <div v-else-if="imageEvent && status === 'open'" class="sec-card pending">
+        <a-spin size="small" style="margin-right:8px" />病历解析中…
+      </div>
+
+      <!-- 病理分期 -->
+      <div v-if="pathologyEvent" class="sec-card">
+        <div class="sec-label">病理分期</div>
+        <pre class="sec-text">{{ typedPathology }}</pre>
+      </div>
+
+      <!-- 最终报告 -->
+      <div v-if="resultEvent" class="report-card">
+        <div class="risk-banner" :class="`risk-${riskClass}`">
+          <span class="risk-label">风险等级</span>
+          <span class="risk-value">{{ resultEvent.data?.risk_level || '—' }}</span>
+          <a-tag
+            :color="resultEvent.data?.status === 'complete' ? 'success' : 'warning'"
+            style="margin-left:auto;margin-bottom:0"
+          >{{ resultEvent.data?.status === 'complete' ? '完整报告' : '数据不足' }}</a-tag>
         </div>
-        <pre style="white-space:pre-wrap; font-size:13px; margin:0; font-family:inherit; line-height:1.7">{{ typedImage }}</pre>
-      </a-card>
-    </template>
-    <template v-else-if="status === 'open' || status === 'connecting'">
-      <a-card size="small" style="margin-bottom:12px; color:#bfbfbf">
-        <a-spin size="small" style="margin-right:6px" />图像分析中...
-      </a-card>
-    </template>
+        <div style="padding:16px 20px">
+          <pre class="report-text">{{ typedResult }}</pre>
+          <a-alert v-if="resultEvent.data?.status !== 'complete'" type="warning"
+            message="部分模态数据缺失，结果仅供参考" show-icon style="margin-top:12px" />
+        </div>
+      </div>
 
-    <!-- 病历解析 -->
-    <template v-if="clinicalEvent">
-      <a-card size="small" title="📋 病历解析" style="margin-bottom:12px">
-        <pre style="white-space:pre-wrap; font-size:13px; margin:0; font-family:inherit; line-height:1.7">{{ typedClinical }}</pre>
-      </a-card>
-    </template>
-    <template v-else-if="imageEvent && status === 'open'">
-      <a-card size="small" style="margin-bottom:12px; color:#bfbfbf">
-        <a-spin size="small" style="margin-right:6px" />病历解析中...
-      </a-card>
-    </template>
-
-    <!-- 病理分期 -->
-    <template v-if="pathologyEvent">
-      <a-card size="small" title="🔬 病理分期" style="margin-bottom:12px">
-        <pre style="white-space:pre-wrap; font-size:13px; margin:0; font-family:inherit; line-height:1.7">{{ typedPathology }}</pre>
-      </a-card>
-    </template>
-
-    <!-- 最终报告 -->
-    <template v-if="resultEvent">
-      <a-divider />
-      <a-card size="small" style="margin-bottom:4px">
-        <template #title>
-          📄 最终报告
-          <a-tag :color="resultEvent.data?.status === 'complete' ? 'success' : 'warning'" style="margin-left:8px">
-            {{ resultEvent.data?.status === 'complete' ? '完整' : '数据不足' }}
-          </a-tag>
-        </template>
-        <pre style="white-space:pre-wrap; font-size:13px; margin:0; font-family:inherit; line-height:1.7">{{ typedResult }}</pre>
-        <a-alert v-if="resultEvent.data?.status !== 'complete'" type="warning"
-          message="部分模态数据缺失，结果仅供参考" show-icon style="margin-top:8px" />
-      </a-card>
-    </template>
-
-    <div style="text-align:right; margin-top:16px">
-      <a-button @click="handleClose">关闭</a-button>
     </div>
-
-  </a-modal>
+  </a-drawer>
 </template>

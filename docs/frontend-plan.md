@@ -15,11 +15,23 @@
 
 ## 二、页面结构
 
+> 已更新为当前实际实现（2026-06-15）
+
+### 布局
+
+App.vue 为侧边栏布局（200px 固定侧边栏 + 主内容区），侧边栏含路由导航和退出登录。登录页独立全屏，不含侧边栏。
+
+### 路由与组件
+
 | 路由 | 组件 | 职责 | 状态 |
 |:---|:---|:---|:---|
-| `/` | `PatientList.vue` | 患者列表入口 | ✅ |
-| `/patients/:id` | `VisitDetail.vue` | 就诊详情 + AI 分析入口 | ✅ |
-| （组件）| `DiagnosisDialog.vue` | SSE 流式诊断对话框 | ⬜ Phase 6 |
+| `/login` | `LoginView.vue` | 医生登录，httpOnly cookie 鉴权 | ✅ |
+| `/dashboard` | `Dashboard.vue` | 工作台，统计卡片 + 最近就诊/任务 | ✅ 基本成形（静态内容为主） |
+| `/patients` | `PatientList.vue` | 患者横向卡片 + 右侧就诊工作台 | ✅ 完整 |
+| `/patients/:id` | `VisitDetail.vue` | 独立就诊详情页 + AI 分析入口 | ✅ 完整 |
+| `/tasks` | `Tasks.vue` | AI 分析记录汇总 | ⬜ 占位（静态 mock 数据） |
+| `/integration` | `Integration.vue` | 数据集成（Phase 3/4） | ⬜ 占位（展示"建设中"） |
+| （组件）| `DiagnosisDialog.vue` | SSE 流式诊断 Drawer | ✅ 完整 |
 
 ---
 
@@ -43,14 +55,14 @@
 | 发起 AI 分析 | `POST /api/tasks/upload`（带 `visit_id` + `clinical_text`） |
 | 订阅推理进度 | `GET /api/tasks/:taskId/stream`（SSE，Phase 6） |
 
-### DiagnosisDialog.vue（Phase 6）
+### DiagnosisDialog.vue（已实现）
 
 | SSE 事件 | 渲染动作 |
 |:---|:---|
-| `image_done` | 显示热力图模块 |
-| `clinical_done` | 显示病历解析模块 |
-| `pathology_done` | 显示病理分期模块 |
-| `result` | 显示最终报告，区分 `complete` / `incomplete` |
+| `image_done` | 显示图像分析模块（含热力图 + 形态学特征打字机） |
+| `clinical_done` | 显示病历解析模块（打字机） |
+| `pathology_done` | 显示病理分期模块（打字机） |
+| `result` | 显示最终报告 Drawer，区分 `complete` / `incomplete`，风险等级色块 |
 | `error` | 显示错误提示，关闭连接 |
 
 ---
@@ -71,15 +83,16 @@
 
 ## 五、最小实现顺序
 
-**Phase 5（已完成）**：PatientList + VisitDetail + 上传拿 task_id
+**Phase 5（已完成）**：PatientList + VisitDetail + 上传拿 task_id + Dashboard + 侧边栏布局
 
-**Phase 6 最小顺序**：
-1. `src/hooks/useSSE.js` — 封装 EventSource，暴露 `events`、`status`、`close()`
-2. `src/components/DiagnosisDialog.vue` — 弹窗展示事件流，分模块动态渲染
-3. `VisitDetail.vue` 补充 — 拿到 task_id 后自动打开对话框
+**Phase 6（已完成）**：useSSE.js + DiagnosisDialog.vue + VisitDetail 集成
 
-**Phase 7（影像对比）**：
+**Phase 7（待做）**：
 - `src/components/ImageCompare.vue` — 原图 / 热力图滑动对比，Blob 内存管控
+
+**Tasks.vue 真实化（待做）**：接真实接口，展示历史 ai_tasks 记录
+
+**Integration.vue 真实化（待做）**：Phase 3 EMPI 完成后实现
 
 ---
 

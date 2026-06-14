@@ -25,11 +25,22 @@ router.post('/login', express.json(), async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
     )
+    res.cookie('auth_token', token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 24 * 60 * 60 * 1000,
+      path: '/',
+    })
     res.json({ token, doctor: { id: doctor.id, name: doctor.name } })
   } catch (e) {
     console.error('[auth/login]', e)
     res.status(500).json({ error: '服务器错误' })
   }
+})
+
+router.post('/logout', (req, res) => {
+  res.clearCookie('auth_token', { path: '/' })
+  res.json({ ok: true })
 })
 
 router.get('/me', requireAuth, (req, res) => {

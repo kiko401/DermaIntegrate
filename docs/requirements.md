@@ -22,7 +22,7 @@
 | # | 需求 | 状态 |
 |:--|:---|:---|
 | R-01 | EMPI 主索引映射：跨系统患者标识归一，支持身份证号精确匹配 + 姓名/手机/生日组合匹配 | ⬜ |
-| R-02 | FHIR R4 适配：解析 Patient / Observation / DiagnosticReport 资源，接入 Mock FHIR Server | ⬜ |
+| R-02 | FHIR R4 适配：解析 Patient![img.png](img.png) / Observation / DiagnosticReport 资源，接入 Mock FHIR Server | ⬜ |
 | R-03 | 患者临床视图聚合：在应用域逻辑拼装多源数据，不侵入源系统 | ⬜ |
 | R-04 | 患者基础 CRUD：姓名、身份证号、手机、生日、性别 | ⬜ |
 | R-05 | 就诊记录管理：每个患者支持多次就诊，每次就诊关联 AI 任务 | ⬜ |

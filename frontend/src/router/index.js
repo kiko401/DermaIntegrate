@@ -1,5 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import PatientList from '../views/PatientList.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -10,26 +9,37 @@ const router = createRouter({
       component: () => import('../views/LoginView.vue'),
       meta: { requiresAuth: false },
     },
+    { path: '/', redirect: '/dashboard' },
     {
-      path: '/',
-      name: 'patients',
-      component: PatientList,
+      path: '/dashboard',
+      name: 'dashboard',
+      component: () => import('../views/Dashboard.vue'),
     },
     {
-      path: '/patients/:id',
-      name: 'visit-detail',
-      component: () => import('../views/VisitDetail.vue'),
+      path: '/patients',
+      name: 'patients',
+      component: () => import('../views/PatientList.vue'),
+    },
+    {
+      path: '/integration',
+      name: 'integration',
+      component: () => import('../views/Integration.vue'),
+    },
+    {
+      path: '/tasks',
+      name: 'tasks',
+      component: () => import('../views/Tasks.vue'),
     },
   ],
 })
 
 router.beforeEach((to) => {
-  const token = localStorage.getItem('auth_token')
+  const loggedIn = !!localStorage.getItem('doctor_info')
   if (to.meta.requiresAuth === false) {
-    if (token && to.name === 'login') return '/'
+    if (loggedIn && to.name === 'login') return '/dashboard'
     return true
   }
-  if (!token) return '/login'
+  if (!loggedIn) return '/login'
   return true
 })
 

@@ -14,6 +14,7 @@ async function handleLogin() {
   try {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: formState.username, password: formState.password }),
     })
@@ -22,7 +23,6 @@ async function handleLogin() {
       error.value = data.error || '登录失败'
       return
     }
-    localStorage.setItem('auth_token', data.token)
     localStorage.setItem('doctor_info', JSON.stringify(data.doctor))
     message.success(`欢迎，${data.doctor.name}`)
     router.push('/')

@@ -17,8 +17,14 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:3000',
-      '/ai-static': 'http://localhost:3000',
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
+      '/ai-static': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
     },
   },
 })
