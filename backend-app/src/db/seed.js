@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs')
 const db = require('./index')
 
 async function seed() {
+  // ── 演示医生 ──────────────────────────────────────────────────────────────
   const name = process.env.DEMO_DOCTOR_NAME || '演示医生'
   const username = process.env.DEMO_DOCTOR_USERNAME || 'doctor'
   const password = process.env.DEMO_DOCTOR_PASSWORD || 'demo123'
@@ -12,7 +13,82 @@ async function seed() {
     'INSERT IGNORE INTO doctors (name, username, password_hash) VALUES (?, ?, ?)',
     [name, username, hash]
   )
-  console.log(`Seed done. username: ${username}  password: ${password}`)
+
+  // ── 演示患者（EMPI 匹配演示基础数据）────────────────────────────────────
+  // 患者 1：张伟，有身份证号，在 HIS/LIS/PACS 三个系统都有记录
+  await db.execute(
+    `INSERT IGNORE INTO patients (id, name, id_card, phone, birth_date, gender)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [901, '张伟', '110101198801015678', '13800138001', '1988-01-01', 1]
+  )
+  // 患者 2：李敏，无身份证号（姓名+手机匹配），在 HIS/LIS 有记录
+  await db.execute(
+    `INSERT IGNORE INTO patients (id, name, id_card, phone, birth_date, gender)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [902, '李敏', null, '13900139002', '1995-06-15', 2]
+  )
+  // 患者 3：王强，身份证匹配，只在 PACS 有记录
+  await db.execute(
+    `INSERT IGNORE INTO patients (id, name, id_card, phone, birth_date, gender)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [903, '王强', '310101199203207890', '13700137003', '1992-03-20', 1]
+  )
+
+  // ── Mock 外部数据：模拟 HIS / LIS / PACS 中的患者记录 ────────────────────
+  const externals = [
+    // 张伟在 HIS（有完整信息）
+    ['HIS', 'HIS-P-2021-0041', '张伟', '110101198801015678', '13800138001',
+      JSON.stringify({ dept: '皮肤科', visit_no: 'V20210041', admission_date: '2021-03-15' })],
+    // 张伟在 LIS（化验系统，有身份证）
+    ['LIS', 'LIS-L-2021-3301', '张伟', '110101198801015678', null,
+      JSON.stringify({ lab_type: '病理活检', sample_no: 'S-33001', report_date: '2021-03-18' })],
+    // 张伟在 PACS（影像系统，仅身份证无手机）
+    ['PACS', 'PACS-RIS-ZW-007', '张伟', '110101198801015678', null,
+      JSON.stringify({ modality: 'DERM', study_uid: '1.2.840.99999.007', body_part: '左足底' })],
+    // 李敏在 HIS（无身份证，靠姓名+手机匹配）
+    ['HIS', 'HIS-P-2022-0178', '李敏', null, '13900139002',
+      JSON.stringify({ dept: '皮肤科', visit_no: 'V20220178', admission_date: '2022-07-20' })],
+    // 李敏在 LIS（无身份证，有手机）
+    ['LIS', 'LIS-L-2022-4412', '李敏', null, '13900139002',
+      JSON.stringify({ lab_type: '皮肤活检', sample_no: 'S-44012', report_date: '2022-07-22' })],
+    // 王强在 PACS（有身份证）
+    ['PACS', 'PACS-RIS-WQ-019', '王强', '310101199203207890', '13700137003',
+      JSON.stringify({ modality: 'DERM', study_uid: '1.2.840.99999.019', body_part: '背部' })],
+  ]
+
+  for (const [sys, sid, n, card, phone, extra] of externals) {
+    await db.execute(
+      `INSERT IGNORE INTO mock_external_patients
+         (source_system, source_id, name, id_card, phone, extra_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [sys, sid, n, card || null, phone || null, extra]
+    )
+  }
+
+  // ── 初始化 EMPI 映射（身份证精确匹配）──────────────────────────────────
+  // 此处直接写入已知映射，省去首次跑 /api/empi/match 的手动步骤
+  const mappings = [
+    ['HIS',  'HIS-P-2021-0041', 901],
+    ['LIS',  'LIS-L-2021-3301', 901],
+    ['PACS', 'PACS-RIS-ZW-007', 901],
+    ['HIS',  'HIS-P-2022-0178', 902],
+    ['LIS',  'LIS-L-2022-4412', 902],
+    ['PACS', 'PACS-RIS-WQ-019', 903],
+  ]
+
+  for (const [sys, sid, pid] of mappings) {
+    await db.execute(
+      `INSERT IGNORE INTO empi_index (source_system, source_id, patient_id)
+       VALUES (?, ?, ?)`,
+      [sys, sid, pid]
+    )
+  }
+
+  console.log('Seed done.')
+  console.log(`  医生账号  username: ${username}  password: ${password}`)
+  console.log('  演示患者  id 901(张伟) 902(李敏) 903(王强)')
+  console.log('  Mock外部  6条记录覆盖 HIS/LIS/PACS')
+  console.log('  EMPI索引  6条映射预置完毕')
   process.exit(0)
 }
 

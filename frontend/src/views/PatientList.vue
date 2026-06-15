@@ -1,8 +1,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
-import DiagnosisDialog from '@/components/DiagnosisDialog.vue'
+import { useRouter } from 'vue-router'
 import { apiFetch } from '@/utils/api'
+
+const router = useRouter()
 
 // ── Patient list ──────────────────────────────────────────────
 const patients = ref([])
@@ -127,8 +129,6 @@ const imageFile = ref(null)
 const imagePreviewUrl = ref(null)
 const clinicalForm = ref({ age: null, gender: '', region: '', itch: false, grew: false })
 const labForm = ref({ breslow_thickness_mm: null, ulceration: false, braf_mutation: '' })
-const diagnosisVisible = ref(false)
-const diagnosisTaskId = ref(null)
 
 function onFileChange(e) {
   const file = e.target.files[0] || null
@@ -147,8 +147,8 @@ function openAnalysis(visitId) {
 }
 
 function viewAnalysis(visitId) {
-  diagnosisTaskId.value = visitTaskMap.value[visitId]
-  diagnosisVisible.value = true
+  const taskId = visitTaskMap.value[visitId]
+  if (taskId) router.push('/tasks/' + taskId)
 }
 
 async function launchAnalysis() {
@@ -183,9 +183,8 @@ async function launchAnalysis() {
     const data = await res.json()
     if (data.task_id) {
       visitTaskMap.value[visitId] = data.task_id
-      diagnosisTaskId.value = data.task_id
-      diagnosisVisible.value = true
       message.success('AI 分析已发起')
+      router.push('/tasks/' + data.task_id)
     } else {
       message.error(data.error || '发起失败')
     }
@@ -316,8 +315,6 @@ onMounted(fetchPatients)
     </template>
 
   </div>
-
-  <DiagnosisDialog v-model:open="diagnosisVisible" :task-id="diagnosisTaskId" />
 
   <!-- New patient -->
   <a-modal v-model:open="showNewPatientModal" title="新建患者" @ok="createPatient" :confirm-loading="submittingPatient">

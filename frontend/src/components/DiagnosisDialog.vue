@@ -5,10 +5,13 @@ import { useSSE } from '@/hooks/useSSE'
 const props = defineProps({
   taskId: { type: String, default: null },
   open: { type: Boolean, default: false },
+  mode: { type: String, default: 'live' }, // 'live' = SSE stream, 'history' = load saved snapshot
 })
 const emit = defineEmits(['update:open'])
 
 const { events, status, connect, close } = useSSE('')
+const historyLoading = ref(false)
+const historyEmpty = ref(false)
 
 // Typewriter state
 const typedImage    = ref('')
@@ -111,13 +114,36 @@ function formatPathology(data) {
 }
 // ─────────────────────────────────────────────────────────────────────
 
-watch(() => props.open, (val) => {
+watch(() => props.open, async (val) => {
   if (val && props.taskId) {
     events.value = []
     typedImage.value = ''; typedClinical.value = ''
     typedPathology.value = ''; typedResult.value = ''
     clearTimers()
-    connect(`/api/tasks/${props.taskId}/stream`)
+    historyEmpty.value = false
+
+    if (props.mode === 'history') {
+      historyLoading.value = true
+      try {
+        const res = await fetch(`/api/tasks/${props.taskId}/result`, { credentials: 'include' })
+        if (res.ok) {
+          const snap = await res.json()
+          if (Array.isArray(snap) && snap.length > 0) {
+            events.value = snap
+          } else {
+            historyEmpty.value = true
+          }
+        } else {
+          historyEmpty.value = true
+        }
+      } catch {
+        historyEmpty.value = true
+      } finally {
+        historyLoading.value = false
+      }
+    } else {
+      connect(`/api/tasks/${props.taskId}/stream`)
+    }
   } else {
     close(); clearTimers()
   }
@@ -280,7 +306,8 @@ onUnmounted(() => { close(); clearTimers() })
     <template #title>
       <div style="display:flex;align-items:center;gap:8px">
         <span style="font-weight:600;color:#1e293b">AI 辅助诊断</span>
-        <a-tag v-if="status === 'connecting' || status === 'open'" color="processing" style="margin:0">推理中</a-tag>
+        <a-tag v-if="props.mode === 'history'" color="default" style="margin:0">历史记录</a-tag>
+        <a-tag v-else-if="status === 'connecting' || status === 'open'" color="processing" style="margin:0">推理中</a-tag>
         <a-tag v-else-if="resultEvent" color="success" style="margin:0">完成</a-tag>
         <a-tag v-else-if="errorEvent" color="error" style="margin:0">错误</a-tag>
       </div>
@@ -293,6 +320,14 @@ onUnmounted(() => { close(); clearTimers() })
 
     <!-- Scrollable content -->
     <div class="drawer-scroll">
+
+      <!-- History loading / empty states -->
+      <div v-if="historyLoading" style="display:flex;align-items:center;justify-content:center;padding:40px 0;color:#94a3b8">
+        <a-spin style="margin-right:10px" />加载历史记录…
+      </div>
+      <a-empty v-else-if="historyEmpty" description="暂无保存结果" style="padding:40px 0" />
+
+      <template v-else>
 
       <a-alert v-if="errorEvent" type="error"
         :message="errorEvent.data?.message || '推理过程出现错误'"
@@ -341,6 +376,7 @@ onUnmounted(() => { close(); clearTimers() })
         </div>
       </div>
 
+      </template>
     </div>
   </a-drawer>
 </template>

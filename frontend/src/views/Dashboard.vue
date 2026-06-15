@@ -8,27 +8,62 @@ import {
 
 const router = useRouter()
 const totalPatients = ref('—')
+const tasks = ref([])
+
+function formatDate(val) {
+  if (!val) return '—'
+  if (val instanceof Date) return val.toISOString().slice(0, 10)
+  return String(val).slice(0, 10)
+}
+
+function timeAgo(val) {
+  if (!val) return '—'
+  const diff = Date.now() - new Date(val).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return '刚刚'
+  if (mins < 60) return `${mins} 分钟前`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs} 小时前`
+  return `${Math.floor(hrs / 24)} 天前`
+}
+
+const recentVisits = computed(() =>
+  tasks.value.slice(0, 4).map(t => ({
+    name: t.patient_name || '未知',
+    complaint: t.chief_complaint || '—',
+    date: formatDate(t.visit_date),
+    tag: '',
+    analyzed: t.status === 'complete',
+  }))
+)
+
+const recentTasks = computed(() =>
+  tasks.value.slice(0, 3).map(t => ({
+    name: t.patient_name || '未知',
+    complaint: t.chief_complaint || '—',
+    result: t.status,
+    time: timeAgo(t.created_at),
+  }))
+)
+
+const pendingCount = computed(() => tasks.value.filter(t => t.status === 'pending').length)
+const completeCount = computed(() => tasks.value.filter(t => t.status === 'complete').length)
+const todayCount = computed(() => {
+  const today = new Date().toISOString().slice(0, 10)
+  return tasks.value.filter(t => formatDate(t.created_at) === today).length
+})
 
 onMounted(async () => {
   try {
-    const res = await apiFetch('/api/patients')
-    const data = await res.json()
-    if (Array.isArray(data)) totalPatients.value = data.length
+    const [pRes, tRes] = await Promise.all([
+      apiFetch('/api/patients'),
+      apiFetch('/api/tasks'),
+    ])
+    const [patients, taskData] = await Promise.all([pRes.json(), tRes.json()])
+    if (Array.isArray(patients)) totalPatients.value = patients.length
+    if (Array.isArray(taskData)) tasks.value = taskData
   } catch {}
 })
-
-const recentVisits = [
-  { name: '张三', complaint: '面部红斑丘疹', date: '2026-06-14', tag: '黑色素疑似', analyzed: true },
-  { name: '李四', complaint: '全身荨麻疹反复发作', date: '2026-06-13', tag: '', analyzed: false },
-  { name: '王五', complaint: '色素沉着异常扩散', date: '2026-06-13', tag: '色素痣', analyzed: true },
-  { name: '赵六', complaint: '慢性湿疹持续渗出', date: '2026-06-12', tag: '', analyzed: false },
-]
-
-const recentTasks = [
-  { name: '张三', complaint: '面部红斑', result: 'complete', time: '2 小时前' },
-  { name: '王五', complaint: '色素沉着', result: 'analyzing', time: '1 小时前' },
-  { name: '李四', complaint: '荨麻疹', result: 'error', time: '3 小时前' },
-]
 
 const doctorName = computed(() => {
   try { return JSON.parse(localStorage.getItem('doctor_info') || '{}').name || 'doctor' } catch { return 'doctor' }
@@ -66,7 +101,7 @@ const taskLabel = (r) => r === 'complete' ? '完成' : r === 'error' ? '失败' 
           <ClockCircleOutlined style="color:#D97706;font-size:20px" />
         </div>
         <div class="stat-body">
-          <div class="stat-num" style="color:#D97706">3</div>
+          <div class="stat-num" style="color:#D97706">{{ pendingCount }}</div>
           <div class="stat-label">待分析任务</div>
           <div class="stat-hint">等待 AI 推理</div>
         </div>
@@ -76,7 +111,7 @@ const taskLabel = (r) => r === 'complete' ? '完成' : r === 'error' ? '失败' 
           <CheckCircleOutlined style="color:#059669;font-size:20px" />
         </div>
         <div class="stat-body">
-          <div class="stat-num" style="color:#059669">9</div>
+          <div class="stat-num" style="color:#059669">{{ completeCount }}</div>
           <div class="stat-label">已完成分析</div>
           <div class="stat-hint">本周累计</div>
         </div>
@@ -154,7 +189,7 @@ const taskLabel = (r) => r === 'complete' ? '完成' : r === 'error' ? '失败' 
           </div>
           <div class="dc-row">
             <span class="dc-label">今日接诊</span>
-            <span class="dc-val">{{ recentVisits.length }} 人</span>
+            <span class="dc-val">{{ todayCount }} 人</span>
           </div>
           <div class="dc-row">
             <span class="dc-label">系统状态</span>

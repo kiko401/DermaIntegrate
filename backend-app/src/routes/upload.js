@@ -8,6 +8,14 @@ const router = express.Router();
 // 配置 multer 处理 multipart/form-data
 const upload = multer();
 
+router.get('/', async (req, res) => {
+  try {
+    res.json(await taskService.listAll())
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 router.post('/upload', upload.fields([
   { name: 'file', maxCount: 1 },
   { name: 'clinical_text', maxCount: 1 },

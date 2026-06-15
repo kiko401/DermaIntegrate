@@ -3,9 +3,15 @@ const cookieParser = require('cookie-parser');
 const path = require('path');
 const config = require('./config');
 const { requireAuth } = require('./middleware/auth');
+const db = require('./db');
 
 const app = express();
 app.use(cookieParser());
+
+// 启动迁移：确保 result_snapshot 列存在
+db.query('ALTER TABLE ai_tasks ADD COLUMN IF NOT EXISTS result_snapshot JSON')
+  .then(() => console.log('Migration OK: ai_tasks.result_snapshot'))
+  .catch(e => console.error('Migration error:', e.message));
 
 // 静态文件托管：/test/ 路由访问 test/ 目录
 app.use('/test', express.static(path.join(__dirname, '..', '..', 'test')));
@@ -20,6 +26,7 @@ app.use('/api/tasks',   requireAuth, require('./routes/stream'));
 app.use('/ai-static',   requireAuth, require('./routes/static'));
 app.use('/api/patients',                      requireAuth, require('./routes/patients'));
 app.use('/api/patients/:patientId/visits',    requireAuth, require('./routes/visits'));
+app.use('/api/empi',                          requireAuth, require('./routes/empi'));
 
 // 根路径提示
 app.get('/', (req, res) => {
