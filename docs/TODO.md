@@ -1,7 +1,7 @@
 # TODO.md
 
 > 当前状态快照。每轮结束时更新。只保留当前有用信息，不保留长历史。
-> 最后更新：2026-06-16
+> 最后更新：2026-06-16（TaskDetail 跳转优化完成）
 
 ---
 
@@ -74,10 +74,10 @@
 |------|------|------|
 | `/login` | `LoginView.vue` | ✅ |
 | `/dashboard` | `Dashboard.vue` | ✅ 已接真实数据（患者数 / 任务统计 / 最近动态） |
-| `/patients` | `PatientList.vue` | ✅ 完整（患者卡片 + 就诊工作台 + 发起分析） |
-| `/integration` | `Integration.vue` | ✅ EMPI 展示页（当前仍偏 mock 方案） |
+| `/patients` | `PatientList.vue` | ✅ 完整（患者卡片 + 就诊工作台 + 发起分析）；支持 `?patient_id=` query 自动展开患者 |
+| `/integration` | `Integration.vue` | ✅ 双栏工作台布局，消费 clinical-view 接口，含患者摘要卡 + HIS/LIS/PACS/AI任务 Tabs |
 | `/tasks` | `Tasks.vue` | ✅ 真实接口，支持 pending 任务静默轮询刷新 |
-| `/tasks/:taskId` | `TaskDetail.vue` | ✅ 左右布局，支持 live SSE + 历史快照 |
+| `/tasks/:taskId` | `TaskDetail.vue` | ✅ 左右布局，支持 live SSE + 历史快照；"重新分析"跳转已修复 |
 
 | 组件 | 状态 |
 |------|------|
@@ -105,16 +105,27 @@
 - [x] `empiService.getClinicalView(patientId)`：聚合 patient + empi_sources + his + lis + pacs + ai_tasks
 - [x] `GET /api/patients/:patientId/clinical-view`：curl 验证通过
 
-### 待做（下一步）
+### 已完成（2026-06-16）
 
-- [ ] 前端：在 Integration 页或患者详情中消费 clinical-view 接口
+- [x] 前端：`Integration.vue` 重构为双栏工作台布局
+- [x] 左栏：汇总行 + 外部来源表格，点击"查看"切换右侧
+- [x] 右栏：患者摘要卡 + Tabs（概览 / HIS / LIS / PACS / AI任务）
+- [x] PACS Tab：缩略图预览 + image_url 文本展示
+- [x] 左右栏独立滚动，右侧无选中时显示占位提示
+- [x] KI-004 已解决
+
+### 前端待做（本阶段剩余）
+
+- [ ] **ImageCompare 原图接入**：`ext_pacs_records.image_url` 已有真实数据，待将 PACS 影像 URL 接入 `ImageCompare.vue` 左侧原图（当前为占位）
+- [x] **TaskDetail「重新分析」跳转**：跳转到 `task.patient_id` 对应的具体患者页并自动展开该患者
+- [ ] **患者详情页展示 clinical-view**：目前只在 Integration 页可查，可考虑在 PatientList 患者卡片展开区补充一个"外部数据"入口（延后，视需求而定）
 
 ---
 
 ## 次级任务（延后）
 
 - [ ] **ImageCompare 原图方案**：原图来源已有 `ext_pacs_records.image_url`，待前端接入后处理
-- [ ] **TaskDetail「重新分析」**：改为跳转到对应患者（当前泛跳 `/patients`，`task.patient_id` 接口已返回）
+- [x] **TaskDetail「重新分析」**：改为跳转到对应患者（`task.patient_id` 接口已返回）
 
 ---
 

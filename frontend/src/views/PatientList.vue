@@ -1,10 +1,11 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { apiFetch } from '@/utils/api'
 
 const router = useRouter()
+const route  = useRoute()
 
 // ── Patient list ──────────────────────────────────────────────
 const patients = ref([])
@@ -195,7 +196,14 @@ async function launchAnalysis() {
   }
 }
 
-onMounted(fetchPatients)
+onMounted(async () => {
+  await fetchPatients()
+  const pid = route.query.patient_id
+  if (pid) {
+    const target = patients.value.find(p => String(p.id) === String(pid))
+    if (target) selectPatient(target)
+  }
+})
 </script>
 
 <template>

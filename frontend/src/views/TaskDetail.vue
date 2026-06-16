@@ -268,7 +268,7 @@ onUnmounted(() => close())
         <span class="header-meta">{{ fmtDateTime(task.created_at) }}</span>
         <span class="header-meta" style="font-family:monospace;font-size:11px">{{ task.task_id }}</span>
         <div class="header-actions">
-          <a-button size="small" @click="router.push('/patients')">重新分析</a-button>
+          <a-button size="small" @click="router.push(`/patients?patient_id=${task.patient_id}`)">重新分析</a-button>
         </div>
       </div>
 
