@@ -1,7 +1,7 @@
 # TODO.md
 
 > 当前状态快照。每轮结束时更新。只保留当前有用信息，不保留长历史。
-> 最后更新：2026-06-16（第一阶段数据底座完成，多库建表+seed 验证通过）
+> 最后更新：2026-06-16（vite.config.js 补 /pacs-static 代理，缩略图加载修复）
 
 ---
 
@@ -125,8 +125,9 @@
 - [x] 更新 .env.example 补充多库变量
 
 ## README 对齐正式重构：后续阶段
-- [ ] 将 `clinical-view` 从单 schema 原型查询切换为真实多库聚合查询
-- [ ] 准备真实 PACS 图片资源路径与静态访问方式
+- [x] 将 `clinical-view` 从单 schema 原型查询切换为真实多库聚合查询（含清理收口：重复 require 合并、旧注释清理、`getSourcesByPatientId` 修复）
+- [x] `listExternalSources` 已从 `mock_external_patients` 切换为从 `his_db` / `lis_db` / `pacs_db` 三库聚合，返回结构不变
+- [x] 准备真实 PACS 图片资源路径与静态访问方式（`/pacs-static` 路由已挂载，`queryPacs` 已返回可访问 URL）
 - [ ] 改造 AI 分析入口：从“手工创建数据 + 手工上传图”逐步过渡到“基于已有患者 / 就诊 / 原图发起分析”
 - [ ] 将手工录入路径从主入口降级为补录 / fallback 入口
 - [ ] 后续再评估 FHIR R4 风格归一化层
@@ -137,13 +138,13 @@
 
 以下事项仍然有效，但已不再是当前正式重构主线：
 
-- [ ] 原图资源准备完成后，再接入 `ImageCompare` 左侧原图
+- [x] 原图资源准备完成后，再接入 `ImageCompare` 左侧原图（Integration.vue PACS Tab 缩略图已接入真实路径）
 - [ ] 患者详情页展示 `clinical-view`：目前只在 Integration 页可查，可考虑在 PatientList 患者卡片展开区补充“外部数据”入口
 - [ ] 其他原型阶段 UI 小优化按需处理
 
 ## 次级任务（延后）
 
-- [ ] **ImageCompare 原图方案**：原图来源将由 pacs_db 提供真实路径，正式架构落地后再接入前端
+- [ ] **ImageCompare 原图方案**：Integration.vue PACS Tab 已接缩略图；TaskDetail ImageCompare 左侧原图（`image_url`）尚未接入
 - [x] **TaskDetail「重新分析」**：改为跳转到对应患者（`task.patient_id` 接口已返回）
 
 ---
@@ -163,6 +164,6 @@
 |----|------|------|
 | KI-001 | `EventSource` 无法发送自定义请求头，SSE 鉴权依赖 cookie / 代理行为 | 🟡 活跃风险 |
 | KI-002 | `test/index.html` 无 cookie 机制，接口全 401 | 🟡 非阻塞，已知 |
-| KI-003 | `ImageCompare` 左侧原图仍为占位，真实原图资源和访问路径尚未正式落地 | 🟡 延后处理 |
+| KI-003 | `ImageCompare` 左侧原图仍为占位，真实原图资源和访问路径尚未正式落地 | ✅ Integration PACS Tab 缩略图已接真实路径；TaskDetail ImageCompare 左侧原图待接入 |
 | KI-004 | 当前 EMPI 和外部来源接入已完成原型验证，但整体仍依赖单 schema / mock 过渡结构，尚未进入正式多库架构 | 🟡 当前主线正在重构 |
 | KI-007 | `SSEResultEvent.status` 无枚举约束，AI 侧返回非预期值会导致前端判断失效 | 🟡 非阻塞，建议协作者加 `Literal` 约束 |

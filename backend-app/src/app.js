@@ -110,6 +110,8 @@ for (const [pool, sql, tbl] of multiDbMigrations) {
 
 // 静态文件托管：/test/ 路由访问 test/ 目录
 app.use('/test', express.static(path.join(__dirname, '..', '..', 'test')));
+// PACS 影像静态托管（需登录）
+app.use('/pacs-static', requireAuth, express.static(path.join(__dirname, '..', 'public')));
 
 // 公开路由（不需要鉴权）
 app.use('/api/health', require('./routes/health'));

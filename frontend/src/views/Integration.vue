@@ -335,8 +335,8 @@ const cvTasks = computed(() => clinicalView.value?.ai_tasks || [])
                   <div v-for="r in cvPacs" :key="r.id" class="pacs-card">
                     <div class="pacs-thumb-wrap">
                       <img
-                          v-if="r.thumbnail_url"
-                          :src="r.thumbnail_url"
+                          v-if="r.thumbnail_url || r.image_url"
+                          :src="r.thumbnail_url || r.image_url"
                           :alt="r.description || 'thumbnail'"
                           class="pacs-thumb"
                       />
