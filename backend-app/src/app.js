@@ -4,6 +4,7 @@ const path = require('path');
 const config = require('./config');
 const { requireAuth } = require('./middleware/auth');
 const db = require('./db');
+const { hisPool, lisPool, pacsPool } = require('./db');
 
 const app = express();
 app.use(cookieParser());
@@ -58,6 +59,53 @@ for (const [sql, tbl] of extTables) {
   db.query(sql)
     .then(() => console.log(`Migration OK: ${tbl}`))
     .catch(e => console.error(`Migration error (${tbl}):`, e.message));
+}
+
+// 多库建表检查（derma_his / derma_lis / derma_pacs）
+const multiDbMigrations = [
+  [hisPool,  `CREATE TABLE IF NOT EXISTS his_patients (
+    id INT AUTO_INCREMENT PRIMARY KEY, source_id VARCHAR(64) NOT NULL UNIQUE,
+    name VARCHAR(50) NOT NULL, id_card VARCHAR(18), phone VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`, 'his_patients'],
+  [hisPool,  `CREATE TABLE IF NOT EXISTS his_records (
+    id INT AUTO_INCREMENT PRIMARY KEY, his_patient_id INT NOT NULL,
+    visit_type VARCHAR(20) NOT NULL DEFAULT 'outpatient', visit_date DATE NOT NULL,
+    department VARCHAR(50), diagnosis_code VARCHAR(20), diagnosis_name VARCHAR(200),
+    chief_complaint TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (his_patient_id) REFERENCES his_patients(id)
+  )`, 'his_records'],
+  [lisPool,  `CREATE TABLE IF NOT EXISTS lis_patients (
+    id INT AUTO_INCREMENT PRIMARY KEY, source_id VARCHAR(64) NOT NULL UNIQUE,
+    name VARCHAR(50) NOT NULL, id_card VARCHAR(18), phone VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`, 'lis_patients'],
+  [lisPool,  `CREATE TABLE IF NOT EXISTS lis_results (
+    id INT AUTO_INCREMENT PRIMARY KEY, lis_patient_id INT NOT NULL,
+    his_record_id INT NULL, test_name VARCHAR(100) NOT NULL,
+    value VARCHAR(50), unit VARCHAR(30), ref_range VARCHAR(50),
+    abnormal_flag TINYINT DEFAULT 0, reported_at DATETIME NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (lis_patient_id) REFERENCES lis_patients(id)
+  )`, 'lis_results'],
+  [pacsPool, `CREATE TABLE IF NOT EXISTS pacs_patients (
+    id INT AUTO_INCREMENT PRIMARY KEY, source_id VARCHAR(64) NOT NULL UNIQUE,
+    name VARCHAR(50) NOT NULL, id_card VARCHAR(18), phone VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`, 'pacs_patients'],
+  [pacsPool, `CREATE TABLE IF NOT EXISTS pacs_records (
+    id INT AUTO_INCREMENT PRIMARY KEY, pacs_patient_id INT NOT NULL,
+    record_id VARCHAR(64) NOT NULL UNIQUE, study_id VARCHAR(64),
+    modality VARCHAR(20) NOT NULL, body_part VARCHAR(50), description VARCHAR(200),
+    image_path VARCHAR(500), thumbnail_path VARCHAR(500), recorded_at DATETIME NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (pacs_patient_id) REFERENCES pacs_patients(id)
+  )`, 'pacs_records'],
+];
+for (const [pool, sql, tbl] of multiDbMigrations) {
+  pool.query(sql)
+    .then(() => console.log(`MultiDB Migration OK: ${tbl}`))
+    .catch(e => console.error(`MultiDB Migration error (${tbl}):`, e.message));
 }
 
 // 静态文件托管：/test/ 路由访问 test/ 目录

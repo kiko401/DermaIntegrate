@@ -1,14 +1,11 @@
-const mysql = require('mysql2/promise');
-require('dotenv').config();
+const appPool  = require('./pools/app');
+const hisPool  = require('./pools/his');
+const lisPool  = require('./pools/lis');
+const pacsPool = require('./pools/pacs');
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT) || 3306,
-  database: process.env.DB_NAME || 'derma_integrate',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  waitForConnections: true,
-  connectionLimit: 10,
-});
-
-module.exports = pool;
+// 向下兼容：旧代码 require('./db') 直接使用的 pool 指向 appPool
+module.exports = appPool;
+module.exports.appPool  = appPool;
+module.exports.hisPool  = hisPool;
+module.exports.lisPool  = lisPool;
+module.exports.pacsPool = pacsPool;

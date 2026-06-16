@@ -1,13 +1,13 @@
 # TODO.md
 
 > 当前状态快照。每轮结束时更新。只保留当前有用信息，不保留长历史。
-> 最后更新：2026-06-16（TaskDetail 跳转优化完成）
+> 最后更新：2026-06-16（第一阶段数据底座完成，多库建表+seed 验证通过）
 
 ---
 
 ## 当前状态
 
-- 分支：`feat/app/sse-integration`
+- 分支：`feat/multidb-empi-rebuild`
 - 默认工作范围：`frontend/` + `backend-app/`
 - AI 推理域 `backend-ai/`：同属本仓库，协作者负责，默认不修改、不扫描
 
@@ -93,38 +93,57 @@
 
 ---
 
-## 当前主线：EMPI + 多源异构接入基础（MVP 后端已完成）
+## 当前主线：README 对齐正式版重构（多库 / 多源 / 真原图）
+当前阶段目标已经从“继续完善单 schema 原型”切换为：
+**按 README 的正式目标重构系统底座，逐步推进到真实多源数据库 + 统一患者视图 + 基于已有影像发起 AI 分析的架构。**
 
-后端 MVP 已落地，外部分型表已建，统一临床视图接口已上线并验证。
+## 原型阶段已完成成果（可回退参考）
+以下内容已完成，用于验证多源聚合方向，但不是最终正式架构：
+- [x] 单 schema + 分型表原型（`ext_his_records` / `ext_lis_results` / `ext_pacs_records`）
+- [x] `clinical-view` 聚合接口原型
+- [x] Integration 页面统一临床视图工作台
+- [x] TaskDetail “重新分析”跳转到对应患者
+- [x] 单 schema 下的多源患者聚合、前端展示、基础导航链路已打通
 
-### 已完成（2026-06-16）
+说明：
+当前 GitHub 上这版代码保留为**原型阶段成果**，可作为回退和参考，不再继续作为长期正式架构深挖。
 
-- [x] 设计：单 schema + 分型表，保留升级到多 schema 的路径
-- [x] 新增 `ext_his_records` / `ext_lis_results` / `ext_pacs_records` 三张分型表（schema + 启动迁移）
-- [x] seed：his 3条 / lis 4条 / pacs 2条，覆盖患者 901/902/903
-- [x] `empiService.getClinicalView(patientId)`：聚合 patient + empi_sources + his + lis + pacs + ai_tasks
-- [x] `GET /api/patients/:patientId/clinical-view`：curl 验证通过
+## README 对齐正式重构：第一阶段（数据底座）
+目标：
+从当前单 schema 原型过渡到正式多库 / 多 schema 架构，为真实多源接入与基于已有影像发起 AI 分析做准备。
 
-### 已完成（2026-06-16）
+第一阶段范围：
+- [x] 新建 `app_db`（pool + schema + seed 完成，验证通过）
+- [x] 新建 `his_db`（pool + schema + seed 完成，验证通过）
+- [x] 新建 `lis_db`（pool + schema + seed 完成，验证通过）
+- [x] 新建 `pacs_db`（pool + schema + seed 完成，验证通过）
+- [x] 新增多 pool 连接配置（app / his / lis / pacs 全部完成）
+- [x] db/index.js 导出多 pool，向下兼容旧代码
+- [x] 新增 schema/app.sql / his.sql / lis.sql / pacs.sql
+- [x] 拆分 seed：seed/app.js / his.js / lis.js / pacs.js / index.js（含建表前置）
+- [x] app.js 启动时多库建表检查（MultiDB Migration OK 已验证）
+- [x] 更新 .env.example 补充多库变量
 
-- [x] 前端：`Integration.vue` 重构为双栏工作台布局
-- [x] 左栏：汇总行 + 外部来源表格，点击"查看"切换右侧
-- [x] 右栏：患者摘要卡 + Tabs（概览 / HIS / LIS / PACS / AI任务）
-- [x] PACS Tab：缩略图预览 + image_url 文本展示
-- [x] 左右栏独立滚动，右侧无选中时显示占位提示
-- [x] KI-004 已解决
-
-### 前端待做（本阶段剩余）
-
-- [ ] **ImageCompare 原图接入**：`ext_pacs_records.image_url` 已有真实数据，待将 PACS 影像 URL 接入 `ImageCompare.vue` 左侧原图（当前为占位）
-- [x] **TaskDetail「重新分析」跳转**：跳转到 `task.patient_id` 对应的具体患者页并自动展开该患者
-- [ ] **患者详情页展示 clinical-view**：目前只在 Integration 页可查，可考虑在 PatientList 患者卡片展开区补充一个"外部数据"入口（延后，视需求而定）
+## README 对齐正式重构：后续阶段
+- [ ] 将 `clinical-view` 从单 schema 原型查询切换为真实多库聚合查询
+- [ ] 准备真实 PACS 图片资源路径与静态访问方式
+- [ ] 改造 AI 分析入口：从“手工创建数据 + 手工上传图”逐步过渡到“基于已有患者 / 就诊 / 原图发起分析”
+- [ ] 将手工录入路径从主入口降级为补录 / fallback 入口
+- [ ] 后续再评估 FHIR R4 风格归一化层
 
 ---
 
+## 原型阶段剩余优化（延后）
+
+以下事项仍然有效，但已不再是当前正式重构主线：
+
+- [ ] 原图资源准备完成后，再接入 `ImageCompare` 左侧原图
+- [ ] 患者详情页展示 `clinical-view`：目前只在 Integration 页可查，可考虑在 PatientList 患者卡片展开区补充“外部数据”入口
+- [ ] 其他原型阶段 UI 小优化按需处理
+
 ## 次级任务（延后）
 
-- [ ] **ImageCompare 原图方案**：原图来源已有 `ext_pacs_records.image_url`，待前端接入后处理
+- [ ] **ImageCompare 原图方案**：原图来源将由 pacs_db 提供真实路径，正式架构落地后再接入前端
 - [x] **TaskDetail「重新分析」**：改为跳转到对应患者（`task.patient_id` 接口已返回）
 
 ---
@@ -133,7 +152,7 @@
 
 - [ ] FHIR R4 风格归一化层
 - [ ] 构建 FHIR 风格资源 + EMPI + AI 结果的统一临床聚合接口
-- [ ] Docker Compose 部署：Nginx SSE 配置 + 多 schema 数据库编排
+- [ ] Docker Compose 部署：Nginx SSE 配置 + 多 schema / 多库编排
 - [ ] Redis：出现真实使用场景时再引入
 
 ---
@@ -144,6 +163,6 @@
 |----|------|------|
 | KI-001 | `EventSource` 无法发送自定义请求头，SSE 鉴权依赖 cookie / 代理行为 | 🟡 活跃风险 |
 | KI-002 | `test/index.html` 无 cookie 机制，接口全 401 | 🟡 非阻塞，已知 |
-| KI-003 | `ImageCompare` 左侧原图为占位，原图来源策略尚未落地 | 🟡 已知，延后处理 |
-| KI-004 | 当前 EMPI 和外部来源接入仍偏原型级，整体结构依赖 mock | 🟢 后端 MVP 完成，前端展示待做 |
+| KI-003 | `ImageCompare` 左侧原图仍为占位，真实原图资源和访问路径尚未正式落地 | 🟡 延后处理 |
+| KI-004 | 当前 EMPI 和外部来源接入已完成原型验证，但整体仍依赖单 schema / mock 过渡结构，尚未进入正式多库架构 | 🟡 当前主线正在重构 |
 | KI-007 | `SSEResultEvent.status` 无枚举约束，AI 侧返回非预期值会导致前端判断失效 | 🟡 非阻塞，建议协作者加 `Literal` 约束 |
