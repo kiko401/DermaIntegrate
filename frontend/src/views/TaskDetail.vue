@@ -32,8 +32,17 @@ const MORPH_LABELS = {
   special_structures: '特殊结构',
 }
 const CLINICAL_LABELS = {
-  age: '年龄', gender: '性别', region: '病灶部位',
-  itch: '瘙痒', grew: '增大趋势',
+  // patient_info
+  age: '年龄', gender: '性别', fitzpatrick_skin_type: '肤色分型',
+  // lifestyle_history
+  smoke: '吸烟史', drink: '饮酒史', pesticide_exposure: '农药接触史',
+  // personal_history
+  skin_cancer_history: '皮肤癌病史', other_cancer_history: '其他癌症病史',
+  // lesion_clinical
+  region: '病灶部位', diameter_1_mm: '病灶直径(mm)', elevation: '隆起',
+  biopsed: '已活检',
+  // lesion_symptoms
+  itch: '瘙痒', hurt: '疼痛', changed: '形态变化', bleed: '出血', grew: '增大趋势',
 }
 const PATHO_LABELS = {
   disease_type: '疾病类型', t_stage: 'T 分期',
@@ -54,9 +63,15 @@ function morphItems() {
 function clinicalItems() {
   const d = clinicalEvent.value?.data
   if (!d) return []
-  const flat = { ...(d.patient_info || {}), ...(d.lesion_clinical || {}), ...(d.lesion_symptoms || {}) }
+  const flat = {
+    ...(d.patient_info      || {}),
+    ...(d.lifestyle_history || {}),
+    ...(d.personal_history  || {}),
+    ...(d.lesion_clinical   || {}),
+    ...(d.lesion_symptoms   || {}),
+  }
   return Object.entries(flat)
-    .filter(([k, v]) => CLINICAL_LABELS[k] && v != null && v !== '' && v !== false)
+    .filter(([k, v]) => CLINICAL_LABELS[k] && v != null && v !== '')
     .map(([k, v]) => ({ label: CLINICAL_LABELS[k], value: String(boolStr(v)) }))
 }
 
@@ -426,12 +441,13 @@ onUnmounted(() => close())
             </div>
             <template v-if="clinicalEvent">
               <div style="font-size:12px;color:#64748b;margin-bottom:8px;font-weight:600">AI 提取摘要</div>
-              <div class="desc-list">
+              <div v-if="clinicalItems().length" class="desc-list">
                 <div v-for="item in clinicalItems()" :key="item.label" class="desc-row">
                   <span class="desc-key">{{ item.label }}</span>
                   <span class="desc-val">{{ item.value }}</span>
                 </div>
               </div>
+              <div v-else class="empty-state">AI 已解析病历，暂无可展示的结构化字段</div>
             </template>
             <div v-else class="empty-state">
               <span v-if="isLive"><a-spin size="small" style="margin-right:6px" />病历解析进行中…</span>

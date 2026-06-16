@@ -131,24 +131,40 @@ async function getClinicalView(patientId) {
   }
 
   async function queryLis(sourceIds) {
-    if (!sourceIds.length) return []
+    if (!sourceIds.length) return { results: [], pathology: [] }
     const [pts] = await lisPool.query(
       'SELECT id, source_id FROM lis_patients WHERE source_id IN (?)',
       [sourceIds]
     )
-    if (!pts.length) return []
+    if (!pts.length) return { results: [], pathology: [] }
     const ptIds = pts.map(p => p.id)
-    const [rows] = await lisPool.query(
-      `SELECT r.id, p.source_id AS source_patient_id,
-              r.test_name, r.value, r.unit, r.ref_range,
-              r.abnormal_flag, r.reported_at, r.created_at
-       FROM lis_results r
-       JOIN lis_patients p ON p.id = r.lis_patient_id
-       WHERE r.lis_patient_id IN (?)
-       ORDER BY r.reported_at DESC`,
-      [ptIds]
-    )
-    return rows
+    const [[results], [pathology]] = await Promise.all([
+      lisPool.query(
+        `SELECT r.id, p.source_id AS source_patient_id,
+                r.test_name, r.value, r.unit, r.ref_range,
+                r.abnormal_flag, r.reported_at, r.created_at
+         FROM lis_results r
+         JOIN lis_patients p ON p.id = r.lis_patient_id
+         WHERE r.lis_patient_id IN (?)
+         ORDER BY r.reported_at DESC`,
+        [ptIds]
+      ),
+      lisPool.query(
+        `SELECT r.id, p.source_id AS source_patient_id,
+                r.report_no, r.sample_type, r.diagnosis_text,
+                r.histological_type, r.breslow_thickness_mm, r.ulceration,
+                r.mitotic_rate, r.clark_level, r.lymphovascular_invasion,
+                r.perineural_invasion, r.lymph_node_status, r.sentinel_node_biopsy,
+                r.braf_mutation, r.nras_mutation, r.kit_mutation, r.pd_l1_expression,
+                r.reported_at
+         FROM lis_pathology_reports r
+         JOIN lis_patients p ON p.id = r.lis_patient_id
+         WHERE r.lis_patient_id IN (?)
+         ORDER BY r.reported_at DESC`,
+        [ptIds]
+      ),
+    ])
+    return { results, pathology }
   }
 
   async function queryPacs(sourceIds) {
@@ -179,7 +195,7 @@ async function getClinicalView(patientId) {
     }))
   }
 
-  const [hisRows, lisRows, pacsRows, aiRows] = await Promise.all([
+  const [hisRows, lisData, pacsRows, aiRows] = await Promise.all([
     queryHis(hisIds),
     queryLis(lisIds),
     queryPacs(pacsIds),
@@ -199,7 +215,8 @@ async function getClinicalView(patientId) {
     patient:      patientRows[0],
     empi_sources: sourcesRows,
     his:          hisRows,
-    lis:          lisRows,
+    lis:          lisData.results,
+    lis_pathology: lisData.pathology,
     pacs:         pacsRows,
     ai_tasks:     aiRows,
   }

@@ -32,7 +32,44 @@ async function seedLis() {
     );
   }
 
-  console.log('[lis] seed done — 2 patients, 4 results');
+  // 病理分子报告（张伟，右手背切除活检，对齐 TCGA-SKCM/AJCC 8th）
+  const [[zhangwei]] = await lisPool.execute(
+    'SELECT id FROM lis_patients WHERE source_id = ? LIMIT 1', ['LIS-L-2021-3301']
+  );
+  if (zhangwei) {
+    await lisPool.execute(
+      `INSERT IGNORE INTO lis_pathology_reports
+         (lis_patient_id, report_no, sample_type, diagnosis_text,
+          histological_type, breslow_thickness_mm, ulceration,
+          mitotic_rate, clark_level, lymphovascular_invasion, perineural_invasion,
+          lymph_node_status, sentinel_node_biopsy,
+          braf_mutation, nras_mutation, kit_mutation, pd_l1_expression,
+          reported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        zhangwei.id,
+        'PATH-2021-0318-001',
+        '切除活检',
+        '右手背皮肤黑色素细胞性肿瘤，形态符合恶性黑色素瘤（肢端雀斑型），肿瘤浸润真皮全层，见脉管侵犯，切缘阴性。',
+        '肢端雀斑型',
+        5.2,    // breslow_thickness_mm
+        1,      // ulceration: 有
+        3.8,    // mitotic_rate /mm²
+        4,      // clark_level IV
+        1,      // lymphovascular_invasion: 有
+        0,      // perineural_invasion: 无
+        '未送检',
+        null,
+        'V600E突变',
+        '野生型',
+        'KIT扩增阳性',
+        'PD-L1阳性（TPS 30%）',
+        '2021-03-25 14:00:00',
+      ]
+    );
+  }
+
+  console.log('[lis] seed done — 2 patients, 4 results, 1 pathology report');
 }
 
 module.exports = seedLis;
