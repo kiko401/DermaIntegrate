@@ -1,7 +1,7 @@
 # TODO.md
 
 > 当前状态快照。每轮结束时更新。只保留当前有用信息，不保留长历史。
-> 最后更新：2026-06-15
+> 最后更新：2026-06-16
 
 ---
 
@@ -45,7 +45,7 @@
 |---------|------|------|
 | `routes/health.js` | `GET /api/health/ai` | ✅ |
 | `routes/auth.js` | `POST /api/auth/login`（httpOnly cookie）/ `POST /logout` / `GET /me` | ✅ |
-| `routes/patients.js` | 患者 CRUD | ✅ |
+| `routes/patients.js` | 患者 CRUD + `GET /api/patients/:id/clinical-view` | ✅ |
 | `routes/visits.js` | 就诊记录 CRUD（mergeParams: true） | ✅ |
 | `routes/upload.js` | `POST /api/tasks/upload` / `GET /api/tasks`（列表） | ✅ |
 | `routes/stream.js` | `GET /api/tasks/:id/stream`（SSE 代理）/ `GET /api/tasks/:id/result`（历史快照）/ `GET /api/tasks/:id`（详情） | ✅ |
@@ -60,10 +60,13 @@
 | `patients` | 患者主表 |
 | `visits` | 就诊记录，FK → patients / doctors |
 | `ai_tasks` | 含 `result_snapshot JSON` 列（启动时自动迁移） |
-| `empi_index` | 外部系统 ID → 内部患者 ID 映射（当前仍是原型级） |
-| `mock_external_patients` | HIS/LIS/PACS mock 数据，seed 预置 6 条 |
+| `empi_index` | 外部系统 ID → 内部患者 ID 映射 |
+| `mock_external_patients` | HIS/LIS/PACS mock 身份数据，seed 预置 6 条（EMPI 匹配入口） |
+| `ext_his_records` | HIS 风格就诊记录（分型表，seed 3条） |
+| `ext_lis_results` | LIS 风格检验结果（分型表，seed 4条） |
+| `ext_pacs_records` | PACS 风格影像记录，含 image_url / thumbnail_url（分型表，seed 2条） |
 
-> `result_snapshot` 列：`app.js` 启动时自动执行 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，无需手动迁移。
+> 新来源表（`ext_*`）：`app.js` 启动时自动 `CREATE TABLE IF NOT EXISTS`，无需手动建表。`result_snapshot` 同理。
 
 ### 前端（`frontend/src/`）
 
@@ -90,40 +93,28 @@
 
 ---
 
-## 下一阶段主线：EMPI + 多源异构接入基础
+## 当前主线：EMPI + 多源异构接入基础（MVP 后端已完成）
 
-**当前主优先级不是继续做前端体验小修小补，而是：**
+后端 MVP 已落地，外部分型表已建，统一临床视图接口已上线并验证。
 
-把项目从「手工录入驱动的 AI 原型流程」推进到「多源数据集成驱动的临床工作流基础」。
-本阶段优先完成设计与最小可行实现（MVP），不追求一次性做完整 FHIR 体系。
+### 已完成（2026-06-16）
 
+- [x] 设计：单 schema + 分型表，保留升级到多 schema 的路径
+- [x] 新增 `ext_his_records` / `ext_lis_results` / `ext_pacs_records` 三张分型表（schema + 启动迁移）
+- [x] seed：his 3条 / lis 4条 / pacs 2条，覆盖患者 901/902/903
+- [x] `empiService.getClinicalView(patientId)`：聚合 patient + empi_sources + his + lis + pacs + ai_tasks
+- [x] `GET /api/patients/:patientId/clinical-view`：curl 验证通过
 
-### 阶段目标
+### 待做（下一步）
 
-- 跨系统患者身份映射
-- 本地模拟 HIS / LIS / PACS 风格数据源
-- 统一患者临床视图
-- 外部原图来源设计
-- 后续 FHIR 风格归一化的基础路径
-
-### 计划任务
-
-- [ ] 设计多 schema 数据库布局（`app_db` / `his_db` / `lis_db` / `pacs_db`）
-  - 云上优先采用「一个 MySQL 实例 + 多个 schema」的轻量方案
-- [ ] 将 `empi_index` 从原型映射表升级为更清晰的跨系统身份映射表
-- [ ] 用分离的来源库 / 来源表替代当前单表 `mock_external_patients` 方案
-- [ ] 新增后端聚合 service，生成统一患者临床视图
-- [ ] 定义统一接口（如 `/api/patients/:id/clinical-view`），返回整合后的患者全景数据
-- [ ] 明确原图来源策略：原图来自外部影像记录 / PACS 风格数据源，热力图仍由 AI 推理输出
-- [ ] 逐步改造分析发起流程：从「手工创建数据再分析」过渡到「选择已有患者 / 就诊 / 原图后发起分析」
+- [ ] 前端：在 Integration 页或患者详情中消费 clinical-view 接口
 
 ---
 
 ## 次级任务（延后）
 
-- [ ] **ImageCompare 原图方案**：左侧固定占位，等原图来源策略落地后处理
+- [ ] **ImageCompare 原图方案**：原图来源已有 `ext_pacs_records.image_url`，待前端接入后处理
 - [ ] **TaskDetail「重新分析」**：改为跳转到对应患者（当前泛跳 `/patients`，`task.patient_id` 接口已返回）
-- [ ] Integration 页面交互体验补充（等 EMPI 接入真实化后再做）
 
 ---
 
@@ -143,5 +134,5 @@
 | KI-001 | `EventSource` 无法发送自定义请求头，SSE 鉴权依赖 cookie / 代理行为 | 🟡 活跃风险 |
 | KI-002 | `test/index.html` 无 cookie 机制，接口全 401 | 🟡 非阻塞，已知 |
 | KI-003 | `ImageCompare` 左侧原图为占位，原图来源策略尚未落地 | 🟡 已知，延后处理 |
-| KI-004 | 当前 EMPI 和外部来源接入仍偏原型级，整体结构依赖 mock | 🔴 下一阶段核心问题 |
+| KI-004 | 当前 EMPI 和外部来源接入仍偏原型级，整体结构依赖 mock | 🟢 后端 MVP 完成，前端展示待做 |
 | KI-007 | `SSEResultEvent.status` 无枚举约束，AI 侧返回非预期值会导致前端判断失效 | 🟡 非阻塞，建议协作者加 `Literal` 约束 |

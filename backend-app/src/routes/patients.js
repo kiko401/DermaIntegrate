@@ -1,11 +1,22 @@
 const router = require('express').Router();
 const service = require('../services/patientService');
+const empiSvc = require('../services/empiService');
 
 router.use(require('express').json());
 
 router.get('/', async (req, res) => {
   try {
     res.json(await service.list());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/clinical-view', async (req, res) => {
+  try {
+    const view = await empiSvc.getClinicalView(req.params.id);
+    if (!view) return res.status(404).json({ error: 'patient not found' });
+    res.json(view);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

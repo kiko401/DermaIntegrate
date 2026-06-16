@@ -84,11 +84,79 @@ async function seed() {
     )
   }
 
+  // ── ext_his / lis / pacs 数据定义 ────────────────────────────────────────
+  const hisRecords = [
+    ['HIS-P-2021-0041', 'outpatient', '2021-03-15', '皮肤科', 'L30.9', '皮炎，未特指', '右手背皮疹伴瘙痒 2 周'],
+    ['HIS-P-2021-0041', 'outpatient', '2021-04-10', '皮肤科', 'L30.9', '皮炎，未特指', '复诊，皮疹好转'],
+    ['HIS-P-2022-0178', 'outpatient', '2022-07-20', '皮肤科', 'L40.0', '寻常型银屑病', '背部斑块性皮疹 3 个月'],
+  ]
+
+  const lisResults = [
+    ['LIS-L-2021-3301', null, 'IgE 总量',        '420',   'IU/mL', '0–100',  1,  '2021-03-18 10:30:00'],
+    ['LIS-L-2021-3301', null, '嗜酸性粒细胞百分比', '8.2',  '%',     '0.5–5',  1,  '2021-03-18 10:30:00'],
+    ['LIS-L-2022-4412', null, 'IgE 总量',        '680',   'IU/mL', '0–100',  1,  '2022-07-22 09:15:00'],
+    ['LIS-L-2022-4412', null, 'C 反应蛋白',       '12.4',  'mg/L',  '<10',    1,  '2022-07-22 09:15:00'],
+  ]
+
+  const pacsRecords = [
+    [
+      'PACS-RIS-ZW-007', 'PACS-RIS-ZW-007', '1.2.840.99999.007',
+      'DERM', '左足底', '左足底色素性皮损，皮镜检查',
+      '/ai-static/pacs/ZW-007-origin.jpg', '/ai-static/pacs/ZW-007-thumb.jpg',
+      '2021-03-16 14:00:00',
+    ],
+    [
+      'PACS-RIS-WQ-019', 'PACS-RIS-WQ-019', '1.2.840.99999.019',
+      'DERM', '背部', '背部多发斑块皮损，皮镜检查',
+      '/ai-static/pacs/WQ-019-origin.jpg', '/ai-static/pacs/WQ-019-thumb.jpg',
+      '2022-07-21 11:30:00',
+    ],
+  ]
+
+  // ext_his_records 无唯一键，用 DELETE+INSERT 保证幂等
+  const hisSourceIds = [...new Set(hisRecords.map(r => r[0]))]
+  for (const spid of hisSourceIds) {
+    await db.execute('DELETE FROM ext_his_records WHERE source_patient_id = ?', [spid])
+  }
+  for (const [spid, vtype, vdate, dept, dcode, dname, cc] of hisRecords) {
+    await db.execute(
+      `INSERT INTO ext_his_records
+         (source_patient_id, visit_type, visit_date, department, diagnosis_code, diagnosis_name, chief_complaint)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [spid, vtype, vdate, dept, dcode, dname, cc]
+    )
+  }
+
+  // ext_lis_results 无唯一键，同上
+  const lisSourceIds = [...new Set(lisResults.map(r => r[0]))]
+  for (const spid of lisSourceIds) {
+    await db.execute('DELETE FROM ext_lis_results WHERE source_patient_id = ?', [spid])
+  }
+  for (const [spid, hid, tname, val, unit, ref, flag, rat] of lisResults) {
+    await db.execute(
+      `INSERT INTO ext_lis_results
+         (source_patient_id, his_record_id, test_name, value, unit, ref_range, abnormal_flag, reported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [spid, hid, tname, val, unit, ref, flag, rat]
+    )
+  }
+
+  // ext_pacs_records 有 record_id UNIQUE，用 INSERT IGNORE
+  for (const [spid, rid, sid, mod, bp, desc, iurl, turl, rat] of pacsRecords) {
+    await db.execute(
+      `INSERT IGNORE INTO ext_pacs_records
+         (source_patient_id, record_id, study_id, modality, body_part, description, image_url, thumbnail_url, recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [spid, rid, sid, mod, bp, desc, iurl, turl, rat]
+    )
+  }
+
   console.log('Seed done.')
   console.log(`  医生账号  username: ${username}  password: ${password}`)
   console.log('  演示患者  id 901(张伟) 902(李敏) 903(王强)')
   console.log('  Mock外部  6条记录覆盖 HIS/LIS/PACS')
   console.log('  EMPI索引  6条映射预置完毕')
+  console.log('  ext_his   3条 | ext_lis 4条 | ext_pacs 2条')
   process.exit(0)
 }
 

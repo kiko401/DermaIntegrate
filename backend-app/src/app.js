@@ -8,10 +8,57 @@ const db = require('./db');
 const app = express();
 app.use(cookieParser());
 
-// 启动迁移：确保 result_snapshot 列存在
-db.query('ALTER TABLE ai_tasks ADD COLUMN IF NOT EXISTS result_snapshot JSON')
+// 启动迁移：确保 result_snapshot 列存在，并创建新来源表
+db.query(`ALTER TABLE ai_tasks ADD COLUMN result_snapshot JSON`)
   .then(() => console.log('Migration OK: ai_tasks.result_snapshot'))
-  .catch(e => console.error('Migration error:', e.message));
+  .catch(() => { /* 列已存在，忽略 */ });
+
+const extTables = [
+  [`CREATE TABLE IF NOT EXISTS ext_his_records (
+    id               INT AUTO_INCREMENT PRIMARY KEY,
+    source_patient_id VARCHAR(64)  NOT NULL,
+    visit_type       VARCHAR(20)  NOT NULL DEFAULT 'outpatient',
+    visit_date       DATE         NOT NULL,
+    department       VARCHAR(50),
+    diagnosis_code   VARCHAR(20),
+    diagnosis_name   VARCHAR(200),
+    chief_complaint  TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_source_patient (source_patient_id)
+  )`, 'ext_his_records'],
+  [`CREATE TABLE IF NOT EXISTS ext_lis_results (
+    id               INT AUTO_INCREMENT PRIMARY KEY,
+    source_patient_id VARCHAR(64)  NOT NULL,
+    his_record_id    INT          NULL,
+    test_name        VARCHAR(100) NOT NULL,
+    value            VARCHAR(50),
+    unit             VARCHAR(30),
+    ref_range        VARCHAR(50),
+    abnormal_flag    TINYINT      DEFAULT 0,
+    reported_at      DATETIME     NOT NULL,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_source_patient (source_patient_id)
+  )`, 'ext_lis_results'],
+  [`CREATE TABLE IF NOT EXISTS ext_pacs_records (
+    id               INT AUTO_INCREMENT PRIMARY KEY,
+    source_patient_id VARCHAR(64)  NOT NULL,
+    record_id        VARCHAR(64)  NOT NULL UNIQUE,
+    study_id         VARCHAR(64),
+    modality         VARCHAR(20)  NOT NULL,
+    body_part        VARCHAR(50),
+    description      VARCHAR(200),
+    image_url        VARCHAR(500),
+    thumbnail_url    VARCHAR(500),
+    recorded_at      DATETIME     NOT NULL,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_source_patient (source_patient_id)
+  )`, 'ext_pacs_records'],
+];
+for (const [sql, tbl] of extTables) {
+  db.query(sql)
+    .then(() => console.log(`Migration OK: ${tbl}`))
+    .catch(e => console.error(`Migration error (${tbl}):`, e.message));
+}
 
 // 静态文件托管：/test/ 路由访问 test/ 目录
 app.use('/test', express.static(path.join(__dirname, '..', '..', 'test')));
