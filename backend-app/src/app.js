@@ -8,10 +8,15 @@ const { hisPool, lisPool, pacsPool } = require('./db');
 
 const app = express();
 app.use(cookieParser());
+app.use(express.json());
 
-// 启动迁移：确保 result_snapshot 列存在，并创建新来源表
+// 启动迁移：确保列存在
 db.query(`ALTER TABLE ai_tasks ADD COLUMN result_snapshot JSON`)
   .then(() => console.log('Migration OK: ai_tasks.result_snapshot'))
+  .catch(() => { /* 列已存在，忽略 */ });
+
+db.query(`ALTER TABLE ai_tasks ADD COLUMN pacs_record_id VARCHAR(64) NULL`)
+  .then(() => console.log('Migration OK: ai_tasks.pacs_record_id'))
   .catch(() => { /* 列已存在，忽略 */ });
 
 const extTables = [
@@ -120,6 +125,7 @@ app.use('/api/auth',   require('./routes/auth'));
 // 受保护路由
 app.use('/api/tasks',   requireAuth, require('./routes/upload'));
 app.use('/api/tasks',   requireAuth, require('./routes/stream'));
+app.use('/api/tasks',   requireAuth, require('./routes/pacs_task'));
 app.use('/ai-static',   requireAuth, require('./routes/static'));
 app.use('/api/patients',                      requireAuth, require('./routes/patients'));
 app.use('/api/patients/:patientId/visits',    requireAuth, require('./routes/visits'));

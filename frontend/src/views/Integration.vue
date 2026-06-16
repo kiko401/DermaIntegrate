@@ -1,15 +1,18 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { apiFetch } from '@/utils/api'
 
 const sources = ref([])
 const loading = ref(false)
+const router = useRouter()
 
 const selectedPatientId = ref(null)
 const clinicalView = ref(null)
 const cvLoading = ref(false)
 const activeTab = ref('overview')
 const keyword = ref('')
+const launchingPacs = ref(null)
 
 const systemColors = {
   HIS: '#10B981',
@@ -57,6 +60,32 @@ async function selectPatient(patientId) {
 }
 
 onMounted(fetchSources)
+
+async function launchFromPacs(pacsRecord) {
+  if (!selectedPatientId.value) return
+  launchingPacs.value = pacsRecord.record_id
+  try {
+    const res = await apiFetch('/api/tasks/from-pacs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pacs_record_id: pacsRecord.record_id,
+        patient_id: selectedPatientId.value,
+      }),
+    })
+    if (res.ok) {
+      const { task_id } = await res.json()
+      router.push(`/tasks/${task_id}`)
+    } else {
+      const err = await res.json().catch(() => ({}))
+      alert('发起分析失败：' + (err.error || res.status))
+    }
+  } catch (e) {
+    alert('发起分析失败：' + e.message)
+  } finally {
+    launchingPacs.value = null
+  }
+}
 
 const totalMatched = computed(() => sources.value.filter(r => r.patient_id).length)
 
@@ -355,6 +384,15 @@ const cvTasks = computed(() => clinicalView.value?.ai_tasks || [])
                       <div class="link-block">
                         <div><span class="item-label">原图地址</span>{{ r.image_url || '-' }}</div>
                         <div><span class="item-label">缩略图地址</span>{{ r.thumbnail_url || '-' }}</div>
+                      </div>
+
+                      <div style="margin-top:10px">
+                        <a-button
+                          size="small"
+                          type="primary"
+                          :loading="launchingPacs === r.record_id"
+                          @click="launchFromPacs(r)"
+                        >发起 AI 分析</a-button>
                       </div>
                     </div>
                   </div>

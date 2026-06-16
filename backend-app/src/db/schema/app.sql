@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS ai_tasks (
   task_id         VARCHAR(64) NOT NULL UNIQUE,
   visit_id        INT,
   patient_id      INT,
+  pacs_record_id  VARCHAR(64) NULL,
   status          VARCHAR(20) DEFAULT 'pending',
   result_snapshot JSON,
   created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

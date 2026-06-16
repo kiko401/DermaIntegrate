@@ -354,16 +354,19 @@ onUnmounted(() => close())
             <div class="card-title"><span class="card-dot"></span>影像分析</div>
             <template v-if="imageEvent">
 
-              <!-- 对比组件：左侧原图占位，右侧热力图/证据图 -->
+              <!-- 对比组件：左侧 PACS 原图（若有关联），右侧热力图/证据图 -->
               <div style="margin-bottom:16px">
                 <ImageCompare
-                  :left-url="null"
+                  :left-url="task.pacs_image_url || null"
                   :right-url="imageEvent.data?.image_url || null"
                   left-label="原图"
                   right-label="AI 证据图"
                 />
-                <div style="font-size:11px;color:#94a3b8;margin-top:6px">
-                  原图未存储（原始上传文件不回传）；右侧为 AI 证据热力图。拖动分割线对比。
+                <div v-if="!task.pacs_image_url" style="font-size:11px;color:#94a3b8;margin-top:6px">
+                  原图未关联 PACS 记录（旧任务或手工上传）；右侧为 AI 证据热力图。
+                </div>
+                <div v-else style="font-size:11px;color:#94a3b8;margin-top:6px">
+                  左侧为 PACS 原图，右侧为 AI 证据热力图。拖动分割线对比。
                 </div>
               </div>
 
