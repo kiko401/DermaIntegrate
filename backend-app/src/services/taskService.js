@@ -43,11 +43,21 @@ async function getSnapshot(taskId) {
 async function listAll() {
   const [rows] = await db.query(
     `SELECT t.id, t.task_id, t.status, t.created_at,
-            v.chief_complaint, v.visit_date,
+            t.pacs_record_id, t.result_snapshot,
+            COALESCE(v.chief_complaint,
+              (SELECT chief_complaint FROM visits
+               WHERE patient_id = t.patient_id
+               ORDER BY visit_date DESC LIMIT 1)
+            ) AS chief_complaint,
+            COALESCE(v.visit_date,
+              (SELECT visit_date FROM visits
+               WHERE patient_id = t.patient_id
+               ORDER BY visit_date DESC LIMIT 1)
+            ) AS visit_date,
             p.name AS patient_name, p.id AS patient_id
      FROM ai_tasks t
      LEFT JOIN visits v ON v.id = t.visit_id
-     LEFT JOIN patients p ON p.id = v.patient_id
+     LEFT JOIN patients p ON p.id = v.patient_id OR p.id = t.patient_id
      ORDER BY t.created_at DESC`
   );
   return rows;

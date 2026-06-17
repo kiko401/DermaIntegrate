@@ -76,7 +76,7 @@
 | `/login` | `LoginView.vue` | ✅ |
 | `/dashboard` | `Dashboard.vue` | ✅ 已接真实数据（患者数 / 任务统计 / 最近动态） |
 | `/patients` | `PatientList.vue` | ✅ 完整（患者卡片 + 就诊工作台 + 发起分析）；支持 `?patient_id=` query 自动展开患者 |
-| `/integration` | `Integration.vue` | ✅ 双栏工作台布局，消费 clinical-view 接口，含患者摘要卡 + HIS/LIS/PACS/AI任务 Tabs；PACS Tab 支持"发起 AI 分析"→ 跳转 TaskDetail |
+| `/integration` | `Integration.vue` | ✅ 双 Tab 运维页；全部按钮已真实交互：「查看映射明细」打开 EMPI 明细 Modal、「查看同步快照」显示三库归一统计、「重新读取数据源」重拉三库数据、「刷新系统状态」重刷 health+empi+stats；FHIR/DICOM/日志导出明确禁用并标注原因 |
 | `/tasks` | `Tasks.vue` | ✅ 真实接口，支持 pending 任务静默轮询刷新 |
 | `/tasks/:taskId` | `TaskDetail.vue` | ✅ 左右布局，支持 live SSE + 历史快照；"重新分析"跳转已修复；左图接入 pacs_image_url（旧任务兼容占位） |
 
@@ -123,19 +123,57 @@
 
 ---
 
-### M2 — Docker Compose + Nginx 完整编排
+### M1.5 — 前端产品结构调整（独立任务）
 
-**为什么：** README section 5 将容器化部署列为正式部署方式，`infra/` 目录已在 README 目录结构中标注，section 5.3 仍有 `<!-- TODO: Application Domain: -->` 占位。
+**为什么：** 产品定位明确为"皮肤病多源数据集成 + AI 辅助诊断平台"，核心用户是医生，核心流程是"查找患者 → 查看整合数据 → 发起 AI 分析 → 查看结果"。原有 Dashboard 作为默认首页、"工作台"命名均偏向后台运营风格，与产品定位不符。
 
 **完成标志：**
-- `docker-compose up` 能完整拉起 frontend + backend-app + MySQL + backend-ai + Nginx
+- 登录后默认进入患者管理页
+- 左侧导航无"工作台"入口
+- 导航命名贴合临床语境
+- Dashboard.vue 保留但不再作为主入口
+
+**进度：**
+- [x] 默认路由 `/` → `/patients`
+- [x] 已登录用户从 `/login` 跳转目标改为 `/patients`
+- [x] 侧边栏移除"工作台"条目，清理 `AppstoreOutlined` import
+- [x] 导航重命名：`数据集成` → `临床视图`，`AI 分析记录` → `AI 诊断记录`
+- [x] AppHeader.vue 同步更新（备用组件）
+- [x] PatientList.vue 重构为完整患者工作台页：4段结构（检索筛选栏/患者表格/患者摘要头/摘要卡片区），借用 Integration.vue 的 PACS/HIS/LIS 展示逻辑，弹窗改为"确认发起"模式
+- [x] PatientList.vue 二次改造为"AI 报告优先"定位：新增区块5（历史AI诊断报告独立区域）、区块6（完整临床视图折叠展开区含5Tab：概览/HIS/LIS/PACS/AI任务）；主按钮改为"查看历史 AI 报告"，"重新生成 AI 分析"降级为次要按钮，"展开完整临床视图"在本页内展开不再跳旧路由
+- [ ] 评估是否将 Dashboard.vue 改造为系统健康状态页（面向管理员，非主流程，延后）
+
+---
+
+### M2 — 应用平台域 Docker Compose + Nginx 编排
+
+**部署边界：** 应用平台域（frontend / backend-app / MySQL）与 AI 推理域（backend-ai）**分机部署**。
+本 M2 只负责应用平台域。backend-ai 视为外部服务，通过 `AI_BASE_URL` 环境变量接入，不纳入本 compose。
+
+**为什么：** README section 5 将容器化部署列为正式部署方式，section 5.3 仍有 `<!-- TODO: Application Domain: -->` 占位。
+
+**完成标志：**
+- `docker-compose -f infra/docker-compose.app.yml up` 能拉起 frontend + backend-app + mysql-app + nginx
 - SSE 在 Nginx 下无超时断连
 - README 5.3 占位符替换为真实命令
 
 **依赖前置：** M1 完成后功能稳定再固化部署配置。
 
+**文件说明：**
+- `infra/docker-compose.app.yml` — 应用平台域正式入口
+- `infra/docker-compose.yml` — AI 推理域编排，协作者维护，本域不修改
+- `infra/nginx.conf` — 应用域反向代理（SSE `proxy_buffering off` / 3600s 超时）
+- `infra/init-app.sql` — 应用域四库初始化
+- `backend-app/Dockerfile` — node:20-alpine
+- `frontend/Dockerfile` — 多阶段构建 + `frontend/nginx-spa.conf`
+
 **进度：**
-- [ ] 编写 `infra/docker-compose.yml`（含 Nginx SSE 配置）
+- [x] 新建 `infra/docker-compose.app.yml`（应用平台域独立编排）
+- [x] `infra/nginx.conf`（反向代理 + SSE 配置）
+- [x] `infra/init-app.sql`（四库初始化）
+- [x] `backend-app/Dockerfile`
+- [x] `frontend/Dockerfile` + `frontend/nginx-spa.conf`
+- [ ] 端到端验证：`docker-compose -f infra/docker-compose.app.yml up` 并测试 SSE
 - [ ] 填写 README section 5.3 应用域部署说明
 
 ---

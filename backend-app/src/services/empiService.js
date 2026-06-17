@@ -204,7 +204,7 @@ async function getClinicalView(patientId) {
               v.visit_date, v.chief_complaint
        FROM ai_tasks t
        LEFT JOIN visits v ON v.id = t.visit_id
-       WHERE v.patient_id = ?
+       WHERE COALESCE(t.patient_id, v.patient_id) = ?
        ORDER BY t.created_at DESC
        LIMIT 10`,
       [patientId]
@@ -222,4 +222,11 @@ async function getClinicalView(patientId) {
   }
 }
 
-module.exports = { matchAndLink, getSourcesByPatientId, listExternalSources, getClinicalView }
+async function getStats() {
+  const [[{ queued }]] = await db.query(
+    "SELECT COUNT(*) AS queued FROM ai_tasks WHERE status IN ('pending', 'processing', 'analyzing')"
+  )
+  return { queued_tasks: Number(queued) }
+}
+
+module.exports = { matchAndLink, getSourcesByPatientId, listExternalSources, getClinicalView, getStats }

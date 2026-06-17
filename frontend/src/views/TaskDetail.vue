@@ -283,7 +283,7 @@ onUnmounted(() => close())
         <span class="header-meta">{{ fmtDateTime(task.created_at) }}</span>
         <span class="header-meta" style="font-family:monospace;font-size:11px">{{ task.task_id }}</span>
         <div class="header-actions">
-          <a-button size="small" @click="router.push(`/patients?patient_id=${task.patient_id}`)">重新分析</a-button>
+          <a-button size="small" @click="router.push(`/integration?patient_id=${task.patient_id}`)">重新分析</a-button>
         </div>
       </div>
 
@@ -514,23 +514,38 @@ onUnmounted(() => close())
             </div>
           </div>
 
-          <!-- 就诊信息 -->
+          <!-- 就诊信息 / PACS 来源 -->
           <div class="card sidebar-card">
-            <div class="card-title"><span class="card-dot"></span>就诊信息</div>
-            <div class="desc-list">
-              <div class="desc-row">
-                <span class="desc-key">就诊日期</span>
-                <span class="desc-val">{{ fmtDate(task.visit_date) }}</span>
+            <template v-if="task.pacs_record_id && !task.visit_id">
+              <div class="card-title"><span class="card-dot"></span>PACS 来源</div>
+              <div class="desc-list">
+                <div class="desc-row">
+                  <span class="desc-key">来源类型</span>
+                  <span class="desc-val">PACS 影像</span>
+                </div>
+                <div class="desc-row">
+                  <span class="desc-key">PACS 记录 ID</span>
+                  <span class="desc-val" style="font-family:monospace;font-size:11px">{{ task.pacs_record_id }}</span>
+                </div>
               </div>
-              <div class="desc-row">
-                <span class="desc-key">主诉</span>
-                <span class="desc-val">{{ task.chief_complaint || '—' }}</span>
+            </template>
+            <template v-else>
+              <div class="card-title"><span class="card-dot"></span>就诊信息</div>
+              <div class="desc-list">
+                <div class="desc-row">
+                  <span class="desc-key">就诊日期</span>
+                  <span class="desc-val">{{ fmtDate(task.visit_date) }}</span>
+                </div>
+                <div class="desc-row">
+                  <span class="desc-key">主诉</span>
+                  <span class="desc-val">{{ task.chief_complaint || '—' }}</span>
+                </div>
+                <div class="desc-row">
+                  <span class="desc-key">Visit ID</span>
+                  <span class="desc-val" style="font-family:monospace;font-size:11px">{{ task.visit_id || '—' }}</span>
+                </div>
               </div>
-              <div class="desc-row">
-                <span class="desc-key">Visit ID</span>
-                <span class="desc-val" style="font-family:monospace;font-size:11px">{{ task.visit_id || '—' }}</span>
-              </div>
-            </div>
+            </template>
           </div>
 
         </div>

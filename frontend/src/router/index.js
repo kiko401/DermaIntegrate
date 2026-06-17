@@ -9,7 +9,7 @@ const router = createRouter({
       component: () => import('../views/LoginView.vue'),
       meta: { requiresAuth: false },
     },
-    { path: '/', redirect: '/dashboard' },
+    { path: '/', redirect: '/patients' },
     {
       path: '/dashboard',
       name: 'dashboard',
@@ -38,13 +38,26 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const loggedIn = !!localStorage.getItem('doctor_info')
   if (to.meta.requiresAuth === false) {
-    if (loggedIn && to.name === 'login') return '/dashboard'
+    if (loggedIn && to.name === 'login') return '/patients'
     return true
   }
   if (!loggedIn) return '/login'
+
+  // cookie 有效性验证（仅首次，后续依赖 apiFetch 401 兜底）
+  if (!router._cookieVerified) {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'include' })
+      if (res.status === 401) {
+        localStorage.removeItem('doctor_info')
+        return '/login'
+      }
+    } catch {}
+    router._cookieVerified = true
+  }
+
   return true
 })
 

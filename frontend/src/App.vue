@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import {
-  AppstoreOutlined,
+  HomeOutlined,
   TeamOutlined,
   ApiOutlined,
   FileSearchOutlined,
@@ -14,7 +14,7 @@ const router = useRouter()
 const isAuthPage = computed(() => route.meta.requiresAuth === false)
 
 const navItems = [
-  { path: '/dashboard', label: '工作台', icon: AppstoreOutlined },
+  { path: '/dashboard', label: '首页', icon: HomeOutlined },
   { path: '/patients', label: '患者管理', icon: TeamOutlined },
   { path: '/integration', label: '数据集成', icon: ApiOutlined },
   { path: '/tasks', label: 'AI 分析记录', icon: FileSearchOutlined },

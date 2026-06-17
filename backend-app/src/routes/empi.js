@@ -43,4 +43,13 @@ router.get('/sources', async (req, res) => {
   }
 })
 
+// GET /api/empi/stats - 轻量统计：当前排队任务数
+router.get('/stats', async (req, res) => {
+  try {
+    res.json(await svc.getStats())
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 module.exports = router

@@ -1,442 +1,442 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { apiFetch } from '@/utils/api'
 
-const sources = ref([])
-const loading = ref(false)
 const router = useRouter()
+const route = useRoute()
 
-const selectedPatientId = ref(null)
-const clinicalView = ref(null)
-const cvLoading = ref(false)
-const activeTab = ref('overview')
-const keyword = ref('')
-const launchingPacs = ref(null)
+const activeTab = ref('config')
+const sources = ref([])
+const aiHealthy = ref(null)
+const hisHealthy = ref(null)
+const aiResponseMs = ref(null)
+const queuedTasks = ref(null)
+const statusLoading = ref(false)
+const lastCheck = ref('')
+const dataLoadedAt = ref('')
 
-const systemColors = {
-  HIS: '#10B981',
-  LIS: '#F59E0B',
-  PACS: '#2563EB',
+function fmtTime(d) {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 async function fetchSources() {
-  loading.value = true
   try {
     const res = await apiFetch('/api/empi/sources')
     if (res.ok) {
       sources.value = await res.json()
-    } else {
-      sources.value = []
+      dataLoadedAt.value = fmtTime(new Date())
     }
-  } catch {
-    sources.value = []
-  } finally {
-    loading.value = false
-  }
+  } catch {}
 }
 
-async function selectPatient(patientId) {
-  if (!patientId) return
-  if (selectedPatientId.value === patientId) return
-
-  selectedPatientId.value = patientId
-  activeTab.value = 'overview'
-  cvLoading.value = true
-  clinicalView.value = null
-
+async function fetchStatus() {
+  statusLoading.value = true
   try {
-    const res = await apiFetch(`/api/patients/${patientId}/clinical-view`)
-    if (res.ok) {
-      clinicalView.value = await res.json()
+    const [aiRes, hisRes, statsRes] = await Promise.allSettled([
+      fetch('/api/health/ai'),
+      fetch('/api/health/his'),
+      apiFetch('/api/empi/stats'),
+    ])
+    if (aiRes.status === 'fulfilled' && aiRes.value.ok) {
+      const h = await aiRes.value.json()
+      aiHealthy.value = h.ok === true
+      aiResponseMs.value = h.response_time_ms ?? null
     } else {
-      clinicalView.value = null
+      aiHealthy.value = false
     }
-  } catch {
-    clinicalView.value = null
-  } finally {
-    cvLoading.value = false
-  }
-}
-
-onMounted(fetchSources)
-
-async function launchFromPacs(pacsRecord) {
-  if (!selectedPatientId.value) return
-  launchingPacs.value = pacsRecord.record_id
-  try {
-    const res = await apiFetch('/api/tasks/from-pacs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        pacs_record_id: pacsRecord.record_id,
-        patient_id: selectedPatientId.value,
-      }),
-    })
-    if (res.ok) {
-      const { task_id } = await res.json()
-      router.push(`/tasks/${task_id}`)
-    } else {
-      const err = await res.json().catch(() => ({}))
-      alert('发起分析失败：' + (err.error || res.status))
+    hisHealthy.value = hisRes.status === 'fulfilled' && hisRes.value.ok
+    if (statsRes.status === 'fulfilled' && statsRes.value.ok) {
+      const s = await statsRes.value.json()
+      queuedTasks.value = s.queued_tasks ?? null
     }
-  } catch (e) {
-    alert('发起分析失败：' + e.message)
   } finally {
-    launchingPacs.value = null
+    statusLoading.value = false
+    lastCheck.value = fmtTime(new Date())
   }
 }
 
 const totalMatched = computed(() => sources.value.filter(r => r.patient_id).length)
-
 const sourceStats = computed(() => ({
   HIS: sources.value.filter(r => r.source_system === 'HIS').length,
   LIS: sources.value.filter(r => r.source_system === 'LIS').length,
   PACS: sources.value.filter(r => r.source_system === 'PACS').length,
 }))
 
-const filteredSources = computed(() => {
-  const q = keyword.value.trim().toLowerCase()
-  if (!q) return sources.value
-
-  return sources.value.filter((r) => {
-    return [
-      r.source_system,
-      r.source_id,
-      r.name,
-      r.internal_name,
-      r.id_card,
-      r.phone,
-    ]
-        .filter(Boolean)
-        .some(v => String(v).toLowerCase().includes(q))
-  })
+const alerts = computed(() => {
+  const a = []
+  if (aiHealthy.value === false) a.push('AI 推理服务不可用，无法发起新分析任务')
+  if (hisHealthy.value === false) a.push('HIS 数据源连接断开，临床视图病历数据可能缺失')
+  return a
 })
 
-const columns = [
-  {title: '来源', dataIndex: 'source_system', key: 'sys', width: 88},
-  {title: '外部 ID', dataIndex: 'source_id', key: 'sid', width: 170},
-  {title: '姓名', dataIndex: 'name', key: 'name', width: 82},
-  {title: '内部患者', key: 'internal', width: 140},
-]
-
-function tagColor(sys) {
-  return sys === 'HIS' ? 'green' : sys === 'LIS' ? 'gold' : 'blue'
+function dotClass(val) {
+  if (val === true) return 'dot green'
+  if (val === false) return 'dot red'
+  return 'dot gray'
 }
 
-function formatDate(value) {
-  if (!value) return '-'
-  if (typeof value === 'string') return value.slice(0, 10)
+function valClass(val) {
+  if (val === true) return 'val green'
+  if (val === false) return 'val red'
+  return 'val gray'
+}
+
+// --- 抽屉/弹窗状态 ---
+const mappingDrawerOpen = ref(false)
+const syncLogDrawerOpen = ref(false)
+const mappingFilter = ref('ALL')
+const syncLoading = ref(false)
+
+const filteredSources = computed(() => {
+  if (mappingFilter.value === 'ALL') return sources.value
+  return sources.value.filter(r => r.source_system === mappingFilter.value)
+})
+
+const syncStats = computed(() => ['HIS', 'LIS', 'PACS'].map(sys => {
+  const rows = sources.value.filter(r => r.source_system === sys)
+  return {
+    system: sys,
+    total: rows.length,
+    matched: rows.filter(r => r.patient_id).length,
+    unmatched: rows.filter(r => !r.patient_id).length,
+  }
+}))
+
+const unmatchedSources = computed(() => sources.value.filter(r => !r.patient_id))
+
+async function handleRefresh() {
+  await Promise.all([fetchSources(), fetchStatus()])
+}
+
+async function handleManualSync() {
+  syncLoading.value = true
   try {
-    return new Date(value).toISOString().slice(0, 10)
-  } catch {
-    return '-'
+    await fetchSources()
+  } finally {
+    syncLoading.value = false
   }
 }
 
-function formatGender(value) {
-  if (value === 1 || value === '1') return '男'
-  if (value === 2 || value === '2') return '女'
-  return '-'
-}
-
-function yesNoFlag(value) {
-  if (value === 1 || value === '1' || value === true) return '异常'
-  if (value === 0 || value === '0' || value === false) return '正常'
-  return '-'
-}
-
-const cvPatient = computed(() => clinicalView.value?.patient || {})
-const cvSources = computed(() => clinicalView.value?.empi_sources || [])
-const cvHis = computed(() => clinicalView.value?.his || [])
-const cvLis = computed(() => clinicalView.value?.lis || [])
-const cvPacs = computed(() => clinicalView.value?.pacs || [])
-const cvTasks = computed(() => clinicalView.value?.ai_tasks || [])
+onMounted(async () => {
+  if (route.query.tab === 'status') activeTab.value = 'status'
+  await Promise.all([fetchSources(), fetchStatus()])
+})
 </script>
 
 <template>
-  <div class="integration-page">
-    <!-- 顶部标题 -->
+  <div class="page">
     <div class="page-header">
-      <div class="page-title-wrap">
-        <div class="page-title">数据集成</div>
-        <div class="page-subtitle">EMPI 主索引映射 · 多源患者身份归一</div>
-      </div>
+      <div class="page-title">数据集成</div>
+      <div class="page-sub">数据接入配置 · 系统状态监控</div>
     </div>
 
-    <!-- 顶部汇总 -->
-    <div class="top-summary-card">
-      <div class="summary-left">
-        <div class="summary-item">
-          <span class="summary-dot" :style="{ background: systemColors.HIS }"></span>
-          <a-tag :color="tagColor('HIS')" class="summary-tag">HIS</a-tag>
-          <span class="summary-count">{{ sourceStats.HIS }} 条</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-dot" :style="{ background: systemColors.LIS }"></span>
-          <a-tag :color="tagColor('LIS')" class="summary-tag">LIS</a-tag>
-          <span class="summary-count">{{ sourceStats.LIS }} 条</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-dot" :style="{ background: systemColors.PACS }"></span>
-          <a-tag :color="tagColor('PACS')" class="summary-tag">PACS</a-tag>
-          <span class="summary-count">{{ sourceStats.PACS }} 条</span>
-        </div>
-      </div>
-      <div class="summary-right">已归一 {{ totalMatched }} / {{ sources.length }} 条</div>
-    </div>
+    <a-tabs v-model:activeKey="activeTab" class="main-tabs">
 
-    <!-- 下方工作台 -->
-    <div class="workspace">
-      <!-- 左栏 -->
-      <div class="left-panel">
-        <div class="panel-card panel-fill">
-          <div class="panel-header">
-            <div class="panel-title">外部数据源明细</div>
-            <a-button size="small" :loading="loading" @click="fetchSources">刷新</a-button>
-          </div>
+      <!-- Tab 1: 数据接入配置 -->
+      <a-tab-pane key="config" tab="数据接入配置">
+        <div class="config-grid">
 
-          <div class="search-wrap">
-            <a-input
-                v-model:value="keyword"
-                allow-clear
-                placeholder="搜索来源 / 外部ID / 姓名 / 内部患者"
-            />
-          </div>
-
-          <div class="table-wrap">
-            <a-table
-                :columns="columns"
-                :data-source="filteredSources"
-                :loading="loading"
-                row-key="id"
-                :pagination="false"
-                size="small"
-                :scroll="{ y: 500 }"
-                :row-class-name="record => record.patient_id && record.patient_id === selectedPatientId ? 'selected-row' : ''"
-            >
-              <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'sys'">
-                  <a-tag :color="tagColor(record.source_system)" style="margin: 0; font-size: 11px">
-                    {{ record.source_system }}
-                  </a-tag>
-                </template>
-
-                <template v-else-if="column.key === 'sid'">
-                  <span class="source-id-cell">{{ record.source_id }}</span>
-                </template>
-
-                <template v-else-if="column.key === 'internal'">
-                  <div v-if="record.patient_id" class="internal-cell">
-                    <span class="internal-name">{{ record.internal_name }}</span>
-                    <a-button
-                        size="small"
-                        :type="selectedPatientId === record.patient_id ? 'primary' : 'default'"
-                        class="view-btn"
-                        @click="selectPatient(record.patient_id)"
-                    >
-                      {{ selectedPatientId === record.patient_id ? '当前' : '查看' }}
-                    </a-button>
-                  </div>
-                  <span v-else class="unmatched-text">未归一</span>
-                </template>
-              </template>
-            </a-table>
-          </div>
-        </div>
-      </div>
-
-      <!-- 右栏 -->
-      <div class="right-panel">
-        <div v-if="!selectedPatientId" class="panel-card panel-fill empty-state">
-          <div class="empty-icon">🩺</div>
-          <div class="empty-title">请选择左侧一条已归一患者记录</div>
-          <div class="empty-desc">右侧将展示该患者的统一临床视图，包括 HIS / LIS / PACS / AI 任务</div>
-        </div>
-
-        <div v-else-if="cvLoading" class="panel-card panel-fill loading-state">
-          <a-spin size="large"/>
-        </div>
-
-        <div v-else-if="selectedPatientId && !clinicalView" class="panel-card panel-fill error-state">
-          加载失败，请重试
-        </div>
-
-        <div v-else class="right-content">
-          <!-- 患者摘要 -->
-          <div class="panel-card patient-summary-card">
-            <div class="summary-top">
-              <div class="summary-main">
-                <div class="patient-name-line">
-                  <span class="patient-name">{{ cvPatient.name || '-' }}</span>
-                  <span class="patient-id">ID: {{ cvPatient.id || '-' }}</span>
-                </div>
-                <div class="patient-meta">
-                  <span><span class="meta-label">性别</span>{{ formatGender(cvPatient.gender) }}</span>
-                  <span><span class="meta-label">出生日期</span>{{ formatDate(cvPatient.birth_date) }}</span>
-                  <span><span class="meta-label">EMPI 来源</span>{{ cvSources.length }} 条</span>
-                </div>
+          <!-- EMPI 患者主索引配置 -->
+          <div class="card">
+            <div class="card-title">EMPI 患者主索引配置</div>
+            <div class="card-sub">跨系统患者身份归一映射</div>
+            <div class="stat-row">
+              <div class="stat-item">
+                <span class="stat-n">{{ sourceStats.HIS }}</span>
+                <span class="stat-l">HIS</span>
               </div>
-
+              <div class="stat-item">
+                <span class="stat-n lis">{{ sourceStats.LIS }}</span>
+                <span class="stat-l">LIS</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-n pacs">{{ sourceStats.PACS }}</span>
+                <span class="stat-l">PACS</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-n matched">{{ totalMatched }}/{{ sources.length }}</span>
+                <span class="stat-l">已归一</span>
+              </div>
+            </div>
+            <div class="info-rows">
+              <div class="info-row"><span class="lbl">归一字段</span><span>HIS病历号、身份证、PACS影像ID、LIS流水号</span></div>
+              <div class="info-row"><span class="lbl">同步方式</span><span>平台启动时自动同步</span></div>
+              <div class="info-row"><span class="lbl">数据拉取</span><span class="gray">{{ dataLoadedAt || '—' }}（本次会话）</span></div>
+            </div>
+            <div class="card-actions">
+              <a-button size="small" @click="syncLogDrawerOpen = true">查看同步快照</a-button>
             </div>
           </div>
 
-          <!-- 详情 -->
-          <div class="panel-card detail-card">
-            <a-tabs v-model:activeKey="activeTab" class="detail-tabs">
-              <a-tab-pane key="overview" tab="概览">
-                <div class="tab-body">
-                  <div class="overview-grid">
-                    <div class="overview-stat stat-his">
-                      <div class="stat-number">{{ cvHis.length }}</div>
-                      <div class="stat-label">HIS 就诊</div>
-                    </div>
-                    <div class="overview-stat stat-lis">
-                      <div class="stat-number">{{ cvLis.length }}</div>
-                      <div class="stat-label">LIS 检验</div>
-                    </div>
-                    <div class="overview-stat stat-pacs">
-                      <div class="stat-number">{{ cvPacs.length }}</div>
-                      <div class="stat-label">PACS 影像</div>
-                    </div>
-                    <div class="overview-stat stat-ai">
-                      <div class="stat-number">{{ cvTasks.length }}</div>
-                      <div class="stat-label">AI 任务</div>
-                    </div>
-                  </div>
+          <!-- FHIR 归一化接口配置 -->
+          <div class="card">
+            <div class="card-title">FHIR 归一化接口配置</div>
+            <div class="card-sub">多源接入与字段映射说明</div>
+            <div class="info-rows">
+              <div class="info-row">
+                <span class="lbl">HIS 接入</span>
+                <span class="dot green" style="margin-right:4px"></span>
+                <span>内部 MySQL · 已接入</span>
+              </div>
+              <div class="info-row">
+                <span class="lbl">LIS 接入</span>
+                <span class="dot green" style="margin-right:4px"></span>
+                <span>内部 MySQL · 已接入</span>
+              </div>
+              <div class="info-row">
+                <span class="lbl">PACS 接入</span>
+                <span class="dot green" style="margin-right:4px"></span>
+                <span>本地文件系统 · 已接入</span>
+              </div>
+              <div class="info-row">
+                <span class="lbl">FHIR 服务</span>
+                <span class="dot gray" style="margin-right:4px"></span>
+                <span class="gray">未启用（待 M4）</span>
+              </div>
+              <div class="info-row"><span class="lbl">归一策略</span><span>内置匹配（身份证 / 手机 / 姓名）</span></div>
+              <div class="info-row"><span class="lbl">术语词表</span><span class="gray">ICD-10 / SNOMED（待扩展）</span></div>
+            </div>
+            <div class="card-actions">
+              <a-button size="small" @click="mappingDrawerOpen = true">查看映射明细</a-button>
+            </div>
+          </div>
 
-                  <div class="section-title">EMPI 来源映射</div>
-                  <div
-                      v-for="src in cvSources"
-                      :key="src.id"
-                      class="mapping-row"
-                  >
-                    <div class="mapping-left">
-                      <a-tag :color="tagColor(src.source_system)" style="margin: 0">{{ src.source_system }}</a-tag>
-                      <span class="mapping-id">{{ src.source_id }}</span>
-                      <span class="mapping-sep">·</span>
-                      <span class="mapping-name">{{ src.ext_name || '-' }}</span>
-                    </div>
-                    <span class="mapping-time">映射于 {{ formatDate(src.linked_at) }}</span>
-                  </div>
+          <!-- DICOM 转码配置 -->
+          <div class="card">
+            <div class="card-title">DICOM 转码配置</div>
+            <div class="card-sub">影像入库与格式转换策略（AI 推理域负责）</div>
+            <div class="info-rows">
+              <div class="info-row"><span class="lbl">转码策略</span><span>入库时自动转码</span></div>
+              <div class="info-row"><span class="lbl">输出格式</span><span>JPEG + PNG（含缩略图）</span></div>
+              <div class="info-row"><span class="lbl">色彩处理</span><span>防御性 YBR→RGB 还原；单通道按标签处理</span></div>
+              <div class="info-row"><span class="lbl">容错规则</span><span>转码失败保留原文件，不中断流程</span></div>
+              <div class="info-row"><span class="lbl">参数编辑</span><span class="gray">仅 AI 推理域可配置，本域无接口</span></div>
+            </div>
+            <div class="card-actions">
+              <a-button size="small" disabled title="转码参数由 AI 推理域管理，应用域无配置接口">影像校验入口（无接口）</a-button>
+            </div>
+          </div>
+
+          <!-- 数据同步任务管理 -->
+          <div class="card">
+            <div class="card-title">数据同步任务管理</div>
+            <div class="card-sub">三库数据读取 · 手动重新拉取</div>
+            <div class="info-rows">
+              <div class="info-row"><span class="lbl">数据来源</span><span>HIS / LIS / PACS（三库）</span></div>
+              <div class="info-row"><span class="lbl">同步模式</span><span class="gray">按需读取（无定时任务）</span></div>
+              <div class="info-row"><span class="lbl">外部记录总数</span><span>{{ sources.length }} 条</span></div>
+              <div class="info-row"><span class="lbl">未归一条数</span><span>{{ sources.length - totalMatched }} 条</span></div>
+              <div class="info-row"><span class="lbl">数据拉取时间</span><span class="gray">{{ dataLoadedAt || '—' }}（本次会话）</span></div>
+            </div>
+            <div class="card-actions">
+              <a-button size="small" :loading="syncLoading" @click="handleManualSync">重新读取数据源</a-button>
+              <a-button size="small" style="margin-left:8px" @click="syncLogDrawerOpen = true">查看同步快照</a-button>
+            </div>
+          </div>
+
+        </div>
+      </a-tab-pane>
+
+      <!-- Tab 2: 系统状态监控 -->
+      <a-tab-pane key="status" tab="系统状态监控">
+        <div v-if="statusLoading" class="loading-wrap">
+          <a-spin />
+        </div>
+        <div v-else>
+          <div class="status-grid">
+
+            <!-- 数据接入服务状态 -->
+            <div class="card status-card">
+              <div class="card-title">数据接入服务</div>
+              <div class="status-rows">
+                <div class="status-row">
+                  <span :class="dotClass(hisHealthy)"></span>
+                  <span class="svc-label">HIS 内部数据库</span>
+                  <span :class="valClass(hisHealthy)">
+                    {{ hisHealthy === null ? '检测中' : hisHealthy ? '连通' : '断开' }}
+                  </span>
                 </div>
-              </a-tab-pane>
-
-              <a-tab-pane key="his" :tab="`HIS (${cvHis.length})`">
-                <div class="tab-body">
-                  <div v-if="!cvHis.length" class="empty-inline">暂无 HIS 就诊记录</div>
-                  <div v-for="r in cvHis" :key="r.id" class="detail-item-card">
-                    <div class="item-head">
-                      <span class="item-title">{{ formatDate(r.visit_date) }}</span>
-                      <a-tag color="green" style="margin: 0">{{ r.department || '未知科室' }}</a-tag>
-                    </div>
-                    <div class="item-grid">
-                      <div><span class="item-label">就诊类型</span>{{ r.visit_type || '-' }}</div>
-                      <div><span class="item-label">诊断编码</span>{{ r.diagnosis_code || '-' }}</div>
-                      <div><span class="item-label">诊断名称</span>{{ r.diagnosis_name || '-' }}</div>
-                      <div><span class="item-label">主诉</span>{{ r.chief_complaint || '-' }}</div>
-                    </div>
-                  </div>
+                <div class="status-row">
+                  <span class="dot gray"></span>
+                  <span class="svc-label">FHIR Mock Server</span>
+                  <span class="val gray">未启用</span>
                 </div>
-              </a-tab-pane>
-
-              <a-tab-pane key="lis" :tab="`LIS (${cvLis.length})`">
-                <div class="tab-body">
-                  <div v-if="!cvLis.length" class="empty-inline">暂无 LIS 检验结果</div>
-                  <div v-for="r in cvLis" :key="r.id" class="detail-item-card">
-                    <div class="item-head">
-                      <span class="item-title">{{ r.test_name || '-' }}</span>
-                      <span class="item-time">{{ formatDate(r.reported_at) }}</span>
-                    </div>
-                    <div class="item-grid">
-                      <div><span class="item-label">结果</span>{{ r.value ?? '-' }}</div>
-                      <div><span class="item-label">单位</span>{{ r.unit || '-' }}</div>
-                      <div><span class="item-label">参考范围</span>{{ r.ref_range || '-' }}</div>
-                      <div><span class="item-label">异常标记</span>{{ yesNoFlag(r.abnormal_flag) }}</div>
-                    </div>
-                  </div>
+                <div class="status-row">
+                  <span class="dot green"></span>
+                  <span class="svc-label">PACS 文件系统</span>
+                  <span class="val green">可访问</span>
                 </div>
-              </a-tab-pane>
-
-              <a-tab-pane key="pacs" :tab="`PACS (${cvPacs.length})`">
-                <div class="tab-body">
-                  <div v-if="!cvPacs.length" class="empty-inline">暂无 PACS 影像记录</div>
-                  <div v-for="r in cvPacs" :key="r.id" class="pacs-card">
-                    <div class="pacs-thumb-wrap">
-                      <img
-                          v-if="r.thumbnail_url || r.image_url"
-                          :src="r.thumbnail_url || r.image_url"
-                          :alt="r.description || 'thumbnail'"
-                          class="pacs-thumb"
-                      />
-                      <div v-else class="pacs-thumb-empty">无缩略图</div>
-                    </div>
-
-                    <div class="pacs-main">
-                      <div class="item-head">
-                        <span class="item-title">{{ r.modality || '-' }}</span>
-                        <a-tag color="blue" style="margin: 0">{{ r.body_part || '-' }}</a-tag>
-                        <span class="item-time">{{ formatDate(r.recorded_at) }}</span>
-                      </div>
-
-                      <div class="pacs-desc">{{ r.description || '-' }}</div>
-
-                      <div class="link-block">
-                        <div><span class="item-label">原图地址</span>{{ r.image_url || '-' }}</div>
-                        <div><span class="item-label">缩略图地址</span>{{ r.thumbnail_url || '-' }}</div>
-                      </div>
-
-                      <div style="margin-top:10px">
-                        <a-button
-                          size="small"
-                          type="primary"
-                          :loading="launchingPacs === r.record_id"
-                          @click="launchFromPacs(r)"
-                        >发起 AI 分析</a-button>
-                      </div>
-                    </div>
-                  </div>
+                <div class="status-row">
+                  <span class="dot green"></span>
+                  <span class="svc-label">EMPI 主索引</span>
+                  <span class="val green">{{ totalMatched }} / {{ sources.length }} 已归一</span>
                 </div>
-              </a-tab-pane>
+              </div>
+              <div class="last-check">最近检测：{{ lastCheck || '—' }}</div>
+            </div>
 
-              <a-tab-pane key="ai" :tab="`AI任务 (${cvTasks.length})`">
-                <div class="tab-body">
-                  <div v-if="!cvTasks.length" class="empty-inline">暂无 AI 分析任务</div>
-                  <div v-for="r in cvTasks" :key="r.id" class="detail-item-card">
-                    <div class="item-head">
-                      <span class="item-title">任务 #{{ r.id }}</span>
-                      <a-tag
-                          :color="r.status === 'done' ? 'green' : r.status === 'failed' ? 'red' : 'orange'"
-                          style="margin: 0"
-                      >
-                        {{ r.status || '-' }}
-                      </a-tag>
-                    </div>
-                    <div class="item-grid single-col">
-                      <div><span class="item-label">创建时间</span>{{ formatDate(r.created_at) }}</div>
-                    </div>
-                  </div>
+            <!-- AI 推理域服务状态 -->
+            <div class="card status-card">
+              <div class="card-title">AI 推理域服务</div>
+              <div class="status-rows">
+                <div class="status-row">
+                  <span :class="dotClass(aiHealthy)"></span>
+                  <span class="svc-label">FastAPI 推理后端</span>
+                  <span :class="valClass(aiHealthy)">
+                    {{ aiHealthy === null ? '检测中' : aiHealthy ? '在线' : '离线' }}
+                  </span>
                 </div>
-              </a-tab-pane>
-            </a-tabs>
+                <div class="status-row">
+                  <span :class="dotClass(aiHealthy)"></span>
+                  <span class="svc-label">SSE 流式推送</span>
+                  <span :class="valClass(aiHealthy)">
+                    {{ aiHealthy === null ? '检测中' : aiHealthy ? '正常' : '异常' }}
+                  </span>
+                </div>
+                <div class="status-row">
+                  <span class="dot gray"></span>
+                  <span class="svc-label">推理响应耗时</span>
+                  <span class="val gray">{{ aiResponseMs !== null ? aiResponseMs + ' ms' : '—' }}</span>
+                </div>
+                <div class="status-row">
+                  <span class="dot gray"></span>
+                  <span class="svc-label">当前排队任务</span>
+                  <span class="val gray">{{ queuedTasks !== null ? queuedTasks + ' 条' : '—' }}</span>
+                </div>
+              </div>
+              <div class="last-check">断连自动回收：SSE 客户端关闭时释放</div>
+            </div>
+
+            <!-- 全局系统信息 -->
+            <div class="card status-card">
+              <div class="card-title">全局系统信息</div>
+              <div class="status-rows">
+                <div class="status-row">
+                  <span class="svc-label">平台告警</span>
+                  <span :class="['val', alerts.length ? 'red' : 'green']">
+                    {{ alerts.length ? alerts.length + ' 条活跃告警' : '无告警' }}
+                  </span>
+                </div>
+                <div class="status-row">
+                  <span class="svc-label">数据拉取时间</span>
+                  <span class="val gray">{{ dataLoadedAt || '—' }}</span>
+                </div>
+                <div class="status-row">
+                  <span class="svc-label">今日活跃用户</span>
+                  <span class="val gray no-iface">无接口支持</span>
+                </div>
+                <div class="status-row">
+                  <span class="svc-label">系统日志导出</span>
+                  <span class="val gray no-iface">无接口支持</span>
+                </div>
+              </div>
+              <div v-if="alerts.length" class="alert-block">
+                <div v-for="a in alerts" :key="a" class="alert-row">{{ a }}</div>
+              </div>
+              <div class="card-actions">
+                <a-button size="small" disabled title="当前版本无日志导出接口">导出系统日志（无接口）</a-button>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="status-footer">
+            <a-button size="small" @click="router.push('/dashboard')">返回首页</a-button>
+            <a-button size="small" :loading="statusLoading" @click="handleRefresh" style="margin-left:8px">刷新系统状态</a-button>
+            <span class="footer-note">最近检测：{{ lastCheck || '—' }}</span>
           </div>
         </div>
+      </a-tab-pane>
+
+    </a-tabs>
+
+    <!-- Modal：EMPI 归一映射明细 -->
+    <a-modal v-model:open="mappingDrawerOpen" title="EMPI 归一映射明细" width="800" :footer="null">
+      <div class="modal-filter">
+        <a-radio-group v-model:value="mappingFilter" size="small" button-style="solid">
+          <a-radio-button value="ALL">全部（{{ sources.length }}）</a-radio-button>
+          <a-radio-button value="HIS">HIS（{{ sourceStats.HIS }}）</a-radio-button>
+          <a-radio-button value="LIS">LIS（{{ sourceStats.LIS }}）</a-radio-button>
+          <a-radio-button value="PACS">PACS（{{ sourceStats.PACS }}）</a-radio-button>
+        </a-radio-group>
       </div>
-    </div>
+      <div class="modal-table-wrap">
+        <table class="map-table">
+          <thead>
+            <tr>
+              <th>来源</th>
+              <th>外部 ID</th>
+              <th>姓名</th>
+              <th>身份证</th>
+              <th>手机</th>
+              <th>内部患者 ID</th>
+              <th>内部姓名</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in filteredSources" :key="r.source_system + r.source_id">
+              <td><span class="sys-badge" :class="r.source_system.toLowerCase()">{{ r.source_system }}</span></td>
+              <td class="mono">{{ r.source_id }}</td>
+              <td>{{ r.name }}</td>
+              <td class="mono text-dim">{{ r.id_card ? r.id_card.slice(0, 6) + '****' + r.id_card.slice(-4) : '—' }}</td>
+              <td class="text-dim">{{ r.phone || '—' }}</td>
+              <td class="mono">{{ r.patient_id || '—' }}</td>
+              <td>{{ r.internal_name || '—' }}</td>
+              <td>
+                <span v-if="r.patient_id" class="match-ok">已归一</span>
+                <span v-else class="match-no">未归一</span>
+              </td>
+            </tr>
+            <tr v-if="filteredSources.length === 0">
+              <td colspan="8" class="empty-cell">暂无数据</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </a-modal>
+
+    <!-- Modal：同步快照 -->
+    <a-modal v-model:open="syncLogDrawerOpen" title="数据同步快照" width="560" :footer="null">
+      <p class="modal-note">当前系统为按需读取模式，无定时同步任务。以下为本次会话的数据快照（{{ dataLoadedAt || '—' }}）。</p>
+      <div class="sync-summary">
+        <div v-for="s in syncStats" :key="s.system" class="sync-stat-row">
+          <span class="sys-badge" :class="s.system.toLowerCase()">{{ s.system }}</span>
+          <span class="sync-col">{{ s.total }} 条记录</span>
+          <span class="sync-col matched">{{ s.matched }} 已归一</span>
+          <span v-if="s.unmatched > 0" class="sync-col unmatched">{{ s.unmatched }} 未归一</span>
+          <span v-else class="sync-col all-ok">全部归一</span>
+        </div>
+      </div>
+      <div v-if="unmatchedSources.length" class="unmatched-section">
+        <div class="unmatched-title">未归一记录（{{ unmatchedSources.length }} 条）</div>
+        <table class="map-table">
+          <thead>
+            <tr><th>来源</th><th>外部 ID</th><th>姓名</th><th>身份证</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in unmatchedSources" :key="r.source_system + r.source_id">
+              <td><span class="sys-badge" :class="r.source_system.toLowerCase()">{{ r.source_system }}</span></td>
+              <td class="mono">{{ r.source_id }}</td>
+              <td>{{ r.name }}</td>
+              <td class="mono text-dim">{{ r.id_card ? r.id_card.slice(0, 6) + '****' + r.id_card.slice(-4) : '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else class="all-matched-tip">全部外部记录已归一，无待处理项。</div>
+    </a-modal>
+
   </div>
 </template>
 
 <style scoped>
-.integration-page {
-  height: calc(100vh - 64px);
-  padding: 20px 20px 16px;
+.page {
+  padding: 20px 24px;
   background: #f5f7fb;
-  overflow: hidden;
+  min-height: 100%;
   box-sizing: border-box;
-}
-
-.page-header {
-  margin-bottom: 16px;
 }
 
 .page-title {
@@ -448,517 +448,271 @@ const cvTasks = computed(() => clinicalView.value?.ai_tasks || [])
   line-height: 1.3;
 }
 
-.page-subtitle {
+.page-sub {
   font-size: 12px;
   color: #94a3b8;
   margin-top: 4px;
   padding-left: 13px;
 }
 
-.top-summary-card {
-  background: #fff;
-  border-radius: 14px;
-  padding: 14px 18px;
-  margin-bottom: 18px;
-  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.page-header { margin-bottom: 16px; }
+
+.main-tabs :deep(.ant-tabs-nav) { margin-bottom: 16px; }
+
+/* Config grid: 2x2 */
+.config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 16px;
 }
 
-.summary-left {
+/* Status grid: 3 columns */
+.status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+  padding: 18px 20px;
+}
+
+.status-card { display: flex; flex-direction: column; }
+
+.card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 4px;
+}
+
+.card-sub {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 14px;
+}
+
+/* EMPI stat row */
+.stat-row {
   display: flex;
-  align-items: center;
-  gap: 20px;
+  gap: 16px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
 }
 
-.summary-item {
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 48px;
+}
+
+.stat-n {
+  font-size: 22px;
+  font-weight: 700;
+  color: #10b981;
+  line-height: 1;
+}
+
+.stat-n.lis   { color: #f59e0b; }
+.stat-n.pacs  { color: #2563eb; }
+.stat-n.matched { color: #059669; }
+
+.stat-l {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+/* Info rows */
+.info-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+
+.info-row {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-size: 13px;
+  color: #475569;
 }
 
-.summary-dot {
+.lbl {
+  color: #94a3b8;
+  min-width: 80px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.gray { color: #94a3b8; }
+
+.card-actions { margin-top: auto; padding-top: 4px; }
+
+/* Status section rows */
+.status-rows { display: flex; flex-direction: column; gap: 10px; flex: 1; margin-bottom: 12px; }
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.svc-label { flex: 1; color: #475569; }
+
+.val { font-size: 12px; font-weight: 500; }
+.val.green { color: #10b981; }
+.val.red   { color: #ef4444; }
+.val.gray  { color: #94a3b8; }
+
+/* Dots */
+.dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   display: inline-block;
-}
-
-.summary-tag {
-  margin: 0;
-  font-size: 11px;
-}
-
-.summary-count {
-  font-size: 13px;
-  color: #475569;
-}
-
-.summary-right {
-  font-size: 14px;
-  font-weight: 600;
-  color: #059669;
-  white-space: nowrap;
-}
-
-.workspace {
-  height: calc(100% - 94px);
-  display: flex;
-  gap: 18px;
-  min-height: 0;
-}
-
-.left-panel {
-  width: 58%;
-  min-width: 560px;
-  display: flex;
-  min-height: 0;
-}
-
-.right-panel {
-  width: 42%;
-  min-width: 420px;
-  display: flex;
-  min-height: 0;
-}
-
-.panel-card {
-  background: #fff;
-  border-radius: 14px;
-  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
-}
-
-.panel-fill {
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-}
-
-.panel-header {
-  padding: 16px 18px 10px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.panel-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: #1e293b;
-}
-
-.search-wrap {
-  padding: 0 18px 12px;
-}
-
-.table-wrap {
-  padding: 0 14px 14px;
-}
-
-.source-id-cell {
-  display: inline-block;
-  max-width: 160px;
-  word-break: break-word;
-  line-height: 1.4;
-}
-
-.internal-cell {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.internal-name {
-  color: #059669;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.view-btn {
-  font-size: 11px;
-  height: 24px;
-  padding: 0 8px;
-  line-height: 24px;
-}
-
-.unmatched-text {
-  color: #94a3b8;
-  font-size: 11px;
-}
-
-.right-content {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-height: 0;
-}
-
-.patient-summary-card {
-  padding: 16px 18px 12px;
-}
-
-.summary-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 14px;
-}
-
-.summary-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.patient-name-line {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
-}
-
-.patient-name {
-  font-size: 22px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.patient-id {
-  font-size: 13px;
-  color: #64748b;
-}
-
-.patient-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  font-size: 13px;
-  color: #475569;
-}
-
-.meta-label {
-  color: #94a3b8;
-  margin-right: 6px;
-}
-
-.source-tags {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  max-width: 280px;
-}
-
-.source-map-tag {
-  margin: 0;
-}
-
-.detail-card {
-  flex: 1;
-  min-height: 0;
-  padding: 0 16px 14px;
-  overflow: hidden;
-}
-
-.detail-tabs {
-  height: 100%;
-}
-
-.detail-tabs :deep(.ant-tabs-content-holder) {
-  height: calc(100% - 48px);
-  overflow: hidden;
-}
-
-.detail-tabs :deep(.ant-tabs-content) {
-  height: 100%;
-}
-
-.detail-tabs :deep(.ant-tabs-tabpane) {
-  height: 100%;
-}
-
-.tab-body {
-  height: 100%;
-  overflow-y: auto;
-  padding-top: 8px;
-  padding-right: 4px;
-}
-
-.overview-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 18px;
-}
-
-.overview-stat {
-  border-radius: 12px;
-  padding: 14px 12px;
-  text-align: center;
-}
-
-.stat-his {
-  background: #f0fdf4;
-}
-
-.stat-lis {
-  background: #fffbeb;
-}
-
-.stat-pacs {
-  background: #eff6ff;
-}
-
-.stat-ai {
-  background: #faf5ff;
-}
-
-.stat-number {
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1;
-  margin-bottom: 6px;
-}
-
-.stat-his .stat-number {
-  color: #10b981;
-}
-
-.stat-lis .stat-number {
-  color: #f59e0b;
-}
-
-.stat-pacs .stat-number {
-  color: #2563eb;
-}
-
-.stat-ai .stat-number {
-  color: #7c3aed;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: #64748b;
-}
-
-.section-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: #334155;
-  margin: 16px 0 10px;
-}
-
-.mapping-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  background: #f8fafc;
-  border-radius: 10px;
-  margin-bottom: 8px;
-  font-size: 13px;
-  color: #475569;
-}
-
-.mapping-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.mapping-id {
-  font-weight: 500;
-}
-
-.mapping-sep {
-  color: #94a3b8;
-}
-
-.mapping-name {
-  color: #64748b;
-}
-
-.mapping-time {
-  font-size: 11px;
-  color: #94a3b8;
-  white-space: nowrap;
-}
-
-.detail-item-card {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 14px 16px;
-  margin-bottom: 12px;
-}
-
-.item-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-
-.item-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.item-time {
-  font-size: 12px;
-  color: #94a3b8;
-}
-
-.item-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 16px;
-  font-size: 13px;
-  color: #475569;
-}
-
-.item-grid.single-col {
-  grid-template-columns: 1fr;
-}
-
-.item-label {
-  color: #94a3b8;
-  margin-right: 6px;
-}
-
-.pacs-card {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 14px 16px;
-  margin-bottom: 12px;
-  display: flex;
-  gap: 14px;
-  align-items: flex-start;
-}
-
-.pacs-thumb-wrap {
   flex-shrink: 0;
 }
+.dot.green { background: #10b981; }
+.dot.red   { background: #ef4444; }
+.dot.gray  { background: #cbd5e1; }
 
-.pacs-thumb {
-  width: 80px;
-  height: 80px;
-  object-fit: cover;
-  border-radius: 10px;
-  border: 1px solid #e2e8f0;
+.last-check { font-size: 11px; color: #94a3b8; margin-top: auto; }
+
+/* Alert block */
+.alert-block {
+  background: #fef2f2;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
 }
 
-.pacs-thumb-empty {
-  width: 80px;
-  height: 80px;
-  border-radius: 10px;
-  border: 1px dashed #dbe2ea;
-  background: #f8fafc;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #94a3b8;
-  font-size: 11px;
-}
-
-.pacs-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.pacs-desc {
-  font-size: 13px;
-  color: #475569;
-  margin-bottom: 10px;
-  line-height: 1.5;
-}
-
-.link-block {
+.alert-row {
   font-size: 12px;
-  color: #64748b;
-  word-break: break-all;
-  display: grid;
-  gap: 6px;
+  color: #dc2626;
+  line-height: 1.7;
 }
 
-.empty-state,
-.loading-state,
-.error-state {
+/* Footer */
+.status-footer {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 0;
+  padding: 12px 0 4px;
 }
 
-.empty-state {
-  flex-direction: column;
-  text-align: center;
+.footer-note {
+  font-size: 12px;
   color: #94a3b8;
-  padding: 24px;
+  margin-left: 16px;
 }
 
-.empty-icon {
-  font-size: 34px;
-  margin-bottom: 10px;
+.loading-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 60px 0;
 }
 
-.empty-title {
-  font-size: 15px;
+/* Modal: filter bar */
+.modal-filter { margin-bottom: 14px; }
+
+/* Modal: table wrapper */
+.modal-table-wrap {
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid #e8ecf2;
+  border-radius: 8px;
+}
+
+/* Shared mapping table */
+.map-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.map-table th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
   color: #64748b;
   font-weight: 600;
-  margin-bottom: 6px;
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid #e8ecf2;
+  white-space: nowrap;
 }
-
-.empty-desc {
-  font-size: 13px;
-  color: #94a3b8;
-  max-width: 320px;
-  line-height: 1.6;
-}
-
-.error-state {
-  color: #ef4444;
-  font-size: 13px;
-}
-
-.empty-inline {
-  color: #94a3b8;
-  font-size: 13px;
-  padding: 12px 0;
-}
-
-:deep(.selected-row) {
-  background: #f0fdf4 !important;
-}
-
-:deep(.ant-table-tbody > .selected-row:hover > td) {
-  background: #dcfce7 !important;
-}
-
-:deep(.ant-table-small .ant-table-thead > tr > th) {
-  font-weight: 700;
-}
-
-:deep(.ant-table-cell) {
+.map-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #475569;
   vertical-align: middle;
 }
+.map-table tr:last-child td { border-bottom: none; }
+.map-table tr:hover td { background: #f8fafc; }
 
-@media (max-width: 1440px) {
-  .left-panel {
-    width: 56%;
-    min-width: 520px;
-  }
+.mono { font-family: monospace; font-size: 11px; }
+.text-dim { color: #94a3b8; }
+.empty-cell { text-align: center; color: #94a3b8; padding: 20px; }
 
-  .right-panel {
-    width: 44%;
-    min-width: 400px;
-  }
+/* Source system badge */
+.sys-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.sys-badge.his  { background: #ecfdf5; color: #059669; }
+.sys-badge.lis  { background: #fffbeb; color: #d97706; }
+.sys-badge.pacs { background: #eff6ff; color: #2563eb; }
+
+/* Match status */
+.match-ok { color: #10b981; font-size: 11px; font-weight: 600; }
+.match-no { color: #f59e0b; font-size: 11px; font-weight: 600; }
+
+/* no-iface inline label */
+.no-iface { font-style: italic; }
+
+/* Sync snapshot modal */
+.modal-note {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 14px;
+  line-height: 1.6;
+}
+.sync-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.sync-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.sync-col { color: #475569; }
+.sync-col.matched { color: #10b981; font-weight: 500; }
+.sync-col.unmatched { color: #f59e0b; font-weight: 500; }
+.sync-col.all-ok { color: #10b981; font-weight: 500; }
+
+.unmatched-section { margin-top: 16px; }
+.unmatched-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f59e0b;
+  margin-bottom: 8px;
+}
+.all-matched-tip {
+  text-align: center;
+  font-size: 12px;
+  color: #10b981;
+  padding: 12px 0;
 }
 </style>

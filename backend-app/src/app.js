@@ -19,53 +19,6 @@ db.query(`ALTER TABLE ai_tasks ADD COLUMN pacs_record_id VARCHAR(64) NULL`)
   .then(() => console.log('Migration OK: ai_tasks.pacs_record_id'))
   .catch(() => { /* 列已存在，忽略 */ });
 
-const extTables = [
-  [`CREATE TABLE IF NOT EXISTS ext_his_records (
-    id               INT AUTO_INCREMENT PRIMARY KEY,
-    source_patient_id VARCHAR(64)  NOT NULL,
-    visit_type       VARCHAR(20)  NOT NULL DEFAULT 'outpatient',
-    visit_date       DATE         NOT NULL,
-    department       VARCHAR(50),
-    diagnosis_code   VARCHAR(20),
-    diagnosis_name   VARCHAR(200),
-    chief_complaint  TEXT,
-    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_source_patient (source_patient_id)
-  )`, 'ext_his_records'],
-  [`CREATE TABLE IF NOT EXISTS ext_lis_results (
-    id               INT AUTO_INCREMENT PRIMARY KEY,
-    source_patient_id VARCHAR(64)  NOT NULL,
-    his_record_id    INT          NULL,
-    test_name        VARCHAR(100) NOT NULL,
-    value            VARCHAR(50),
-    unit             VARCHAR(30),
-    ref_range        VARCHAR(50),
-    abnormal_flag    TINYINT      DEFAULT 0,
-    reported_at      DATETIME     NOT NULL,
-    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_source_patient (source_patient_id)
-  )`, 'ext_lis_results'],
-  [`CREATE TABLE IF NOT EXISTS ext_pacs_records (
-    id               INT AUTO_INCREMENT PRIMARY KEY,
-    source_patient_id VARCHAR(64)  NOT NULL,
-    record_id        VARCHAR(64)  NOT NULL UNIQUE,
-    study_id         VARCHAR(64),
-    modality         VARCHAR(20)  NOT NULL,
-    body_part        VARCHAR(50),
-    description      VARCHAR(200),
-    image_url        VARCHAR(500),
-    thumbnail_url    VARCHAR(500),
-    recorded_at      DATETIME     NOT NULL,
-    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_source_patient (source_patient_id)
-  )`, 'ext_pacs_records'],
-];
-for (const [sql, tbl] of extTables) {
-  db.query(sql)
-    .then(() => console.log(`Migration OK: ${tbl}`))
-    .catch(e => console.error(`Migration error (${tbl}):`, e.message));
-}
-
 // 多库建表检查（derma_his / derma_lis / derma_pacs）
 const multiDbMigrations = [
   [hisPool,  `CREATE TABLE IF NOT EXISTS his_patients (
