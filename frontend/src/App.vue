@@ -1,28 +1,31 @@
 <script setup>
-import { computed } from 'vue'
-import { RouterView, useRoute, useRouter } from 'vue-router'
-import {
-  HomeOutlined,
-  TeamOutlined,
-  ApiOutlined,
-  FileSearchOutlined,
-} from '@ant-design/icons-vue'
+import { computed, ref, watch } from 'vue'
+import { RouterView, RouterLink, useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
 const router = useRouter()
 
 const isAuthPage = computed(() => route.meta.requiresAuth === false)
 
-const navItems = [
-  { path: '/dashboard', label: '首页', icon: HomeOutlined },
-  { path: '/patients', label: '患者管理', icon: TeamOutlined },
-  { path: '/integration', label: '数据集成', icon: ApiOutlined },
-  { path: '/tasks', label: 'AI 分析记录', icon: FileSearchOutlined },
+function getDoctorInfo() {
+  try { return JSON.parse(localStorage.getItem('doctor_info') || '{}') } catch { return {} }
+}
+const doctorInfo = ref(getDoctorInfo())
+watch(() => route.path, () => { doctorInfo.value = getDoctorInfo() })
+
+const isAdmin = computed(() => doctorInfo.value.role === 'admin')
+
+const doctorNavItems = [
+  { path: '/patients', label: '患者管理' },
+]
+const adminNavItems = [
+  { path: '/admin/patients',    label: '患者管理' },
+  { path: '/admin/tasks',       label: '任务监控' },
+  { path: '/admin/integration', label: '数据集成' },
+  { path: '/admin/users',       label: '用户管理' },
 ]
 
-const doctorInfo = computed(() => {
-  try { return JSON.parse(localStorage.getItem('doctor_info') || '{}') } catch { return {} }
-})
+const navItems = computed(() => isAdmin.value ? adminNavItems : doctorNavItems)
 
 async function logout() {
   await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
@@ -34,12 +37,12 @@ async function logout() {
 <template>
   <RouterView v-if="isAuthPage" />
   <div v-else class="layout">
-    <aside class="sidebar">
-      <div class="sidebar-logo">
-        <div class="logo-title">DermaIntegrate</div>
-        <div class="logo-sub">皮肤病辅助诊断平台</div>
+    <header class="topbar">
+      <div class="topbar-brand">
+        <span class="brand-title">DermaIntegrate</span>
+        <span class="brand-sub">皮肤病辅助诊断平台</span>
       </div>
-      <nav class="sidebar-nav">
+      <nav class="topbar-nav">
         <RouterLink
           v-for="item in navItems"
           :key="item.path"
@@ -47,20 +50,17 @@ async function logout() {
           custom
           v-slot="{ isActive, navigate }"
         >
-          <div class="nav-item" :class="{ active: isActive }" @click="navigate">
-            <component :is="item.icon" class="nav-icon" />
-            <span>{{ item.label }}</span>
-          </div>
+          <span class="nav-link" :class="{ active: isActive }" @click="navigate">
+            {{ item.label }}
+          </span>
         </RouterLink>
       </nav>
-      <div class="sidebar-footer">
-        <div class="doctor-name">
-          <span class="status-dot"></span>
-          {{ doctorInfo.name || 'doctor' }}
-        </div>
-        <span class="logout-link" @click="logout">退出登录</span>
+      <div class="topbar-user">
+        <span class="user-name">{{ doctorInfo.name || '—' }}</span>
+        <span v-if="isAdmin" class="role-badge">管理员</span>
+        <span class="logout-btn" @click="logout">退出</span>
       </div>
-    </aside>
+    </header>
     <main class="main-content">
       <RouterView />
     </main>
@@ -68,72 +68,52 @@ async function logout() {
 </template>
 
 <style scoped>
-.layout { display: flex; min-height: 100vh; background: #f1f5f9; }
+.layout { display: flex; flex-direction: column; min-height: 100vh; background: #f1f5f9; }
 
-.sidebar {
-  width: 200px;
-  flex-shrink: 0;
-  background: #ffffff;
-  border-right: 1px solid #e8ecf2;
-  display: flex;
-  flex-direction: column;
-}
-.sidebar-logo {
-  padding: 22px 20px 16px;
-  border-bottom: 1px solid #f0f4f8;
-}
-.logo-title { color: #1e293b; font-size: 14px; font-weight: 700; letter-spacing: 0.3px; }
-.logo-sub { color: #94a3b8; font-size: 11px; margin-top: 3px; }
-
-.sidebar-nav { flex: 1; padding: 10px; }
-.nav-item {
+.topbar {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 10px 12px;
-  margin-bottom: 2px;
-  border-radius: 8px;
-  border-left: 3px solid transparent;
-  cursor: pointer;
+  height: 52px;
+  padding: 0 24px;
+  background: #fff;
+  border-bottom: 1px solid #e8ecf2;
+  flex-shrink: 0;
+  gap: 32px;
+}
+
+.topbar-brand { display: flex; align-items: baseline; gap: 8px; }
+.brand-title { font-size: 15px; font-weight: 700; color: #1e293b; white-space: nowrap; }
+.brand-sub { font-size: 11px; color: #94a3b8; white-space: nowrap; }
+
+.topbar-nav { display: flex; align-items: center; gap: 4px; flex: 1; }
+.nav-link {
+  padding: 6px 14px;
+  border-radius: 6px;
   font-size: 14px;
   color: #64748b;
+  cursor: pointer;
   transition: all 0.15s;
+  white-space: nowrap;
 }
-.nav-item:hover { color: #334155; background: #f8fafc; }
-.nav-item.active {
-  color: #2563EB;
-  background: #eff6ff;
-  border-left-color: #2563EB;
-  font-weight: 500;
-}
-.nav-icon { font-size: 15px; }
+.nav-link:hover { color: #334155; background: #f8fafc; }
+.nav-link.active { color: #2563eb; background: #eff6ff; font-weight: 500; }
 
-.sidebar-footer {
-  padding: 14px 20px 18px;
-  border-top: 1px solid #f0f4f8;
+.topbar-user { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.user-name { font-size: 13px; color: #475569; }
+.role-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: #fef3c7;
+  color: #92400e;
 }
-.doctor-name {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #475569;
+.logout-btn {
   font-size: 13px;
-  margin-bottom: 8px;
-}
-.status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #14B8A6;
-  flex-shrink: 0;
-}
-.logout-link {
-  font-size: 12px;
   color: #94a3b8;
   cursor: pointer;
   transition: color 0.15s;
 }
-.logout-link:hover { color: #64748b; }
+.logout-btn:hover { color: #64748b; }
 
 .main-content { flex: 1; min-width: 0; overflow: auto; }
 </style>

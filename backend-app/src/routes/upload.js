@@ -10,7 +10,14 @@ const upload = multer();
 
 router.get('/', async (req, res) => {
   try {
-    res.json(await taskService.listAll())
+    const { patient_id, pacs_record_id } = req.query
+    if (pacs_record_id) {
+      res.json(await taskService.listByPacsRecordId(pacs_record_id))
+    } else if (patient_id) {
+      res.json(await taskService.listByPatientId(patient_id))
+    } else {
+      res.json(await taskService.listAll())
+    }
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

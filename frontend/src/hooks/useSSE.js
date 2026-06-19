@@ -58,6 +58,15 @@ export function useSSE(url) {
       close()
     })
 
+    // 管理员强制释放会话（UC-11）
+    es.addEventListener('force_close', (e) => {
+      let data = null
+      try { data = JSON.parse(e.data) } catch { data = e.data }
+      events.value.push({ type: 'force_close', data, timestamp: Date.now() })
+      status.value = 'closed'
+      close()
+    })
+
     // heartbeat 不入列表
   }
 

@@ -3,8 +3,16 @@ const cookieParser = require('cookie-parser');
 const path = require('path');
 const config = require('./config');
 const { requireAuth } = require('./middleware/auth');
+const { requireAdmin } = require('./middleware/requireAdmin');
+const { requireDoctor } = require('./middleware/requireDoctor');
+const patientService = require('./services/patientService');
 const db = require('./db');
 const { hisPool, lisPool, pacsPool } = require('./db');
+const debounce = require('./services/debounceManager');
+const { triggerAnalysis, consumeAIStream } = require('./services/conflictResolver');
+const sseRegistry = require('./services/sseRegistry');
+
+debounce.init(triggerAnalysis);
 
 const app = express();
 app.use(cookieParser());
@@ -17,6 +25,18 @@ db.query(`ALTER TABLE ai_tasks ADD COLUMN result_snapshot JSON`)
 
 db.query(`ALTER TABLE ai_tasks ADD COLUMN pacs_record_id VARCHAR(64) NULL`)
   .then(() => console.log('Migration OK: ai_tasks.pacs_record_id'))
+  .catch(() => { /* 列已存在，忽略 */ });
+
+db.query(`ALTER TABLE doctors ADD COLUMN role VARCHAR(10) NOT NULL DEFAULT 'doctor'`)
+  .then(() => console.log('Migration OK: doctors.role'))
+  .catch(() => { /* 列已存在，忽略 */ });
+
+db.query(`ALTER TABLE doctors ADD COLUMN is_active TINYINT NOT NULL DEFAULT 1`)
+  .then(() => console.log('Migration OK: doctors.is_active'))
+  .catch(() => { /* 列已存在，忽略 */ });
+
+db.query(`ALTER TABLE doctors ADD COLUMN deleted_at TIMESTAMP NULL DEFAULT NULL`)
+  .then(() => console.log('Migration OK: doctors.deleted_at'))
   .catch(() => { /* 列已存在，忽略 */ });
 
 // 多库建表检查（derma_his / derma_lis / derma_pacs）
@@ -103,9 +123,138 @@ app.use('/api/tasks',   requireAuth, require('./routes/upload'));
 app.use('/api/tasks',   requireAuth, require('./routes/stream'));
 app.use('/api/tasks',   requireAuth, require('./routes/pacs_task'));
 app.use('/ai-static',   requireAuth, require('./routes/static'));
-app.use('/api/patients',                      requireAuth, require('./routes/patients'));
-app.use('/api/patients/:patientId/visits',    requireAuth, require('./routes/visits'));
+app.use('/api/patients/:patientId/visits',    requireDoctor, require('./routes/visits'));
 app.use('/api/empi',                          requireAuth, require('./routes/empi'));
+app.use('/api/mock',                          requireAuth, require('./routes/mock_push'));
+
+const adminRouter = require('express').Router();
+const bcrypt = require('bcryptjs');
+
+adminRouter.get('/sessions', (req, res) => {
+  res.json(sseRegistry.list());
+});
+
+adminRouter.delete('/sessions', express.json(), (req, res) => {
+  const { task_ids } = req.body || {};
+  if (!Array.isArray(task_ids) || task_ids.length === 0) {
+    return res.status(400).json({ error: 'task_ids 不能为空' });
+  }
+  const result = sseRegistry.forceClose(task_ids);
+  res.json(result);
+});
+
+// 管理员患者列表：只返回基本信息 + EMPI 映射状态，不含临床数据
+adminRouter.get('/patients', async (req, res) => {
+  try {
+    const patients = await patientService.list();
+    const safe = patients.map(({ id, name, gender, birth_date, empi_id, has_his, has_lis, has_pacs }) => ({
+      id, name, gender, birth_date, empi_id, has_his, has_lis, has_pacs,
+    }));
+    res.json(safe);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// UC-09 用户账号管理
+adminRouter.get('/users', async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT id, name, username, role, is_active, created_at FROM doctors WHERE deleted_at IS NULL ORDER BY created_at DESC'
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+adminRouter.post('/users', express.json(), async (req, res) => {
+  const { name, username, password, role } = req.body || {};
+  if (!name || !username || !password) {
+    return res.status(400).json({ error: '姓名、用户名和密码不能为空' });
+  }
+  if (!['doctor', 'admin'].includes(role)) {
+    return res.status(400).json({ error: '角色无效' });
+  }
+  try {
+    const hash = await bcrypt.hash(password, 12);
+    await db.query(
+      'INSERT INTO doctors (name, username, password_hash, role) VALUES (?, ?, ?, ?)',
+      [name, username, hash, role]
+    );
+    res.status(201).json({ ok: true });
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'USERNAME_EXISTS' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+adminRouter.patch('/users/:id', express.json(), async (req, res) => {
+  const { id } = req.params;
+  const { is_active, role } = req.body || {};
+  if (Number(id) === req.doctor.id) {
+    return res.status(403).json({ error: 'SELF_MODIFY_FORBIDDEN' });
+  }
+  try {
+    const updates = [];
+    const vals = [];
+    if (is_active !== undefined) { updates.push('is_active = ?'); vals.push(is_active ? 1 : 0); }
+    if (role !== undefined) {
+      if (!['doctor', 'admin'].includes(role)) return res.status(400).json({ error: '角色无效' });
+      updates.push('role = ?');
+      vals.push(role);
+    }
+    if (!updates.length) return res.status(400).json({ error: '无有效字段' });
+    vals.push(id);
+    await db.query(`UPDATE doctors SET ${updates.join(', ')} WHERE id = ?`, vals);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+adminRouter.put('/users/:id/password', express.json(), async (req, res) => {
+  const { id } = req.params;
+  const { password } = req.body || {};
+  if (!password || password.length < 6) {
+    return res.status(400).json({ error: '密码不能少于6位' });
+  }
+  try {
+    const hash = await bcrypt.hash(password, 12);
+    const [r] = await db.query('UPDATE doctors SET password_hash = ? WHERE id = ? AND deleted_at IS NULL', [hash, id]);
+    if (!r.affectedRows) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+adminRouter.delete('/users/:id', async (req, res) => {
+  const { id } = req.params;
+  if (Number(id) === req.doctor.id) {
+    return res.status(403).json({ error: 'SELF_MODIFY_FORBIDDEN' });
+  }
+  try {
+    // 防止删除最后一个管理员
+    const [[{ cnt }]] = await db.query(
+      "SELECT COUNT(*) AS cnt FROM doctors WHERE role='admin' AND deleted_at IS NULL AND id != ?", [id]
+    );
+    const [[target]] = await db.query('SELECT role FROM doctors WHERE id = ? AND deleted_at IS NULL', [id]);
+    if (!target) return res.status(404).json({ error: 'not found' });
+    if (target.role === 'admin' && Number(cnt) === 0) {
+      return res.status(409).json({ error: 'LAST_ADMIN_FORBIDDEN' });
+    }
+    await db.query('UPDATE doctors SET deleted_at = NOW() WHERE id = ?', [id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.use('/api/admin', requireAdmin, adminRouter);
+
+// 患者相关路由：仅医生可访问
+app.use('/api/patients', requireDoctor, require('./routes/patients'));
 
 // 根路径提示
 app.get('/', (req, res) => {
@@ -124,6 +273,52 @@ app.get('/', (req, res) => {
 app.listen(config.port, () => {
   console.log(`Server running on http://localhost:${config.port}`);
   console.log(`Test page: http://localhost:${config.port}/test/`);
+  setTimeout(bootstrapPendingAnalysis, 3000);
 });
+
+async function bootstrapPendingAnalysis() {
+  try {
+    // 1. 扫描存量 pending 任务 — 上次启动创建了但没人消费流
+    const [pendingTasks] = await db.query(
+      `SELECT task_id FROM ai_tasks WHERE status = 'pending'`
+    );
+    if (pendingTasks.length) {
+      console.log(`[bootstrap] resuming ${pendingTasks.length} pending task(s)`);
+      for (const { task_id } of pendingTasks) {
+        consumeAIStream(task_id).catch(e =>
+          console.error(`[bootstrap] resume error ${task_id}:`, e.message)
+        );
+      }
+    }
+
+    // 2. 对无任务的 PACS 患者通过防抖调度触发
+    const [pacsPatients] = await db.query(
+      `SELECT DISTINCT patient_id FROM empi_index WHERE source_system = 'PACS'`
+    );
+    if (!pacsPatients.length) return;
+
+    const allIds = pacsPatients.map(r => r.patient_id);
+    const [coveredRows] = await db.query(
+      `SELECT DISTINCT patient_id FROM ai_tasks
+       WHERE patient_id IN (?) AND status IN ('pending','running','processing','analyzing','complete','completed')`,
+      [allIds]
+    );
+    const covered = new Set(coveredRows.map(r => r.patient_id));
+    const needTrigger = allIds.filter(id => !covered.has(id));
+
+    if (!needTrigger.length) {
+      console.log('[bootstrap] all PACS patients already have tasks, nothing to do');
+      return;
+    }
+
+    console.log(`[bootstrap] scheduling analysis for ${needTrigger.length} patient(s):`, needTrigger);
+    for (const patientId of needTrigger) {
+      debounce.schedule(patientId);
+    }
+    console.log('[bootstrap] done — new tasks will fire after 30s debounce window');
+  } catch (e) {
+    console.error('[bootstrap] error:', e.message);
+  }
+}
 
 module.exports = app;

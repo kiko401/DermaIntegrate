@@ -68,7 +68,7 @@ async function listExternalSources() {
   const conditions = all.map(() => '(e.source_system = ? AND e.source_id = ?)').join(' OR ')
   const params = all.flatMap(r => [r.source_system, r.source_id])
   const [empiRows] = await db.query(
-    `SELECT e.source_system, e.source_id, e.patient_id, p.name AS internal_name
+    `SELECT e.id AS empi_id, e.source_system, e.source_id, e.patient_id, e.linked_at, p.name AS internal_name
      FROM empi_index e
      JOIN patients p ON p.id = e.patient_id
      WHERE ${conditions}`,
@@ -82,7 +82,9 @@ async function listExternalSources() {
       const match = empiMap.get(`${r.source_system}:${r.source_id}`)
       return {
         ...r,
+        empi_id:       match?.empi_id       ?? null,
         patient_id:    match?.patient_id    ?? null,
+        linked_at:     match?.linked_at     ?? null,
         internal_name: match?.internal_name ?? null,
       }
     })

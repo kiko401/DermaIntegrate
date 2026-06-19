@@ -36,10 +36,11 @@ async function main() {
   await runSchema('lis.sql');
   await runSchema('pacs.sql');
 
-  await seedApp();
+  // 外部库先入，app 最后做 EMPI reconcile（因为 reconcile 依赖外部库数据）
   await seedHis();
   await seedLis();
   await seedPacs();
+  await seedApp();
 
   console.log('\nAll seeds done.');
   process.exit(0);

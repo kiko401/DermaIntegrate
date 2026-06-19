@@ -109,6 +109,11 @@ function statusTagColor(s) {
   return 'processing'
 }
 
+// ── 触发类型推断 ──────────────────────────────────────────────
+function triggerType(task) {
+  return task.pacs_record_id ? 'PACS' : '手动'
+}
+
 // ── 数据来源图标推断 ──────────────────────────────────────────
 function dataTags(task) {
   const tags = []
@@ -199,7 +204,7 @@ function resetFilters() {
 // ── 跳转 ──────────────────────────────────────────────────────
 function goPatient(task) {
   if (task.patient_id) {
-    router.push('/patients?patient_id=' + task.patient_id)
+    router.push('/clinical/' + task.patient_id)
   } else {
     router.push('/patients')
   }
@@ -215,10 +220,12 @@ function rowClass(record) {
 
 const columns = [
   { title: '',            key: 'select',     width: 40,  fixed: 'left' },
+  { title: 'Task ID',    key: 'task_id',    width: 180 },
   { title: '患者姓名',   key: 'patient',    width: 110 },
   { title: '患者 ID',    key: 'patient_id', width: 80  },
   { title: '任务创建时间', key: 'created_at', width: 155 },
   { title: '任务状态',   key: 'status',     width: 90  },
+  { title: '触发类型',   key: 'trigger',    width: 90  },
   { title: 'AI 风险等级', key: 'risk',      width: 110 },
   { title: '涉及数据',   key: 'data_tags',  width: 130 },
   { title: '操作',       key: 'action',     width: 140, align: 'center' },
@@ -336,6 +343,11 @@ onUnmounted(stopPolling)
             />
           </template>
 
+          <!-- Task ID -->
+          <template v-else-if="column.key === 'task_id'">
+            <span class="id-text">{{ record.task_id }}</span>
+          </template>
+
           <!-- 患者姓名 -->
           <template v-else-if="column.key === 'patient'">
             <div class="patient-cell">
@@ -361,6 +373,13 @@ onUnmounted(stopPolling)
             <a-tag :color="statusTagColor(record.status)" style="margin:0">
               {{ statusLabel(record.status) }}
             </a-tag>
+          </template>
+
+          <!-- 触发类型 -->
+          <template v-else-if="column.key === 'trigger'">
+            <span class="trigger-tag" :class="{ 'trigger-pacs': record.pacs_record_id }">
+              {{ triggerType(record) }}
+            </span>
           </template>
 
           <!-- AI 风险等级 -->
@@ -394,7 +413,7 @@ onUnmounted(stopPolling)
                 size="small"
                 class="action-link"
                 @click="router.push('/tasks/' + record.task_id)"
-              >查看详情</a-button>
+              >查阅快照</a-button>
               <a-divider type="vertical" style="margin:0 2px" />
               <a-button
                 type="link"
@@ -528,4 +547,7 @@ onUnmounted(stopPolling)
 .action-link:hover { color: #0d9488; }
 .action-link-weak { font-size: 12px; padding: 0 4px; color: #94a3b8; }
 .action-link-weak:hover:not(:disabled) { color: #64748b; }
+
+.trigger-tag { font-size: 12px; color: #94a3b8; }
+.trigger-pacs { color: #6366f1; font-weight: 500; }
 </style>

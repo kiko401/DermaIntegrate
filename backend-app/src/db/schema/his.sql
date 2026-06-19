@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS his_patients (
   name       VARCHAR(50)  NOT NULL,
   id_card    VARCHAR(18),
   phone      VARCHAR(20),
+  birth_date DATE,
+  gender     TINYINT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

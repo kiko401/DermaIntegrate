@@ -40,6 +40,34 @@ async function getSnapshot(taskId) {
   return rows[0]?.result_snapshot ?? null;
 }
 
+async function listByPacsRecordId(pacsRecordId) {
+  const [rows] = await db.query(
+    `SELECT t.id, t.task_id, t.status, t.created_at,
+            t.pacs_record_id, t.result_snapshot,
+            p.name AS patient_name, p.id AS patient_id
+     FROM ai_tasks t
+     LEFT JOIN patients p ON p.id = t.patient_id
+     WHERE t.pacs_record_id = ?
+     ORDER BY t.created_at DESC`,
+    [pacsRecordId]
+  );
+  return rows;
+}
+
+async function listByPatientId(patientId) {
+  const [rows] = await db.query(
+    `SELECT t.id, t.task_id, t.status, t.created_at,
+            t.pacs_record_id, t.result_snapshot,
+            p.name AS patient_name, p.id AS patient_id
+     FROM ai_tasks t
+     LEFT JOIN patients p ON p.id = t.patient_id
+     WHERE t.patient_id = ?
+     ORDER BY t.created_at DESC`,
+    [patientId]
+  );
+  return rows;
+}
+
 async function listAll() {
   const [rows] = await db.query(
     `SELECT t.id, t.task_id, t.status, t.created_at,
@@ -92,4 +120,4 @@ async function getDetail(taskId) {
   return row;
 }
 
-module.exports = { create, createFromPacs, getByTaskId, saveSnapshot, getSnapshot, getDetail, listAll };
+module.exports = { create, createFromPacs, getByTaskId, saveSnapshot, getSnapshot, getDetail, listAll, listByPatientId, listByPacsRecordId };

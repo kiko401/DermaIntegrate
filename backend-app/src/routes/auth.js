@@ -13,7 +13,7 @@ router.post('/login', express.json(), async (req, res) => {
   }
   try {
     const [rows] = await db.execute(
-      'SELECT id, name, username, password_hash FROM doctors WHERE username = ?',
+      'SELECT id, name, username, password_hash, role FROM doctors WHERE username = ?',
       [username]
     )
     const doctor = rows[0]
@@ -21,7 +21,7 @@ router.post('/login', express.json(), async (req, res) => {
       return res.status(401).json({ error: '用户名或密码错误' })
     }
     const token = jwt.sign(
-      { id: doctor.id, name: doctor.name, username: doctor.username },
+      { id: doctor.id, name: doctor.name, username: doctor.username, role: doctor.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
     )
@@ -31,7 +31,7 @@ router.post('/login', express.json(), async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000,
       path: '/',
     })
-    res.json({ token, doctor: { id: doctor.id, name: doctor.name } })
+    res.json({ token, doctor: { id: doctor.id, name: doctor.name, role: doctor.role } })
   } catch (e) {
     console.error('[auth/login]', e)
     res.status(500).json({ error: '服务器错误' })

@@ -3,6 +3,7 @@ const http = require('http');
 const { URL } = require('url');
 const config = require('../config');
 const taskService = require('../services/taskService');
+const sseRegistry = require('../services/sseRegistry');
 
 const router = express.Router();
 
@@ -57,6 +58,12 @@ router.get('/:taskId/stream', (req, res) => {
   const taskId = req.params.taskId;
   const aiStreamUrl = `${config.aiBaseUrl}/stream/${taskId}`;
 
+  sseRegistry.register(taskId, {
+    res,
+    doctorName: req.doctor?.name || '—',
+    patientId:  req.query.patient_id || '—',
+  });
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -100,6 +107,7 @@ router.get('/:taskId/stream', (req, res) => {
     aiResponse.on('data', (chunk) => {
       res.write(chunk);
       buffer += chunk.toString('utf8');
+      sseRegistry.touch(taskId);
       trySaveSnapshot();
     });
 
@@ -136,6 +144,7 @@ router.get('/:taskId/stream', (req, res) => {
 
   req.on('close', () => {
     console.log(`Client disconnected from stream: ${taskId}`);
+    sseRegistry.unregister(taskId);
     aiRequest.destroy();
   });
 

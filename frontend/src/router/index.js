@@ -11,42 +11,69 @@ const router = createRouter({
     },
     { path: '/', redirect: '/patients' },
     {
-      path: '/dashboard',
-      name: 'dashboard',
-      component: () => import('../views/Dashboard.vue'),
-    },
-    {
       path: '/patients',
       name: 'patients',
       component: () => import('../views/PatientList.vue'),
     },
     {
-      path: '/integration',
-      name: 'integration',
-      component: () => import('../views/Integration.vue'),
-    },
-    {
-      path: '/tasks',
-      name: 'tasks',
-      component: () => import('../views/Tasks.vue'),
+      path: '/clinical/:patientId',
+      name: 'clinical',
+      component: () => import('../views/ClinicalView.vue'),
     },
     {
       path: '/tasks/:taskId',
       name: 'task-detail',
       component: () => import('../views/TaskDetail.vue'),
     },
+    {
+      path: '/admin/patients',
+      name: 'admin-patients',
+      component: () => import('../views/admin/PatientAdmin.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/tasks',
+      name: 'admin-tasks',
+      component: () => import('../views/Tasks.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/integration',
+      name: 'admin-integration',
+      component: () => import('../views/Integration.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/users',
+      name: 'admin-users',
+      component: () => import('../views/admin/Users.vue'),
+      meta: { requiresAdmin: true },
+    },
   ],
 })
 
 router.beforeEach(async (to) => {
   const loggedIn = !!localStorage.getItem('doctor_info')
+
   if (to.meta.requiresAuth === false) {
-    if (loggedIn && to.name === 'login') return '/patients'
+    if (loggedIn && to.name === 'login') {
+      const info = JSON.parse(localStorage.getItem('doctor_info') || '{}')
+      return info.role === 'admin' ? '/admin/patients' : '/patients'
+    }
     return true
   }
+
   if (!loggedIn) return '/login'
 
-  // cookie 有效性验证（仅首次，后续依赖 apiFetch 401 兜底）
+  const info = JSON.parse(localStorage.getItem('doctor_info') || '{}')
+  const isAdmin = info.role === 'admin'
+
+  if (to.meta.requiresAdmin && !isAdmin) return '/patients'
+
+  // 临床视图和患者列表仅医生可访问，admin 跳转到自己的患者管理页
+  const doctorOnlyRoutes = ['patients', 'clinical', 'task-detail']
+  if (doctorOnlyRoutes.includes(to.name) && isAdmin) return '/admin/patients'
+
   if (!router._cookieVerified) {
     try {
       const res = await fetch('/api/auth/me', { credentials: 'include' })
