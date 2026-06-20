@@ -77,7 +77,6 @@
 
 ### 3.2 应用平台域
 
-<!-- TODO: Application Domain: 请根据实际实现情况补充以下内容 -->
 应用平台域负责连接外部医疗系统、聚合患者数据以及提供医生交互界面。
 
 #### 3.2.1 数据集成与标准协议接入
@@ -156,26 +155,38 @@
 
 ### 5.3 应用平台域部署
 
-<!-- TODO: Application Domain: 请根据实际技术栈修改以下部署说明 -->
-1.  **数据库初始化**
+应用平台域（frontend + backend-app + MySQL + Nginx）通过独立的 Docker Compose 文件编排，与智能推理域分机部署。backend-ai 视为外部服务，通过 `AI_BASE_URL` 环境变量接入。
+
+#### 容器化部署（推荐）
+
+1.  **配置 AI 推理域地址**（可选，默认已内置）
     ```bash
-    # 示例命令，请根据实际脚本修改
-    mysql -u root -p < backend-app/sql/init.sql
+    export AI_BASE_URL=http://<backend-ai-host>/ai
     ```
 
-2.  **后端服务启动**
+2.  **启动应用平台域全部服务**
     ```bash
-    cd backend-app
-    npm install
-    npm run dev
+    docker-compose -f infra/docker-compose.app.yml up -d --build
+    ```
+    该命令将拉起：`mysql-app`、`backend-app`、`frontend`、`nginx`（监听 `80` 端口）。
+    MySQL 数据库通过 `infra/init-app.sql` 自动完成四库初始化（`derma_app` / `derma_his` / `derma_lis` / `derma_pacs`）。
+
+3.  **访问系统**
+    浏览器打开 `http://localhost`，使用预置账号登录：
+    ```
+    用户名：doctor
+    密码：demo123
     ```
 
-3.  **前端服务启动**
-    ```bash
-    cd frontend
-    npm install
-    npm run dev
-    ```
+#### 本地开发启动
+
+```bash
+# 后端
+cd backend-app && npm install && node src/app.js
+
+# 前端
+cd frontend && npm install && npm run dev
+```
 
 ### 5.4 全链路访问
 

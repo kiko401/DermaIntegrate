@@ -231,4 +231,143 @@ async function getStats() {
   return { queued_tasks: Number(queued) }
 }
 
-module.exports = { matchAndLink, getSourcesByPatientId, listExternalSources, getClinicalView, getStats }
+async function updateMapping(id, patient_id) {
+  const [[mapping]] = await db.query(
+    'SELECT id, source_system, source_id, patient_id FROM empi_index WHERE id = ?',
+    [id]
+  )
+  if (!mapping) {
+    const err = new Error('MAPPING_NOT_FOUND')
+    err.status = 404
+    throw err
+  }
+
+  const [[patient]] = await db.query(
+    'SELECT id, name FROM patients WHERE id = ?',
+    [patient_id]
+  )
+  if (!patient) {
+    const err = new Error('PATIENT_NOT_FOUND')
+    err.status = 404
+    throw err
+  }
+
+  await db.query(
+    'UPDATE empi_index SET patient_id = ? WHERE id = ?',
+    [patient_id, id]
+  )
+
+  return {
+    id: mapping.id,
+    source_system: mapping.source_system,
+    source_id: mapping.source_id,
+    patient_id: patient.id,
+    internal_name: patient.name,
+  }
+}
+
+async function deleteMappings(ids) {
+  if (!Array.isArray(ids) || !ids.length) return { deleted: 0 }
+
+  const cleanIds = ids
+    .map(v => Number(v))
+    .filter(v => Number.isInteger(v) && v > 0)
+
+  if (!cleanIds.length) return { deleted: 0 }
+
+  const [result] = await db.query(
+    'DELETE FROM empi_index WHERE id IN (?)',
+    [cleanIds]
+  )
+
+  return { deleted: Number(result.affectedRows || 0) }
+}
+
+async function scanConflicts() {
+  const [empiRows] = await db.query(
+    'SELECT id AS empi_id, source_system, source_id, patient_id FROM empi_index'
+  )
+  if (!empiRows.length) return []
+
+  const [hisRows, lisRows, pacsRows] = await Promise.all([
+    hisPool.query('SELECT source_id, id_card FROM his_patients WHERE id_card IS NOT NULL').then(([r]) => r),
+    lisPool.query('SELECT source_id, id_card FROM lis_patients WHERE id_card IS NOT NULL').then(([r]) => r),
+    pacsPool.query('SELECT source_id, id_card FROM pacs_patients WHERE id_card IS NOT NULL').then(([r]) => r),
+  ])
+
+  // 构建 "system:source_id" → id_card
+  const idCardMap = new Map()
+  for (const r of hisRows)  idCardMap.set(`HIS:${r.source_id}`,  r.id_card)
+  for (const r of lisRows)  idCardMap.set(`LIS:${r.source_id}`,  r.id_card)
+  for (const r of pacsRows) idCardMap.set(`PACS:${r.source_id}`, r.id_card)
+
+  // 按 id_card 分组，收集各组的 patient_id 集合 和 empi_id 集合
+  const cardToPatients = new Map() // id_card → Set<patient_id>
+  const cardToEmpiIds  = new Map() // id_card → Set<empi_id>
+
+  for (const row of empiRows) {
+    const idCard = idCardMap.get(`${row.source_system}:${row.source_id}`)
+    if (!idCard) continue
+    if (!cardToPatients.has(idCard)) {
+      cardToPatients.set(idCard, new Set())
+      cardToEmpiIds.set(idCard, new Set())
+    }
+    cardToPatients.get(idCard).add(row.patient_id)
+    cardToEmpiIds.get(idCard).add(row.empi_id)
+  }
+
+  // 同一 id_card 映射到多个不同 patient_id → 冲突
+  const conflictEmpiIds = new Set()
+  for (const [idCard, patientSet] of cardToPatients) {
+    if (patientSet.size > 1) {
+      for (const eid of cardToEmpiIds.get(idCard)) {
+        conflictEmpiIds.add(eid)
+      }
+    }
+  }
+
+  return [...conflictEmpiIds]
+}
+
+async function createMapping({ source_system, source_id, patient_id }) {
+  const [[patient]] = await db.query('SELECT id FROM patients WHERE id = ?', [patient_id])
+  if (!patient) {
+    const err = new Error('PATIENT_NOT_FOUND')
+    err.status = 404
+    throw err
+  }
+
+  try {
+    await db.query(
+      'INSERT INTO empi_index (source_system, source_id, patient_id) VALUES (?, ?, ?)',
+      [source_system, source_id, patient_id]
+    )
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') {
+      const err = new Error('EMPI_DUPLICATE_KEY')
+      err.status = 409
+      throw err
+    }
+    throw e
+  }
+
+  const [[created]] = await db.query(
+    `SELECT e.id AS empi_id, e.source_system, e.source_id, e.patient_id, e.linked_at, p.name AS internal_name
+     FROM empi_index e JOIN patients p ON p.id = e.patient_id
+     WHERE e.source_system = ? AND e.source_id = ?`,
+    [source_system, source_id]
+  )
+  return created
+}
+
+module.exports = {
+  matchAndLink,
+  getSourcesByPatientId,
+  listExternalSources,
+  getClinicalView,
+  getStats,
+  updateMapping,
+  deleteMappings,
+  scanConflicts,
+  createMapping,
+}

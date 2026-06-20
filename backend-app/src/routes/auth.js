@@ -13,12 +13,15 @@ router.post('/login', express.json(), async (req, res) => {
   }
   try {
     const [rows] = await db.execute(
-      'SELECT id, name, username, password_hash, role FROM doctors WHERE username = ?',
+      'SELECT id, name, username, password_hash, role, is_active FROM doctors WHERE username = ?',
       [username]
     )
     const doctor = rows[0]
     if (!doctor || !(await bcrypt.compare(password, doctor.password_hash))) {
       return res.status(401).json({ error: '用户名或密码错误' })
+    }
+    if (!doctor.is_active) {
+      return res.status(403).json({ error: '账号已被禁用，请联系管理员' })
     }
     const token = jwt.sign(
       { id: doctor.id, name: doctor.name, username: doctor.username, role: doctor.role },

@@ -43,10 +43,69 @@ router.get('/sources', async (req, res) => {
   }
 })
 
+// GET /api/empi/conflicts
+// 扫描冲突：同一 id_card 映射到多个不同内部患者，返回冲突 empi_id 数组
+router.get('/conflicts', async (req, res) => {
+  try {
+    const conflictIds = await svc.scanConflicts()
+    res.json({ conflict_empi_ids: conflictIds, count: conflictIds.length })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/empi
+// 新增映射：手动写入 empi_index 行
+router.post('/', async (req, res) => {
+  const { source_system, source_id, patient_id } = req.body || {}
+  if (!source_system || !source_id || !patient_id) {
+    return res.status(400).json({ error: 'source_system、source_id、patient_id 均必填' })
+  }
+  if (!['HIS', 'LIS', 'PACS'].includes(source_system)) {
+    return res.status(400).json({ error: 'source_system 必须为 HIS / LIS / PACS' })
+  }
+  try {
+    const mapping = await svc.createMapping({ source_system, source_id, patient_id: Number(patient_id) })
+    res.status(201).json({ ok: true, mapping })
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
 // GET /api/empi/stats - 轻量统计：当前排队任务数
 router.get('/stats', async (req, res) => {
   try {
     res.json(await svc.getStats())
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// PUT /api/empi/:id
+// 仅允许修改内部患者 ID，不允许修改复合行键
+router.put('/:id', async (req, res) => {
+  const { patient_id } = req.body || {}
+  if (!patient_id) {
+    return res.status(400).json({ error: 'patient_id 必填' })
+  }
+  try {
+    const result = await svc.updateMapping(req.params.id, patient_id)
+    res.json({ ok: true, mapping: result })
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// DELETE /api/empi
+// 按 empi_index.id 删除映射
+router.delete('/', async (req, res) => {
+  const { ids } = req.body || {}
+  if (!Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ error: 'ids 不能为空' })
+  }
+  try {
+    const result = await svc.deleteMappings(ids)
+    res.json({ ok: true, ...result })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

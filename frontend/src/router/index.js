@@ -34,13 +34,13 @@ const router = createRouter({
     {
       path: '/admin/tasks',
       name: 'admin-tasks',
-      component: () => import('../views/Tasks.vue'),
+      component: () => import('../views/admin/Tasks.vue'),
       meta: { requiresAdmin: true },
     },
     {
       path: '/admin/integration',
       name: 'admin-integration',
-      component: () => import('../views/Integration.vue'),
+      component: () => import('../views/admin/Integration.vue'),
       meta: { requiresAdmin: true },
     },
     {
