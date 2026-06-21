@@ -39,6 +39,31 @@ db.query(`ALTER TABLE doctors ADD COLUMN deleted_at TIMESTAMP NULL DEFAULT NULL`
   .then(() => console.log('Migration OK: doctors.deleted_at'))
   .catch(() => { /* 列已存在，忽略 */ });
 
+// 去重并加唯一索引（修复 seed 重复运行产生重复行）
+hisPool.query(`
+  DELETE r1 FROM his_records r1
+  INNER JOIN his_records r2
+  ON r1.his_patient_id = r2.his_patient_id
+    AND r1.visit_date = r2.visit_date
+    AND r1.diagnosis_code = r2.diagnosis_code
+    AND r1.id > r2.id
+`).then(() =>
+  hisPool.query(`ALTER TABLE his_records ADD UNIQUE INDEX ux_his_record (his_patient_id, visit_date, diagnosis_code)`)
+).then(() => console.log('Migration OK: his_records unique index'))
+  .catch(() => { /* 索引已存在，忽略 */ });
+
+lisPool.query(`
+  DELETE r1 FROM lis_results r1
+  INNER JOIN lis_results r2
+  ON r1.lis_patient_id = r2.lis_patient_id
+    AND r1.test_name = r2.test_name
+    AND r1.reported_at = r2.reported_at
+    AND r1.id > r2.id
+`).then(() =>
+  lisPool.query(`ALTER TABLE lis_results ADD UNIQUE INDEX ux_lis_result (lis_patient_id, test_name, reported_at)`)
+).then(() => console.log('Migration OK: lis_results unique index'))
+  .catch(() => { /* 索引已存在，忽略 */ });
+
 // 多库建表检查（derma_his / derma_lis / derma_pacs）
 const multiDbMigrations = [
   [hisPool,  `CREATE TABLE IF NOT EXISTS his_patients (

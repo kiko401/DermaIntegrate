@@ -82,7 +82,7 @@ async function seedHis() {
     );
     if (!p) continue;
     await hisPool.execute(
-      `INSERT INTO his_records
+      `INSERT IGNORE INTO his_records
          (his_patient_id, visit_type, visit_date, department, diagnosis_code, diagnosis_name, chief_complaint)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [p.id, vtype, vdate, dept, dcode, dname, cc]

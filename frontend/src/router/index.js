@@ -71,7 +71,7 @@ router.beforeEach(async (to) => {
   if (to.meta.requiresAdmin && !isAdmin) return '/patients'
 
   // 临床视图和患者列表仅医生可访问，admin 跳转到自己的患者管理页
-  const doctorOnlyRoutes = ['patients', 'clinical', 'task-detail']
+  const doctorOnlyRoutes = ['patients', 'clinical']
   if (doctorOnlyRoutes.includes(to.name) && isAdmin) return '/admin/patients'
 
   if (!router._cookieVerified) {

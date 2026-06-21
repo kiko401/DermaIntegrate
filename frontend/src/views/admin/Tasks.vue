@@ -6,8 +6,10 @@ import { apiFetch } from '@/utils/api'
 const router = useRouter()
 const route  = useRoute()
 
-const tasks   = ref([])
-const loading = ref(false)
+const tasks       = ref([])
+const loading     = ref(false)
+const currentPage = ref(1)
+const PAGE_SIZE   = 15
 
 // ── 筛选状态 ─────────────────────────────────────────────────
 const keyword      = ref('')
@@ -199,6 +201,67 @@ function resetFilters() {
   dateRange.value       = []
   selectedKeys.value    = []
   patientIdFilter.value = null
+  currentPage.value     = 1
+}
+
+// ── 当前页数据 ────────────────────────────────────────────────
+const currentPageTasks = computed(() => {
+  const start = (currentPage.value - 1) * PAGE_SIZE
+  return filteredTasks.value.slice(start, start + PAGE_SIZE)
+})
+
+const pageAllSelected = computed(() =>
+  currentPageTasks.value.length > 0 &&
+  currentPageTasks.value.every(t => selectedKeys.value.includes(t.task_id))
+)
+
+const pageIndeterminate = computed(() =>
+  !pageAllSelected.value &&
+  currentPageTasks.value.some(t => selectedKeys.value.includes(t.task_id))
+)
+
+function toggleRowSelect(e, taskId) {
+  if (e.target.checked) {
+    if (!selectedKeys.value.includes(taskId)) selectedKeys.value.push(taskId)
+  } else {
+    const i = selectedKeys.value.indexOf(taskId)
+    if (i !== -1) selectedKeys.value.splice(i, 1)
+  }
+}
+
+function togglePageSelect(e) {
+  const ids = currentPageTasks.value.map(t => t.task_id)
+  if (e.target.checked) {
+    ids.forEach(id => { if (!selectedKeys.value.includes(id)) selectedKeys.value.push(id) })
+  } else {
+    selectedKeys.value = selectedKeys.value.filter(id => !ids.includes(id))
+  }
+}
+
+function exportSelected() {
+  const selected = tasks.value.filter(t => selectedKeys.value.includes(t.task_id))
+  const rows = selected.map(t => {
+    let snapshot = t.result_snapshot
+    try {
+      if (typeof snapshot === 'string') snapshot = JSON.parse(snapshot)
+    } catch {}
+    return {
+      task_id:        t.task_id,
+      patient_name:   t.patient_name || null,
+      patient_id:     t.patient_id   || null,
+      created_at:     t.created_at   || null,
+      status:         t.status,
+      risk_level:     riskLevel(t) || null,
+      result_snapshot: snapshot ?? null,
+    }
+  })
+  const blob = new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `derma_tasks_export_${new Date().toISOString().slice(0,10)}.json`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 // ── 跳转 ──────────────────────────────────────────────────────
@@ -233,6 +296,10 @@ const columns = [
 
 // ── query 参数变化时重新筛选（如首页切换跳转） ────────────────
 watch(() => route.query, initFromQuery, { immediate: false })
+
+watch([keyword, filterStatus, filterRisk, dateRange, patientIdFilter], () => {
+  currentPage.value = 1
+})
 
 onMounted(async () => {
   initFromQuery()
@@ -297,12 +364,10 @@ onUnmounted(stopPolling)
       <div class="filter-right">
         <a-button @click="resetFilters">重置筛选</a-button>
         <a-button :loading="loading" @click="fetchTasks">刷新列表</a-button>
-        <a-tooltip title="批量导出功能待实现：需后端提供 PDF 生成接口">
-          <a-button disabled>
-            批量导出选中报告
-            <span class="todo-badge">待实现</span>
-          </a-button>
-        </a-tooltip>
+        <a-button
+          :disabled="selectedKeys.length === 0"
+          @click="exportSelected"
+        >批量导出选中报告{{ selectedKeys.length ? `（${selectedKeys.length}）` : '' }}</a-button>
       </div>
     </div>
 
@@ -325,21 +390,34 @@ onUnmounted(stopPolling)
         :data-source="filteredTasks"
         :loading="loading"
         row-key="task_id"
-        :pagination="{ pageSize: 15, showSizeChanger: false, showTotal: total => `共 ${total} 条` }"
+        :pagination="{
+          pageSize: PAGE_SIZE,
+          current: currentPage,
+          showSizeChanger: false,
+          showTotal: total => `共 ${total} 条`,
+          onChange: p => { currentPage.value = p }
+        }"
         size="small"
         :row-class-name="rowClass"
         class="tasks-table"
       >
+        <template #headerCell="{ column }">
+          <template v-if="column.key === 'select'">
+            <a-checkbox
+              :checked="pageAllSelected"
+              :indeterminate="pageIndeterminate"
+              @change="togglePageSelect"
+            />
+          </template>
+        </template>
+
         <template #bodyCell="{ column, record }">
 
           <!-- 多选 -->
           <template v-if="column.key === 'select'">
             <a-checkbox
               :checked="selectedKeys.includes(record.task_id)"
-              @change="e => {
-                if (e.target.checked) selectedKeys.push(record.task_id)
-                else selectedKeys.splice(selectedKeys.indexOf(record.task_id), 1)
-              }"
+              @change="e => toggleRowSelect(e, record.task_id)"
             />
           </template>
 
@@ -500,17 +578,6 @@ onUnmounted(stopPolling)
 
 .filter-disabled {
   opacity: 0.55;
-}
-
-.todo-badge {
-  display: inline-block;
-  font-size: 10px;
-  background: rgba(241, 245, 249, 0.9);
-  color: #94a3b8;
-  border-radius: 999px;
-  padding: 0 6px;
-  margin-left: 5px;
-  vertical-align: middle;
 }
 
 /* 表格卡片 */
@@ -694,7 +761,7 @@ onUnmounted(stopPolling)
   background: #2f9fe2 !important;
 }
 
-:deep(.ant-btn-default) {
+:deep(.ant-btn-default:not(:disabled)) {
   border-color: rgba(92,128,170,0.18) !important;
   color: #52708e !important;
   background: rgba(255,255,255,0.82) !important;

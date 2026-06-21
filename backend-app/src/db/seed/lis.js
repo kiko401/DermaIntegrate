@@ -74,7 +74,7 @@ async function seedLis() {
     );
     if (!p) continue;
     await lisPool.execute(
-      `INSERT INTO lis_results
+      `INSERT IGNORE INTO lis_results
          (lis_patient_id, test_name, value, unit, ref_range, abnormal_flag, reported_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [p.id, tname, val, unit, ref, flag, rat]
