@@ -60,9 +60,12 @@ class VLMAgent:
         return filtered_text
 
     def _clean_llm_json_response(self, text: str) -> str:
-        """清洗 LLM 返回结果，剥离 Markdown 代码块标记（```json ... ```）。"""
+        """清洗 LLM 返回结果，剥离 Markdown 代码块标记和前面的思考过程。"""
         text = text.strip()
         match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"(\{[\s\S]*\})", text)
         if match:
             return match.group(1).strip()
         return text
