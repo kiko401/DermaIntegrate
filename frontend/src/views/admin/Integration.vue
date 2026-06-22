@@ -279,6 +279,69 @@ async function forceReleaseSessions() {
   }
 }
 
+// ── 推送沙箱 ───────────────────────────────────────────────────
+const HIS_EXAMPLE = JSON.stringify({
+  pat_no: 'H-TEST-001', id_no: '310101199001011234',
+  name: '测试患者', phone: '13900139001',
+  visit_info: { dept_name: '皮肤科', cc: '背部色素痣疑似恶变',
+    diag: '皮肤恶性黑色素瘤', diag_code: 'C43.5',
+    visit_date: '2026-06-22', type: '门诊' }
+}, null, 2)
+
+const LIS_EXAMPLE = JSON.stringify({
+  specimen_id: 'LIS-TEST-001', patient_id_card: '310101199001011234',
+  patient_name: '测试患者', patient_phone: '13900139001',
+  reported_at: '2026-06-22',
+  test_results: [{ item: 'LDH', val: '320', unit_str: 'U/L', ref: '120-246', abnormal: true }],
+  is_pathology: true,
+  pathology: { report_no: 'PATH-TEST-001', sample_type: '切除活检',
+    diagnosis_text: '皮肤恶性黑色素瘤', histological_type: '浅表扩散型',
+    thickness: 2.1, ulcer: true, mitosis: 4, clark: 4, braf: 'V600E' }
+}, null, 2)
+
+const PACS_EXAMPLE = JSON.stringify({
+  ris_uid: 'PACS-TEST-001', card_no: '310101199001011234',
+  patient_name: '测试患者', patient_phone: '13900139001',
+  img_path: '/pacs/test/image.dcm', thumb_path: '/pacs/test/thumb.jpg',
+  modality_code: 'US', body_part: '皮肤', description: '皮肤超声检查',
+  study_date: '2026-06-22'
+}, null, 2)
+
+const pushCards = ref([
+  { key: 'his',  label: 'HIS',  color: 'his',
+    url: '/api/mock/his_push',
+    desc: '门诊/住院记录推送，触发 EMPI 匹配，不触发分析',
+    json: HIS_EXAMPLE,  loading: false, resp: null },
+  { key: 'lis',  label: 'LIS',  color: 'lis',
+    url: '/api/mock/lis_push',
+    desc: '检验/病理推送，is_pathology=true 且命中 EMPI 时触发分析',
+    json: LIS_EXAMPLE,  loading: false, resp: null },
+  { key: 'pacs', label: 'PACS', color: 'pacs',
+    url: '/api/mock/pacs_push',
+    desc: '影像推送，命中 EMPI 后自动触发 30s 防抖分析',
+    json: PACS_EXAMPLE, loading: false, resp: null },
+])
+
+async function sendPush(card) {
+  let body
+  try { body = JSON.parse(card.json) } catch { message.error('JSON 格式错误'); return }
+  card.loading = true
+  card.resp = null
+  try {
+    const res = await apiFetch(card.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const data = await res.json()
+    card.resp = { ok: res.ok, status: res.status, data }
+  } catch (e) {
+    card.resp = { ok: false, status: 0, data: { error: e.message } }
+  } finally {
+    card.loading = false
+  }
+}
+
 onMounted(() => {
   fetchSources()
   fetchSessions()
@@ -291,7 +354,7 @@ watch(() => route.query, initFromQuery, { immediate: true })
   <div class="page">
     <div class="page-header">
       <div class="page-title">数据集成治理</div>
-      <div class="page-sub">EMPI 映射治理 · SSE 会话治理</div>
+      <div class="page-sub">EMPI 映射治理 · SSE 会话治理 · 推送沙箱</div>
     </div>
 
     <a-tabs v-model:activeKey="activeTab" class="main-tabs">
@@ -402,6 +465,7 @@ watch(() => route.query, initFromQuery, { immediate: true })
 
       <!-- Tab 2: SSE 会话治理 -->
       <a-tab-pane key="sse" tab="SSE 会话治理">
+
         <div class="toolbar">
           <div class="toolbar-left">
             <span class="stat-pill">已选 {{ sessionSelected.length }} 条</span>
@@ -461,6 +525,36 @@ watch(() => route.query, initFromQuery, { immediate: true })
               </tr>
             </tbody>
           </table>
+        </div>
+      </a-tab-pane>
+
+      <!-- Tab 3: 推送沙箱 -->
+      <a-tab-pane key="sandbox" tab="推送沙箱">
+        <div class="sandbox-grid">
+          <div v-for="card in pushCards" :key="card.key" class="sandbox-card">
+            <div class="sandbox-card-header">
+              <span class="sys-badge" :class="card.color">{{ card.label }}</span>
+              <span class="sandbox-desc">{{ card.desc }}</span>
+            </div>
+            <textarea class="sandbox-textarea" v-model="card.json" spellcheck="false" />
+            <div class="sandbox-footer">
+              <a-button type="primary" size="small" :loading="card.loading" @click="sendPush(card)">
+                发送
+              </a-button>
+            </div>
+            <div v-if="card.resp" class="sandbox-resp" :class="{ 'resp-ok': card.resp.ok, 'resp-err': !card.resp.ok }">
+              <div class="resp-status">
+                <span>{{ card.resp.status }}</span>
+                <span v-if="card.resp.data?.triggered" class="resp-triggered">分析已触发 ↻ 30s 后生效</span>
+                <router-link
+                  v-if="card.resp.ok && card.resp.data?.empi?.patient_id"
+                  :to="`/clinical/${card.resp.data.empi.patient_id}`"
+                  class="resp-link"
+                >查看患者 →</router-link>
+              </div>
+              <pre class="resp-json">{{ JSON.stringify(card.resp.data, null, 2) }}</pre>
+            </div>
+          </div>
         </div>
       </a-tab-pane>
 
@@ -902,5 +996,114 @@ watch(() => route.query, initFromQuery, { immediate: true })
 :deep(.ant-modal-title) {
   color: #18395e;
   font-weight: 800;
+}
+
+/* sandbox */
+.sandbox-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.sandbox-card {
+  background: rgba(255,255,255,0.82);
+  border: 1px solid rgba(109,145,186,0.14);
+  border-radius: 18px;
+  padding: 16px;
+  box-shadow: 0 12px 28px rgba(95,130,171,0.08);
+  backdrop-filter: blur(14px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sandbox-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sandbox-desc {
+  font-size: 11px;
+  color: #8aa0b8;
+  line-height: 1.4;
+}
+
+.sandbox-textarea {
+  width: 100%;
+  height: 220px;
+  font-family: monospace;
+  font-size: 11px;
+  resize: vertical;
+  border: 1px solid rgba(116,152,193,0.18);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(248,251,255,0.9);
+  color: #2c4a6e;
+  outline: none;
+  box-sizing: border-box;
+  line-height: 1.5;
+}
+
+.sandbox-textarea:focus {
+  border-color: rgba(47,111,237,0.3);
+  box-shadow: 0 0 0 3px rgba(47,111,237,0.08);
+}
+
+.sandbox-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sandbox-resp {
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 11px;
+}
+
+.resp-ok {
+  background: rgba(16,185,129,0.06);
+  border: 1px solid rgba(16,185,129,0.16);
+}
+
+.resp-err {
+  background: rgba(239,68,68,0.06);
+  border: 1px solid rgba(239,68,68,0.16);
+}
+
+.resp-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-weight: 700;
+  color: #35506f;
+}
+
+.resp-triggered {
+  color: #2f6fed;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.resp-link {
+  margin-left: auto;
+  color: #2f6fed;
+  font-weight: 600;
+  text-decoration: none;
+  font-size: 11px;
+}
+
+.resp-link:hover { color: #19c6d0; }
+
+.resp-json {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #4a6785;
+  font-family: monospace;
+  font-size: 11px;
+  max-height: 160px;
+  overflow-y: auto;
 }
 </style>
