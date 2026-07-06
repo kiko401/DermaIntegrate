@@ -69,6 +69,7 @@ const multiDbMigrations = [
   [hisPool,  `CREATE TABLE IF NOT EXISTS his_patients (
     id INT AUTO_INCREMENT PRIMARY KEY, source_id VARCHAR(64) NOT NULL UNIQUE,
     name VARCHAR(50) NOT NULL, id_card VARCHAR(18), phone VARCHAR(20),
+    birth_date DATE, gender TINYINT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`, 'his_patients'],
   [hisPool,  `CREATE TABLE IF NOT EXISTS his_records (
