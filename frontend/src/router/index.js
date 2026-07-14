@@ -49,6 +49,18 @@ const router = createRouter({
       component: () => import('../views/admin/Users.vue'),
       meta: { requiresAdmin: true },
     },
+    // ── RAG 子系统路由 ────────────────────────────────────────────────────────
+    {
+      path: '/doctor/chat',
+      name: 'doctor-chat',
+      component: () => import('../views/doctor/ChatWorkspace.vue'),
+    },
+    {
+      path: '/admin/rag/kbs',
+      name: 'admin-rag-kbs',
+      component: () => import('../views/admin/rag/KnowledgeBaseCenter.vue'),
+      meta: { requiresAdmin: true },
+    }
   ],
 })
 
