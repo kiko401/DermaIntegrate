@@ -1,11 +1,11 @@
-version: '3.8'
+# 修复：已删除废弃的 version 字段
 
 services:
   mysql:
     image: mysql:8.0
     container_name: derma-mysql
     restart: unless-stopped
-    mem_limit: 512m  # 内存限制
+    mem_limit: 512m
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: derma_ai
@@ -13,9 +13,7 @@ services:
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      # 挂载初始化 SQL 脚本
       - ../backend-ai/sql/init.sql:/docker-entrypoint-initdb.d/01-init-ai.sql
-    # 兼容旧版驱动与字符集设置
     command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
@@ -27,20 +25,21 @@ services:
     image: qdrant/qdrant:latest
     container_name: derma-qdrant
     restart: unless-stopped
-    mem_limit: 512m  # 内存限制
+    mem_limit: 512m
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
 
-  # Redis 服务 (可选，预留用于未来缓存或会话管理)
   redis:
     image: redis:7
     container_name: derma-redis
     restart: unless-stopped
+    mem_limit: 128m
     ports:
       - "6379:6379"
+    command: redis-server --maxmemory 100mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
 
@@ -50,22 +49,37 @@ services:
       dockerfile: Dockerfile
     container_name: derma-fastapi
     restart: unless-stopped
-    mem_limit: 2g  # FastAPI + PyTorch 需要较多内存
+    mem_limit: 2g
     ports:
       - "8000:8000"
+    env_file:
+      - ../backend-ai/.env
     environment:
-      # 标识容器环境，触发 Python 代码使用容器内网络
       - DOCKER_ENV=true
-      # 容器内网络连接：使用服务名 'mysql' 作为 host
       - DATABASE_URL=mysql+aiomysql://root:root@mysql:3306/derma_ai
-      # HuggingFace 镜像源（解决国内网络问题）
       - HF_ENDPOINT=https://hf-mirror.com
+      - LOG_LEVEL=INFO
+      - ENABLE_KB_RAG=true
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3000}
+      - X_INTERNAL_SECRET=derma_internal_secret
+      - EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+      - VLM_API_KEY=${VLM_API_KEY:-}
+      - VLM_BASE_URL=${VLM_BASE_URL:-https://api.minimaxi.com/v1}
+      - VLM_MODEL=${VLM_MODEL:-MiniMax-M3}
+      - USE_MOCK_VLM=${USE_MOCK_VLM:-true}
+      - INTEGRATION_API_KEY=${INTEGRATION_API_KEY:-}
+      - INTEGRATION_BASE_URL=${INTEGRATION_BASE_URL:-https://api.deepseek.com}
+      - INTEGRATION_MODEL=${INTEGRATION_MODEL:-deepseek-chat}
+      - USE_MOCK_INTEGRATION=${USE_MOCK_INTEGRATION:-false}
+      - OMP_NUM_THREADS=2
+      - TORCH_NUM_THREADS=2
     depends_on:
       mysql:
         condition: service_healthy
       qdrant:
         condition: service_started
-    # 映射运行时生成的静态资源，便于本地调试查看
+      redis:
+        condition: service_started
     volumes:
       - ../backend-ai/static:/app/static
       - ../backend-ai/uploads:/app/uploads

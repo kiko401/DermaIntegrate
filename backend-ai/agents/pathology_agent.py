@@ -3,13 +3,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# ==========================================================
-# 1. 核心架构：疾病注册表
-# ==========================================================
-# 设计说明：
-# 1. 配置驱动：新增病种只需在此处添加配置，无需修改核心路由逻辑。
-# 2. 路由机制：根据病理诊断关键词自动匹配病种，实现多病种平行支持。
-# 3. RAG 对齐：内置纯中文查询模板，确保知识库检索精准。
+# 疾病注册表：key=代码, value={name, keywords, is_malignant, needs_staging, rag_template}
+# 新增病种只需在此处配置，无需修改核心路由逻辑
 DISEASE_REGISTRY = {
     "MEL": {
         "name": "黑色素瘤",
@@ -42,7 +37,7 @@ DISEASE_REGISTRY = {
     "ACK": {
         "name": "日光性角化病",
         "keywords": ["日光性角化", "日光性角化病"],
-        "is_malignant": False,  # 癌前病变
+        "is_malignant": False,
         "needs_staging": False,
         "rag_template": "日光性角化病，病灶位于{region}的诊疗指南"
     },
@@ -56,12 +51,8 @@ DISEASE_REGISTRY = {
 }
 
 
-# ==========================================================
-# 2. 辅助函数：数据清洗与标准化
-# ==========================================================
-
 def _is_truthy(value) -> bool:
-    """将各类输入转换为布尔值。支持字符串（'是'/'yes'）、数字和布尔值。"""
+    """将各类输入转换为布尔值。"""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -83,7 +74,7 @@ def _extract_float(value) -> float:
 
 
 def _map_mutation_status(value) -> str:
-    """标准化基因突变状态：统一为 '突变型' 或 '野生型'。"""
+    """标准化基因突变状态为'突变型'或'野生型'。"""
     if not value:
         return None
     val = str(value).strip().lower()
@@ -95,7 +86,7 @@ def _map_mutation_status(value) -> str:
 
 
 def _map_lymph_node(value) -> str:
-    """标准化淋巴结状态：统一为 '阳性' 或 '阴性'。"""
+    """标准化淋巴结状态为'阳性'或'阴性'。"""
     if not value:
         return None
     val = str(value).strip().lower()
@@ -106,27 +97,17 @@ def _map_lymph_node(value) -> str:
     return str(value)
 
 
-# ==========================================================
-# 3. 核心引擎：病理数据评估与分诊
-# ==========================================================
-
 def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical: str = None) -> dict:
     """
     基于规则引擎评估病理数据，执行疾病分诊、AJCC 分期及治疗建议生成。
 
-    核心逻辑：
-    1. 多病种分诊：匹配疾病注册表，对非黑色素瘤（如 BCC、SCC）走专科路径。
-    2. 黑色素瘤分期：依据 Breslow 厚度与溃疡情况计算 T 分期（AJCC 8th）。
-    3. 跨模态增强：结合临床 Agent 提供的部位信息，增强肢端/黏膜病灶的特异性建议。
-
     Args:
         pathology_json: 包含病理信息的字典（如 breslow_thickness_mm, ulceration 等）。
-        location_from_clinical: 由临床 Agent 提取的病灶部位字符串（用于跨模态判断）。
+        location_from_clinical: 由临床 Agent 提取的病灶部位（用于肢端/黏膜亚型判断）。
 
     Returns:
         dict: 包含 disease_type, t_stage, treatment_recommendations, missing_data_warnings 的报告。
     """
-    # 默认返回：未提供病理数据
     default_result = {
         "disease_type": "MEL",
         "t_stage": "未提供",
@@ -144,19 +125,16 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
         "missing_data_warnings": []
     }
 
-    # ----------------------------------------------------------
-    # 步骤 1：疾病分诊
-    # ----------------------------------------------------------
+    # 疾病分诊：遍历注册表匹配病种关键词
     pathology_diag = str(pathology_json.get("pathology_diagnosis", "") or "").lower()
     matched_disease = None
 
-    # 遍历注册表匹配病种关键词
     for code, config in DISEASE_REGISTRY.items():
         if any(keyword in pathology_diag for keyword in config["keywords"]):
             matched_disease = {"code": code, **config}
             break
 
-    # 若匹配到非黑色素瘤，直接返回专科建议，跳过复杂分期逻辑
+    # 非黑色素瘤病种直接返回专科建议
     if matched_disease and matched_disease["code"] != "MEL":
         result["disease_type"] = matched_disease["code"]
         result["t_stage"] = "无需分期" if not matched_disease["needs_staging"] else "非黑色素瘤分期"
@@ -168,11 +146,7 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
         )
         return result
 
-    # ----------------------------------------------------------
-    # 步骤 2：黑色素瘤临床路径处理
-    # ----------------------------------------------------------
-
-    # 数据提取与清洗
+    # 黑色素瘤分期逻辑（AJCC 8th）
     breslow_raw = pathology_json.get("breslow_thickness_mm")
     ulceration_raw = pathology_json.get("ulceration")
     lymph_node = _map_lymph_node(pathology_json.get("lymph_node_status"))
@@ -180,11 +154,9 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
     nras = _map_mutation_status(pathology_json.get("nras_mutation"))
     ldh_elevated = _is_truthy(pathology_json.get("ldh_level"))
 
-    # T 分期计算 (AJCC 8th)
     if breslow_raw is not None:
         try:
             breslow_val = _extract_float(breslow_raw)
-            # 若未提供溃疡状态，根据临床指南保守处理，此处默认为 True（如果有溃疡则升级）
             has_ulceration = _is_truthy(ulceration_raw) if ulceration_raw is not None else True
 
             if breslow_val <= 1.0:
@@ -207,7 +179,7 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
             t_num = int(re.search(r'T(\d)', t_stage_str).group(1))
             t_suffix = t_stage_str[-1]
 
-            # SLNB (前哨淋巴结活检) 指征：T1b 或更高分期
+            # SLNB 指征：T1b 或更高分期
             if (t_num == 1 and t_suffix == 'b') or t_num >= 2:
                 if lymph_node is None:
                     result["treatment_recommendations"].append(
@@ -233,12 +205,8 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
     if braf is None and nras is None and t_stage_str in ["T3a", "T3b", "T4a", "T4b"]:
         result["missing_data_warnings"].append("晚期患者建议完善BRAF/NRAS基因检测以指导靶向治疗")
 
-    # ----------------------------------------------------------
-    # 步骤 3：跨模态依赖逻辑
-    # ----------------------------------------------------------
-    # 利用临床 Agent 提供的部位信息，增强对特殊亚型的建议
+    # 跨模态依赖：肢端/黏膜亚型增强建议
     if location_from_clinical and isinstance(location_from_clinical, str):
-        # 肢端型判定
         acral_keywords = ["足底", "手掌", "甲下", "足", "手", "趾", "指"]
         if any(keyword in location_from_clinical for keyword in acral_keywords):
             result["treatment_recommendations"].append(
@@ -246,7 +214,6 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
             if result["t_stage"] == "无法分期":
                 result["missing_data_warnings"].append("肢端病灶缺乏病理深度，建议优先活检")
 
-        # 黏膜型判定
         mucosal_keywords = ["口", "鼻", "唇", "生殖", "黏膜", "粘膜", "肛"]
         if any(keyword in location_from_clinical for keyword in mucosal_keywords):
             result["treatment_recommendations"].append(
@@ -254,7 +221,7 @@ def evaluate_pathology_data(pathology_json: dict = None, location_from_clinical:
             if result["t_stage"] == "无法分期":
                 result["missing_data_warnings"].append("黏膜病灶预后极差，强烈建议优先活检明确病理")
 
-    # 兜底：若无任何建议，给出默认随访建议
+    # 兜底建议
     if not result["treatment_recommendations"] and not result["missing_data_warnings"]:
         result["treatment_recommendations"].append("目前病理指标相对局限，建议定期随访观察")
 

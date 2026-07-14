@@ -70,7 +70,7 @@ router.get('/:taskId/stream', (req, res) => {
     res.end();
   });
 
-  // 超时：5 分钟，必须大于 AI 最长推理耗时（约 30s），留足余量
+  // 超时：5 分钟，大于 AI 最长推理耗时，留有余量
   aiRequest.setTimeout(300000, () => {
     console.error(`Stream timeout for task: ${taskId}`);
     res.write(`event: error\ndata: ${JSON.stringify({
