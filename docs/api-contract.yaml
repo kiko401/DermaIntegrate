@@ -1,0 +1,269 @@
+openapi: 3.0.3
+info:
+  title: DermaIntegrate - AI Inference Domain API Contract
+  description: |
+    智能推理域多模态数据契约 v4.0.0。
+    
+    **核心变更 (v4.0)**：
+    - 架构升级：基于任务驱动，废弃原有 image_uid 中心逻辑。
+    - 多病种支持：集成疾病注册表，支持 MEL/BCC/SCC/NEV 等多病种分诊。
+    - 动态管线：SSE 推理流根据输入模态动态触发（仅传病历则仅触发 clinical_done）。
+    
+    应用平台域务必严格按照此契约适配。
+  version: 4.0.0
+  contact:
+    name: AI Inference Team
+
+servers:
+  - url: http://124.222.0.186/ai
+    description: 云端生产环境
+  - url: http://localhost:8000
+    description: 本地开发环境
+
+tags:
+  - name: System
+    description: 系统级接口
+  - name: Task
+    description: 多模态数据上传与任务管理
+  - name: Diagnosis
+    description: AI 辅助诊断流式推理与历史特征查询
+
+paths:
+  # ==========================================
+  # 1. 系统健康检查
+  # ==========================================
+  /health:
+    get:
+      tags: [System]
+      summary: 推理域健康检查
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    type: string
+                    example: "backend-ai"
+                  status:
+                    type: string
+                    example: "UP"
+                  db:
+                    type: string
+                    example: "connected"
+
+  # ==========================================
+  # 2. 多模态数据上传
+  # ==========================================
+  /upload:
+    post:
+      tags: [Task]
+      summary: 上传多模态诊断数据
+      description: |
+        接收多模态数据（影像、病历、病理），全可选但至少需提供一项。
+        返回 `task_id` 作为后续 SSE 流查询的唯一凭据。
+      operationId: uploadData
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 皮肤镜影像 (支持 PNG/JPG/DICOM)
+                clinical_text:
+                  type: string
+                  description: 病历自由文本
+                clinical_json:
+                  type: string
+                  description: 结构化病历 JSON 字符串 (对齐 PAD-UFES-20 标准)
+                lab_json:
+                  type: string
+                  description: 病理与分子数据 JSON 字符串 (包含 Breslow, Ulceration, BRAF 等字段)
+      responses:
+        '202':
+          description: 上传成功，推理任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadIngestResponse'
+        '400':
+          description: 请求参数错误 (未提供任何模态数据)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ==========================================
+  # 3. SSE 流式诊断
+  # ==========================================
+  /stream/{task_id}:
+    get:
+      tags: [Diagnosis]
+      summary: SSE 流式获取 AI 辅助诊断证据链
+      description: |
+        Server-Sent Events 长连接。
+        
+        【SSE 事件流契约】：
+        1. `event: step`      → 推理中间步骤 (如 image_done, clinical_done, pathology_done)，前端需根据收到的动态步级按需渲染。
+        2. `event: result`    → 推理成功终结事件 (包含 status: complete/incomplete)。
+        3. `event: error`     → 推理失败或业务异常。
+        4. `event: heartbeat` → 心跳保活 (data: {})。
+      operationId: streamDiagnosis
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 任务唯一标识
+      responses:
+        '200':
+          description: SSE 流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '404':
+          description: task_id 不存在
+
+  # ==========================================
+  # 4. 历史诊断特征查询
+  # ==========================================
+  /features/{task_id}:
+    get:
+      tags: [Diagnosis]
+      summary: 获取历史诊断特征
+      description: 查询历史任务的 AI 推理结果。特征绑定到 task_id。
+      operationId: getHistoricalFeatures
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 历史特征数据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultEvent'
+        '404':
+          description: 该任务尚无成功的推理结果
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    # ==========================================
+    # 通用响应模型
+    # ==========================================
+    UploadIngestResponse:
+      type: object
+      required: [task_id, status]
+      properties:
+        task_id:
+          type: string
+          description: 全局唯一推理任务标识
+        status:
+          type: string
+          enum: [accepted]
+
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+          example: "INVALID_INPUT"
+        message:
+          type: string
+          example: "至少需要提供一项模态数据"
+
+    # ==========================================
+    # SSE 事件载荷定义
+    # ==========================================
+    StepEvent:
+      type: object
+      description: 推理中间步骤事件 (动态触发)
+      required: [step, message, data]
+      properties:
+        step:
+          type: string
+          enum: [image_done, clinical_done, pathology_done]
+          description: |
+            步骤标识：
+            - image_done: 视觉分析完成 (含热力图 URL)
+            - clinical_done: 病历解析完成
+            - pathology_done: 病理规则引擎完成
+        message:
+          type: string
+          example: "视觉定位与形态学完成"
+        data:
+          type: object
+          description: 步骤详细数据 (根据 step 类型结构不同)
+
+    ResultEvent:
+      type: object
+      description: 最终诊断报告或历史查询结果
+      required: [task_id, risk_level, key_concerns, recommendations, differential, disclaimer, status]
+      properties:
+        task_id:
+          type: string
+        risk_level:
+          type: string
+          example: "高危"
+        key_concerns:
+          type: array
+          description: 核心关注要点
+          items:
+            type: object
+            required: [item, source_id]
+            properties:
+              item:
+                type: string
+                example: "病理分期 T4b，提示肿瘤厚度大于4毫米伴溃疡"
+              source_id:
+                type: string
+                description: 引用来源 ID (如 [AJCC-05], [NCCN-13])，通用建议为 R00
+                example: "[AJCC-05]"
+        recommendations:
+          type: array
+          description: 处置建议
+          items:
+            type: object
+            required: [item, source_id]
+            properties:
+              item:
+                type: string
+                example: "强烈建议行前哨淋巴结活检"
+              source_id:
+                type: string
+                example: "[NCCN-05]"
+        differential:
+          type: array
+          description: 鉴别诊断列表
+          items:
+            type: string
+          example: ["肢端型黑色素瘤", "基底细胞癌"]
+        disclaimer:
+          type: string
+          example: "本系统结果仅供临床参考，不具有最终诊断效力"
+        status:
+          type: string
+          enum: [complete, incomplete]
+          description: |
+            报告完整性标识：
+            - complete: 数据充分，诊断可信。
+            - incomplete: 缺失核心金标准数据（如病理 Breslow），建议补检。

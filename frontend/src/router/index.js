@@ -60,7 +60,13 @@ const router = createRouter({
       name: 'admin-rag-kbs',
       component: () => import('../views/admin/rag/KnowledgeBaseCenter.vue'),
       meta: { requiresAdmin: true },
-    }
+    },
+    {
+      path: '/admin/rag/documents',
+      name: 'admin-rag-documents',
+      component: () => import('../views/admin/rag/DocumentCenter.vue'),
+      meta: { requiresAdmin: true },
+    },
   ],
 })
 

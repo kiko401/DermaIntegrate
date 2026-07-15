@@ -45,6 +45,7 @@ app.use('/api/rag/tasks',     require('./routes/rag_tasks'));
 // /api/rag/chat/completions 使用 ragApiAuth 中间件，不走 Cookie
 app.use('/api/rag',           require('./routes/rag_api'));
 app.use('/api/rag/kbs',       requireAuth,  require('./routes/rag_kb'));
+app.use('/api/rag/documents', requireAuth,  require('./routes/rag_documents')
 
 app.get('/', (req, res) => {
   res.json({

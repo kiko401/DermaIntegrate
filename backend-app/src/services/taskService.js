@@ -104,7 +104,6 @@ async function getDetail(taskId) {
      WHERE t.task_id = ?`,
     [taskId]
   );
-  if (!rows[0]) return null;
 
   const row = rows[0];
   if (row.pacs_record_id) {

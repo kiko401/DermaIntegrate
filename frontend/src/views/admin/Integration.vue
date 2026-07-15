@@ -281,30 +281,30 @@ async function forceReleaseSessions() {
 
 // ── 推送沙箱 ───────────────────────────────────────────────────
 const HIS_EXAMPLE = JSON.stringify({
-  pat_no: 'H-TEST-001', id_no: '310101199001011234',
-  name: '测试患者', phone: '13900139001',
+  pat_no: 'H-ZW-002', id_no: '110101198801015678',
+  name: '张伟', phone: '13800138001',
   visit_info: { dept_name: '皮肤科', cc: '背部色素痣疑似恶变',
     diag: '皮肤恶性黑色素瘤', diag_code: 'C43.5',
-    visit_date: '2026-06-22', type: '门诊' }
+    visit_date: '2026-06-27', type: '门诊' }
 }, null, 2)
 
 const LIS_EXAMPLE = JSON.stringify({
-  specimen_id: 'LIS-TEST-001', patient_id_card: '310101199001011234',
-  patient_name: '测试患者', patient_phone: '13900139001',
-  reported_at: '2026-06-22',
+  specimen_id: 'LIS-ZW-002', patient_id_card: '110101198801015678',
+  patient_name: '张伟', patient_phone: '13800138001',
+  reported_at: '2026-06-27',
   test_results: [{ item: 'LDH', val: '320', unit_str: 'U/L', ref: '120-246', abnormal: true }],
   is_pathology: true,
-  pathology: { report_no: 'PATH-TEST-001', sample_type: '切除活检',
+  pathology: { report_no: 'PATH-ZW-002', sample_type: '切除活检',
     diagnosis_text: '皮肤恶性黑色素瘤', histological_type: '浅表扩散型',
     thickness: 2.1, ulcer: true, mitosis: 4, clark: 4, braf: 'V600E' }
 }, null, 2)
 
 const PACS_EXAMPLE = JSON.stringify({
-  ris_uid: 'PACS-TEST-001', card_no: '310101199001011234',
-  patient_name: '测试患者', patient_phone: '13900139001',
+  ris_uid: 'PACS-ZW-002', card_no: '110101198801015678',
+  patient_name: '张伟', patient_phone: '13800138001',
   img_path: '/pacs/test/image.dcm', thumb_path: '/pacs/test/thumb.jpg',
   modality_code: 'US', body_part: '皮肤', description: '皮肤超声检查',
-  study_date: '2026-06-22'
+  study_date: '2026-06-27'
 }, null, 2)
 
 const pushCards = ref([

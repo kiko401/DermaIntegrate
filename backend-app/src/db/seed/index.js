@@ -35,6 +35,7 @@ async function main() {
   await runSchema('his.sql');
   await runSchema('lis.sql');
   await runSchema('pacs.sql');
+  await runSchema('rag.sql');
 
   // 外部库先入，app 最后做 EMPI reconcile（因为 reconcile 依赖外部库数据）
   await seedHis();
