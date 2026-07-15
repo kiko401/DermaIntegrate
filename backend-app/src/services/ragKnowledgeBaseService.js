@@ -21,13 +21,15 @@ async function list(doctor) {
 }
 
 async function create(doctor, body) {
-  const { name, description, scope_type = 'personal', retrieval_config } = body;
+  const { name, description, scope_type = 'personal', retrieval_config, manager_doctor_id } = body;
   const kb_code = `kb_${nanoid(10)}`;
-  const scope_owner_id = scope_type !== 'public' ? doctor.id : null;
+  // public 时 scope_owner_id 为 null；department/personal 时优先用 body 传入值，缺省用创建者
+  const scope_owner_id = scope_type === 'public' ? null : (body.scope_owner_id ?? doctor.id);
+  const mgr = manager_doctor_id ?? doctor.id;
   const [r] = await db.query(
     `INSERT INTO rag_knowledge_bases (kb_code, name, description, scope_type, scope_owner_id, manager_doctor_id, retrieval_config)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [kb_code, name, description || null, scope_type, scope_owner_id, doctor.id,
+    [kb_code, name, description || null, scope_type, scope_owner_id, mgr,
      retrieval_config ? JSON.stringify(retrieval_config) : null]
   );
   return get(doctor, r.insertId);

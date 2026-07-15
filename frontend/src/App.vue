@@ -25,6 +25,7 @@ const adminNavItems = [
   { path: '/admin/integration',      label: '数据集成' },
   { path: '/admin/users',            label: '用户管理' },
   { path: '/admin/rag/kbs',          label: '知识库' },
+  { path: '/admin/rag/documents',    label: '文档管理' },
 ]
 
 const navItems = computed(() => isAdmin.value ? adminNavItems : doctorNavItems)

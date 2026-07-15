@@ -68,3 +68,58 @@ CREATE TABLE IF NOT EXISTS rag_kb_upgrade_requests (
   FOREIGN KEY (applicant_doctor_id) REFERENCES doctors(id),
   FOREIGN KEY (reviewer_admin_id)   REFERENCES doctors(id)
 );
+
+-- ============================================================
+-- 4. 文档主数据
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS rag_documents (
+                                             id                INT AUTO_INCREMENT PRIMARY KEY,
+                                             doc_code          VARCHAR(64)  NOT NULL UNIQUE,
+    kb_id             INT          NOT NULL,
+    title             VARCHAR(200) NOT NULL,
+    file_name         VARCHAR(200) NOT NULL,
+    file_ext          VARCHAR(20)  NOT NULL,
+    storage_path      VARCHAR(500) NOT NULL,
+    source_type       VARCHAR(20)  NOT NULL DEFAULT 'upload'
+    COMMENT 'upload | import_local | etl | clone | import',
+    mime_type         VARCHAR(100),
+    status            VARCHAR(20)  NOT NULL DEFAULT 'uploaded'
+    COMMENT 'uploaded | parsing | indexed | failed | deleted',
+    active_version_id INT          NULL,
+    uploaded_by       INT          NOT NULL,
+    deleted_at        TIMESTAMP    NULL DEFAULT NULL,
+    created_at        TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (kb_id)        REFERENCES rag_knowledge_bases(id),
+    FOREIGN KEY (uploaded_by)  REFERENCES doctors(id)
+    -- active_version_id FK 在 rag_document_versions 建完后通过 ALTER 补充（循环依赖规避）
+    );
+
+-- ============================================================
+-- 5. 文档版本
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS rag_document_versions (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    doc_id          INT         NOT NULL,
+    version_no      INT         NOT NULL DEFAULT 1,
+    raw_text        LONGTEXT,
+    cleaned_text    LONGTEXT,
+    parser_meta     JSON,
+    chunk_meta      JSON,
+    embedding_model VARCHAR(100) NOT NULL DEFAULT 'BAAI/bge-small-zh-v1.5',
+    status          VARCHAR(20)  NOT NULL DEFAULT 'draft'
+    COMMENT 'draft | active | archived | failed',
+    created_by      INT          NOT NULL,
+    created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_doc_version (doc_id, version_no),
+    FOREIGN KEY (doc_id)     REFERENCES rag_documents(id),
+    FOREIGN KEY (created_by) REFERENCES doctors(id)
+    );
+
+-- 补充循环依赖 FK
+ALTER TABLE rag_documents
+    ADD CONSTRAINT fk_doc_active_version
+        FOREIGN KEY (active_version_id) REFERENCES rag_document_versions(id);
+
