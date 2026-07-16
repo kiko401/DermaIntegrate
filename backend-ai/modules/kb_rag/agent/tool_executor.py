@@ -5,13 +5,13 @@ from typing import Dict, Any, Optional
 from collections import OrderedDict
 from .pandas_agent import analyze as pandas_analyze
 from ..retrieval.retriever import retrieve as kb_lookup
-from ..schemas import AgentTraceObject
+from ..schemas import AgentRunTraceObject
 
 logger = logging.getLogger(__name__)
 
 # 使用 LRU 缓存限制最大容量为 100，防止内存泄漏
 MAX_TRACE_COUNT = 100
-_RUN_TRACES: OrderedDict[str, AgentTraceObject] = OrderedDict()
+_RUN_TRACES: OrderedDict[str, AgentRunTraceObject] = OrderedDict()
 
 
 async def execute_tool(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -21,7 +21,7 @@ async def execute_tool(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if tool_name == "pandas_analyzer":
             result = await asyncio.wait_for(
-                pandas_analyze(args.get("dataset_csv", ""), args.get("query", "")),
+                pandas_analyze(args.get("dataset_ref", ""), args.get("query", "")),
                 timeout=30
             )
             return {"status": "completed", "result": result}
@@ -64,9 +64,14 @@ async def execute_tool(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "failed", "error": str(e)}
 
 
-def init_agent_trace(run_id: str) -> AgentTraceObject:
+def init_agent_trace(run_id: str) -> AgentRunTraceObject:
     """初始化运行轨迹，使用 LRU 策略管理内存"""
-    trace = AgentTraceObject(workflow="langgraph_rag_agent", nodes=[])
+    from datetime import datetime
+    trace = AgentRunTraceObject(
+        workflow="langgraph_rag_agent",
+        nodes=[],
+        created_at=datetime.now().isoformat(),
+    )
     _RUN_TRACES[run_id] = trace
 
     # 如果超过最大容量，移除最老的记录

@@ -1,4 +1,5 @@
 import os
+import asyncio
 import httpx
 import logging
 from typing import List
@@ -7,6 +8,8 @@ from .guardrails import check_input
 from ..retrieval.rewrite_service import rewrite_and_classify
 from ..retrieval.retriever import retrieve
 from .answer_builder import build_response
+from ..rules.matcher import apply_rejection_rules, apply_rule_answers
+from ..rules.store import add_rejection_log
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +19,10 @@ DEFAULT_LLM_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=30.
 
 async def _call_llm(prompt: str, context: str) -> str:
     """调用 LLM 生成回答。"""
-    api_key = os.getenv("INTEGRATION_API_KEY")
-    base_url = os.getenv("INTEGRATION_BASE_URL")
-    model = os.getenv("INTEGRATION_MODEL", "deepseek-v4-flash")
+    from ..config import get_integration_api_key, get_integration_base_url, get_integration_model
+    api_key = get_integration_api_key()
+    base_url = get_integration_base_url()
+    model = get_integration_model()
 
     if not api_key or not base_url:
         return "LLM 服务未配置，无法生成回答。"
@@ -57,6 +61,56 @@ async def run_rag_workflow(req: ChatRequest) -> ChatResponse:
         return build_response(req, f"输入包含违规词汇: {', '.join(hit_words)}", [], "general_chat", 0.0, "blocked",
                               "输入敏感词拦截")
 
+    # 拒绝规则检查
+    rejection_result = apply_rejection_rules(req.question)
+    if rejection_result:
+        if rejection_result.log_only:
+            try:
+                asyncio.create_task(asyncio.to_thread(
+                    add_rejection_log,
+                    rule_id=rejection_result.rule_id,
+                    rule_pattern=rejection_result.rule_pattern,
+                    user_question=req.question,
+                    action="logged",
+                    conversation_id=req.conversation_id,
+                ))
+            except Exception as e:
+                logger.warning(f"Failed to log rejection: {e}")
+        else:
+            try:
+                asyncio.create_task(asyncio.to_thread(
+                    add_rejection_log,
+                    rule_id=rejection_result.rule_id,
+                    rule_pattern=rejection_result.rule_pattern,
+                    user_question=req.question,
+                    action="rejected",
+                    conversation_id=req.conversation_id,
+                ))
+            except Exception as e:
+                logger.warning(f"Failed to log rejection: {e}")
+            return build_response(
+                req,
+                rejection_result.reject_reason,
+                [],
+                "general_chat",
+                0.0,
+                "blocked",
+                f"拒绝规则 rule_id={rejection_result.rule_id}"
+            )
+
+    # 规则回答匹配
+    rule_match_result = apply_rule_answers(req.question)
+    if rule_match_result:
+        return build_response(
+            req,
+            rule_match_result.answer,
+            [],
+            "rule_answer",
+            1.0,
+            "completed",
+            blocked_reason=f"规则回答 rule_id={rule_match_result.rule_id}"
+        )
+
     rewritten_query, route = await rewrite_and_classify(req.question, req.history)
 
     if req.patient_context:
@@ -67,7 +121,8 @@ async def run_rag_workflow(req: ChatRequest) -> ChatResponse:
     if route in ["knowledge_query", "patient_context_query", "agent_workflow"]:
         top_k = req.options.get("top_k", 5)
         threshold = req.options.get("similarity_threshold", 0.35)
-        chunks, is_blocked = await retrieve(rewritten_query, req.kb_ids, top_k, threshold)
+        use_rerank = req.options.get("use_rerank", False)
+        chunks, is_blocked = await retrieve(rewritten_query, req.kb_ids, top_k, threshold, use_rerank=use_rerank)
 
         if is_blocked:
             return build_response(req, "知识库中未找到高置信度依据。", [], route, 0.0, "blocked", "低置信度阻断")

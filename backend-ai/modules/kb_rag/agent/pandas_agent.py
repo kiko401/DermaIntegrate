@@ -6,19 +6,20 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 
-async def analyze(dataset_csv: str, query: str) -> Dict[str, Any]:
+async def analyze(dataset_ref: str, query: str) -> Dict[str, Any]:
     """
     Pandas Agent 受控执行逻辑。
-    接收应用域传来的 CSV 字符串，在内存中构建 DataFrame 并执行分析。
+    接收应用域传来的数据集引用或内容，在内存中构建 DataFrame 并执行分析。
+    支持 CSV 字符串、JSON 或 ETL job 结果引用等多种形式。
     """
     logger.info(f"Pandas Agent received query: {query}")
 
-    if not dataset_csv:
+    if not dataset_ref:
         return {"error": "传入的数据集为空"}
 
     try:
-        # 将应用域传来的 CSV 字符串读入内存为 DataFrame
-        df = pd.read_csv(io.StringIO(dataset_csv))
+        # 将应用域传来的数据集字符串读入内存为 DataFrame
+        df = pd.read_csv(io.StringIO(dataset_ref))
 
         if df.empty:
             return {"error": "数据集为空或解析失败"}

@@ -1,16 +1,19 @@
 import os
 import httpx
 import logging
+import asyncio
 from ..schemas import IngestCallback
 
 logger = logging.getLogger(__name__)
 
 # 5s connect + 15s read，防止回调无限挂起
 CALLBACK_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=15.0)
+MAX_CALLBACK_RETRIES = 3
+CALLBACK_RETRY_DELAY = 1.0  # 秒
 
 
 async def send_task_callback(task_id: int, task_code: str, chunk_count: int, error_message: str = None):
-    """通过 httpx 向主应用发送任务状态回调"""
+    """通过 httpx 向主应用发送任务状态回调，最多重试 3 次"""
     base_url = os.getenv("APP_BASE_URL")
     secret = os.getenv("X_INTERNAL_SECRET")
 
@@ -34,14 +37,25 @@ async def send_task_callback(task_id: int, task_code: str, chunk_count: int, err
         "Content-Type": "application/json"
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT) as client:
-            response = await client.post(callback_url, json=payload.dict(), headers=headers)
-            if response.status_code == 200:
-                logger.info(f"Callback succeeded for task {task_id}")
-            else:
-                logger.error(f"Callback failed for task {task_id}: HTTP {response.status_code} - {response.text}")
-    except httpx.TimeoutException:
-        logger.error(f"Callback timed out for task {task_id} after {CALLBACK_TIMEOUT.connect}s connect + {CALLBACK_TIMEOUT.read}s read.")
-    except Exception as e:
-        logger.error(f"Exception during callback for task {task_id}: {e}", exc_info=True)
+    last_error = None
+    for attempt in range(1, MAX_CALLBACK_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT) as client:
+                response = await client.post(callback_url, json=payload.dict(), headers=headers)
+                if response.status_code == 200:
+                    logger.info(f"Callback succeeded for task {task_id} (attempt {attempt})")
+                    return
+                else:
+                    last_error = f"HTTP {response.status_code} - {response.text}"
+                    logger.warning(f"Callback failed for task {task_id} (attempt {attempt}): {last_error}")
+        except httpx.TimeoutException:
+            last_error = f"timeout after {CALLBACK_TIMEOUT.connect}s connect + {CALLBACK_TIMEOUT.read}s read"
+            logger.warning(f"Callback timed out for task {task_id} (attempt {attempt}): {last_error}")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Callback exception for task {task_id} (attempt {attempt}): {last_error}")
+
+        if attempt < MAX_CALLBACK_RETRIES:
+            await asyncio.sleep(CALLBACK_RETRY_DELAY)
+
+    logger.error(f"Callback exhausted all {MAX_CALLBACK_RETRIES} retries for task {task_id}. Last error: {last_error}")

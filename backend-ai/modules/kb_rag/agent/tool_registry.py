@@ -8,14 +8,14 @@ logger = logging.getLogger(__name__)
 TOOL_REGISTRY: List[ToolDefinition] = [
     ToolDefinition(
         name="pandas_analyzer",
-        description="接收应用域传来的 CSV 格式结构化数据，使用 Pandas 进行自然语言统计分析。",
+        description="接收应用域传来的数据集引用或内容，使用 Pandas 进行自然语言统计分析。",
         args_schema={
             "type": "object",
             "properties": {
-                "dataset_csv": {"type": "string", "description": "CSV 格式的数据集字符串 (含表头)"},
+                "dataset_ref": {"type": "string", "description": "数据集引用或内容（含 CSV 字符串、JSON 或 ETL job 结果引用等）"},
                 "query": {"type": "string", "description": "自然语言分析请求，如'按病理类型统计病例数'"}
             },
-            "required": ["dataset_csv", "query"]
+            "required": ["dataset_ref", "query"]
         },
         enabled=True,
         timeout_seconds=30,

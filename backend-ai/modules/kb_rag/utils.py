@@ -6,6 +6,89 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ========== PHI 二次检测常量 ==========
+# 用于检测用户输入和患者上下文中是否包含患者敏感信息
+# 应用域已做脱敏处理，此处为二次兜底检测
+
+PHI_PATTERNS = [
+    (r"姓名[：:]\s*[^\s，,。]+", "patient_name"),
+    (r"住院号[：:]\s*[A-Z0-9]{6,}", "hospitalization_id"),
+    (r"身份证号[：:]\s*\d{15,18}", "id_card"),
+    (r"手机号[：:]\s*\d{11}", "phone"),
+    (r"地址[：:]\s*[^\s，,。]{5,}", "address"),
+]
+
+
+def detect_phi(text: str) -> list:
+    """检测文本中是否包含 PHI 模式，返回匹配列表。"""
+    detected = []
+    for pattern, phi_type in PHI_PATTERNS:
+        matches = re.findall(pattern, text)
+        if matches:
+            detected.append({"type": phi_type, "matches": matches})
+    return detected
+
+
+def mask_phi(text: str) -> str:
+    """
+    对文本中的 PHI 进行脱敏替换。
+
+    使用从后往前的替换顺序，避免先替换短模式（如"姓名"）
+    导致长模式（如"姓名：张三"）中匹配范围错位。
+    按匹配起始位置倒序排列，确保每次替换不影响后续位置。
+    """
+    # 收集所有匹配：(起始位置, 结束位置, 匹配文本, phi类型)
+    all_matches = []
+    for pattern, phi_type in PHI_PATTERNS:
+        for m in re.finditer(pattern, text):
+            all_matches.append((m.start(), m.end(), m.group(), phi_type))
+
+    if not all_matches:
+        return text
+
+    # 按起始位置从后往前排序
+    all_matches.sort(key=lambda x: x[0], reverse=True)
+
+    # 逐个替换（从后往前不影响前面位置）
+    for start, end, matched_text, phi_type in all_matches:
+        text = text[:start] + f"[{phi_type}]" + text[end:]
+
+    return text
+
+
+# ========== 共享分词器 ==========
+
+def tokenize(text: str) -> list:
+    """
+    中文/英文混合分词器（供检索、BM25、Rerank 共用）。
+
+    - 中文字符：逐字输出
+    - 英文字符序列：按空格/符号切分，转小写
+    - 其他字符：跳过
+    """
+    if not text:
+        return []
+    tokens = []
+    current = ""
+    for ch in text:
+        if '\u4e00' <= ch <= '\u9fff':  # 中文字符
+            if current:
+                tokens.append(current.lower())
+                current = ""
+            tokens.append(ch)
+        elif ch.isalpha() or ch.isdigit():
+            current += ch
+        else:
+            if current:
+                tokens.append(current.lower())
+                current = ""
+    if current:
+        tokens.append(current.lower())
+    return tokens
+
+
+# ========== 工具函数 ==========
+
 def generate_trace_id() -> str:
     return f"rag_trace_{uuid.uuid4().hex[:12]}"
 

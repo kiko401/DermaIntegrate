@@ -31,14 +31,24 @@ async def stream_chat_endpoint(
         similarity_threshold: float = Query(0.35),
         enable_tools: bool = Query(True),
         enable_agent: bool = Query(True),
-        patient_context: Optional[str] = Query(None)  # JSON string of PatientContextObject
+        patient_context: Optional[str] = Query(None),  # JSON string of PatientContextObject
+        history: Optional[str] = Query(None),  # JSON string of List[Dict[str, str]]
 ):
     """SSE 流式问答接口 (GET 方法)"""
 
     # 构造 ChatRequest 对象
+    parsed_history = []
+    if history:
+        try:
+            import json as _json
+            parsed_history = _json.loads(history)
+        except Exception:
+            pass  # 忽略解析错误，视为空历史
+
     req = ChatRequest(
         conversation_id=conversation_id,
         question=question,
+        history=parsed_history,
         kb_ids=kb_ids,
         options={
             "top_k": top_k,

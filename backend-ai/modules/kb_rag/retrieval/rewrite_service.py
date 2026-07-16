@@ -21,9 +21,10 @@ async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
     if not history:
         return query, "knowledge_query"
 
-    api_key = os.getenv("INTEGRATION_API_KEY")
-    base_url = os.getenv("INTEGRATION_BASE_URL")
-    model = os.getenv("INTEGRATION_MODEL", "deepseek-v4-flash")
+    from ..config import get_integration_api_key, get_integration_base_url, get_integration_model
+    api_key = get_integration_api_key()
+    base_url = get_integration_base_url()
+    model = get_integration_model()
 
     if not api_key or not base_url:
         logger.warning("LLM API not configured. Skipping rewrite.")
