@@ -45,7 +45,11 @@ app.use('/api/rag/tasks',     require('./routes/rag_tasks'));
 // /api/rag/chat/completions 使用 ragApiAuth 中间件，不走 Cookie
 app.use('/api/rag',           require('./routes/rag_api'));
 app.use('/api/rag/kbs',       requireAuth,  require('./routes/rag_kb'));
-app.use('/api/rag/documents', requireAuth,  require('./routes/rag_documents')
+app.use('/api/rag/documents', requireAuth,  require('./routes/rag_documents'));
+app.use('/api/rag',           requireAuth,  require('./routes/rag_chat'));
+app.use('/api/rag',           requireAdmin, require('./routes/rag_logs'));
+app.use('/api/rag/config',    requireAdmin, require('./routes/rag_config'));
+app.use('/api/rag',           requireAdmin, require('./routes/rag_debug'));
 
 app.get('/', (req, res) => {
   res.json({
