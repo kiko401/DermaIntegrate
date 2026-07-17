@@ -1,15 +1,22 @@
 import os
 import json
 import logging
+import asyncio
 import httpx
 from typing import Tuple
+from shared.config import REWRITE_CONNECT_TIMEOUT, REWRITE_READ_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
 VALID_ROUTES = ["knowledge_query", "patient_context_query", "tool_call", "general_chat", "agent_workflow"]
 
-# 3s connect + 10s read，防止 rewrite 拖满 OS TCP 超时
-REWRITE_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=10.0)
+# rewrite 超时配置（从 shared/config 统一读取）
+REWRITE_TIMEOUT = httpx.Timeout(
+    connect=REWRITE_CONNECT_TIMEOUT,
+    read=REWRITE_READ_TIMEOUT,
+    write=10.0,
+    pool=10.0,
+)
 
 
 async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
@@ -50,25 +57,30 @@ async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
         {"role": "user", "content": f"历史对话: {json.dumps(history, ensure_ascii=False)}\n当前问题: {query}"}
     ]
 
-    try:
-        async with httpx.AsyncClient(timeout=REWRITE_TIMEOUT) as client:
-            response = await client.post(
+    def _sync_http_call() -> str:
+        """同步 HTTP 调用，封装为 to_thread 可调用的形式"""
+        with httpx.Client(timeout=REWRITE_TIMEOUT) as client:
+            response = client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={"model": model, "messages": messages, "temperature": 0.1}
             )
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+            return response.json()["choices"][0]["message"]["content"]
 
-            # 尝试解析 JSON
-            result = json.loads(content.strip())
-            rewritten = result.get("rewritten_query", query)
-            route = result.get("route", "knowledge_query")
+    try:
+        # 使用 asyncio.to_thread 在线程池中执行同步 HTTP 调用，避免阻塞事件循环
+        content = await asyncio.to_thread(_sync_http_call)
 
-            if route not in VALID_ROUTES:
-                route = "knowledge_query"
+        # 尝试解析 JSON
+        result = json.loads(content.strip())
+        rewritten = result.get("rewritten_query", query)
+        route = result.get("route", "knowledge_query")
 
-            return rewritten, route
+        if route not in VALID_ROUTES:
+            route = "knowledge_query"
+
+        return rewritten, route
 
     except httpx.TimeoutException:
         logger.warning(f"Rewrite timed out after {REWRITE_TIMEOUT.connect}s connect + {REWRITE_TIMEOUT.read}s read. Falling back to default.")

@@ -1,12 +1,13 @@
 import asyncio
 import json
 import logging
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from ..schemas import IngestCallback, ReindexTextRequest
-from ..ingest.vector_store import init_qdrant_collection, delete_kb_index, delete_document_index, delete_kb_index_async, delete_document_index_async, get_qdrant_client, COLLECTION_NAME
+from ..ingest.vector_store import init_qdrant_collection, delete_kb_index, delete_document_index, get_qdrant_client, COLLECTION_NAME
+from qdrant_client.http import models
 from ..ingest.ingestion import reindex_text
 from ..ingest.ingestion import process_and_ingest_document, reindex_document
 
@@ -74,9 +75,10 @@ async def ingest_document_endpoint(
         chunk_size: int = Form(800),
         chunk_overlap: int = Form(120),
         embedding_model: str = Form("BAAI/bge-small-zh-v1.5"),
+        background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
-    文档入库主接口（纯异步）。
+    文档入库主接口（M-10: 改用 BackgroundTasks 确保任务完成）。
 
     进度推送由应用域通过 GET /api/rag/tasks/:taskId/stream 以 SSE 方式完成，
     AI 域不直接对前端 SSE。回调协议见 §5.2.3。
@@ -84,10 +86,10 @@ async def ingest_document_endpoint(
     content = await file.read()
     filename = file.filename
 
-    asyncio.create_task(
-        process_and_ingest_document(
-            content, filename, task_id, task_code, kb_id, doc_id, doc_version_id, chunk_size, chunk_overlap
-        )
+    # M-10: BackgroundTasks 确保任务在后台执行，FastAPI 生命周期内完成
+    background_tasks.add_task(
+        process_and_ingest_document,
+        content, filename, task_id, task_code, kb_id, doc_id, doc_version_id, chunk_size, chunk_overlap
     )
     return {"task_id": task_id, "status": "accepted"}
 
@@ -103,6 +105,7 @@ async def reindex_document_endpoint(
         chunk_size: int = Form(800),
         chunk_overlap: int = Form(120),
         embedding_model: str = Form("BAAI/bge-small-zh-v1.5"),
+        background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
     文档重索引：先删除旧 chunk，再执行重新入库。
@@ -114,33 +117,36 @@ async def reindex_document_endpoint(
     content = await file.read()
     filename = file.filename
 
-    asyncio.create_task(
-        reindex_document(
-            content, filename, task_id, task_code, kb_id, doc_id, doc_version_id, chunk_size, chunk_overlap
-        )
+    # M-10: BackgroundTasks 确保任务在后台执行
+    background_tasks.add_task(
+        reindex_document,
+        content, filename, task_id, task_code, kb_id, doc_id, doc_version_id, chunk_size, chunk_overlap
     )
     return {"task_id": task_id, "status": "accepted"}
 
 
 @router.post("/reindex-text")
-async def reindex_text_endpoint(req: ReindexTextRequest):
+async def reindex_text_endpoint(
+        req: ReindexTextRequest,
+        background_tasks: BackgroundTasks = BackgroundTasks(),
+):
     """
     纯文本重索引（文档版本回滚专用）。
 
     应用域传入历史版本文本，AI 域先删旧版向量，再入新版向量。
     跳过文件解析，直接切分+向量化+写入。
     """
-    asyncio.create_task(
-        reindex_text(
-            text=req.text,
-            task_id=0,
-            task_code="reindex-text",
-            kb_id=req.kb_id,
-            doc_id=req.doc_id,
-            doc_version_id=req.doc_version_id,
-            chunk_size=req.chunk_size,
-            chunk_overlap=req.chunk_overlap,
-        )
+    # M-10: BackgroundTasks
+    background_tasks.add_task(
+        reindex_text,
+        text=req.text,
+        task_id=0,
+        task_code="reindex-text",
+        kb_id=req.kb_id,
+        doc_id=req.doc_id,
+        doc_version_id=req.doc_version_id,
+        chunk_size=req.chunk_size,
+        chunk_overlap=req.chunk_overlap,
     )
     return {"status": "accepted", "doc_id": req.doc_id, "doc_version_id": req.doc_version_id}
 
@@ -150,8 +156,28 @@ async def delete_document_index_endpoint(req: DeleteIndexRequest):
     """删除指定文档或知识库的向量索引"""
     try:
         if req.delete_all:
-            await delete_kb_index_async(req.kb_id)
-            return {"status": "deleted", "deleted_chunk_count": -1}
+            # 先 count 再 delete，保证返回值有意义
+            async def _count_and_delete():
+                client = get_qdrant_client()
+                count_result = client.count(
+                    collection_name=COLLECTION_NAME,
+                    count_filter=models.Filter(
+                        must=[models.FieldCondition(key="kb_id", match=models.MatchValue(value=req.kb_id))]
+                    ),
+                    exact=True,
+                )
+                count = count_result.count
+                client.delete(
+                    collection_name=COLLECTION_NAME,
+                    points_selector=models.FilterSelector(
+                        filter=models.Filter(
+                            must=[models.FieldCondition(key="kb_id", match=models.MatchValue(value=req.kb_id))]
+                        )
+                    )
+                )
+                return count
+            deleted_count = await asyncio.to_thread(_count_and_delete)
+            return {"status": "deleted", "deleted_chunk_count": deleted_count}
         elif req.doc_id is not None:
             from qdrant_client.http import models
             conditions = [models.FieldCondition(key="doc_id", match=models.MatchValue(value=req.doc_id))]
@@ -159,17 +185,24 @@ async def delete_document_index_endpoint(req: DeleteIndexRequest):
                 conditions.append(
                     models.FieldCondition(key="doc_version_id", match=models.MatchValue(value=req.doc_version_id))
                 )
-            # 包装 Qdrant 同步调用，避免阻塞事件循环
-            async def _delete():
+            # 先 count 再 delete，保证返回值有意义
+            async def _count_and_delete():
                 client = get_qdrant_client()
+                count_result = client.count(
+                    collection_name=COLLECTION_NAME,
+                    count_filter=models.Filter(must=conditions),
+                    exact=True,
+                )
+                count = count_result.count
                 client.delete(
                     collection_name=COLLECTION_NAME,
                     points_selector=models.FilterSelector(
                         filter=models.Filter(must=conditions)
                     )
                 )
-            await asyncio.to_thread(_delete)
-            return {"status": "deleted", "deleted_chunk_count": -1}
+                return count
+            deleted_count = await asyncio.to_thread(_count_and_delete)
+            return {"status": "deleted", "deleted_chunk_count": deleted_count}
         else:
             raise HTTPException(status_code=400, detail="doc_id or delete_all=true is required")
     except HTTPException:

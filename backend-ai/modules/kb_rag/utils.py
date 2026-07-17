@@ -90,7 +90,7 @@ def tokenize(text: str) -> list:
 # ========== 工具函数 ==========
 
 def generate_trace_id() -> str:
-    return f"rag_trace_{uuid.uuid4().hex[:12]}"
+    return f"trace_{uuid.uuid4().hex[:12]}"
 
 
 def generate_message_id() -> str:

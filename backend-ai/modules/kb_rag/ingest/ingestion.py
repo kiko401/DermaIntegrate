@@ -60,13 +60,13 @@ async def process_and_ingest_document(
         # ===== 1. Dense Embedding =====
         await push_event("progress",
                          {"task_id": task_id, "stage": "dense_embedding", "progress": 50, "message": "正在生成Dense向量"})
-        vectors = generate_embeddings(texts)
+        vectors = await asyncio.to_thread(generate_embeddings, texts)
 
         # ===== 2. BM25 Sparse Vectors =====
         await push_event("progress",
                          {"task_id": task_id, "stage": "bm25_fitting", "progress": 65, "message": "正在拟合BM25模型"})
-        fit_bm25_on_collection(COLLECTION_NAME, texts)
-        sparse_vectors = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
+        await asyncio.to_thread(fit_bm25_on_collection, COLLECTION_NAME, texts)
+        sparse_vectors = await asyncio.to_thread(generate_sparse_vectors_batch, texts, COLLECTION_NAME)
 
         # ===== 3. 构建 Payloads =====
         await push_event("progress",
@@ -167,13 +167,13 @@ async def reindex_text(
         # Dense Embedding
         await push_event("progress",
                          {"task_id": task_id, "stage": "dense_embedding", "progress": 50, "message": "正在生成Dense向量"})
-        vectors = generate_embeddings(texts)
+        vectors = await asyncio.to_thread(generate_embeddings, texts)
 
         # BM25 Sparse Vectors
         await push_event("progress",
                          {"task_id": task_id, "stage": "bm25_fitting", "progress": 65, "message": "正在拟合BM25模型"})
-        fit_bm25_on_collection(COLLECTION_NAME, texts)
-        sparse_vectors = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
+        await asyncio.to_thread(fit_bm25_on_collection, COLLECTION_NAME, texts)
+        sparse_vectors = await asyncio.to_thread(generate_sparse_vectors_batch, texts, COLLECTION_NAME)
 
         # Payloads
         await push_event("progress",

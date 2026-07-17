@@ -11,10 +11,14 @@ load_dotenv()
 class Settings:
     """应用程序配置类，集中管理数据库、API密钥及功能开关。"""
 
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "mysql+aiomysql://root:root@localhost:3307/derma_ai"
-    )
+    # L-02: 数据库连接，生产环境必须通过 DATABASE_URL 环境变量配置，禁止使用默认凭证
+    _db_url_env = os.getenv("DATABASE_URL", "").strip()
+    if _db_url_env:
+        DATABASE_URL: str = _db_url_env
+    else:
+        logger.warning("DATABASE_URL environment variable is not set. Database connection will fail.")
+        DATABASE_URL: str = ""
+
     UPLOAD_DIR: str = "uploads"
     STATIC_DIR: str = "static"
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -42,6 +46,14 @@ class Settings:
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
     APP_BASE_URL: str = os.getenv("APP_BASE_URL", "")
     X_INTERNAL_SECRET: str = os.getenv("X_INTERNAL_SECRET", "")
+
+    # L-01: CORS 配置，修复空字符串判断
+    # L-11: Qdrant 连接，明确配置层级，不依赖隐式推断
+    _origins_raw = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if not _origins_raw or _origins_raw == "*":
+        ALLOWED_ORIGINS: list = ["*"]
+    else:
+        ALLOWED_ORIGINS: list = [o.strip() for o in _origins_raw.split(",") if o.strip()]
 
 
 settings = Settings()

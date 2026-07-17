@@ -17,11 +17,13 @@ Tags 有效值：MEL、BCC、SCC、NEV、ACK、SEK、T1、T2、T3、T4、高危�
 import os
 import re
 import logging
+import hashlib
 from typing import List, Dict, Tuple, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
 from modules.kb_rag.ingest.embeddings import get_embedder
+from shared.constants import DISEASE_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,11 @@ VALID_TAGS = {"MEL", "BCC", "SCC", "NEV", "ACK", "SEK", "T1", "T2", "T3", "T4", 
 DEFAULT_DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
 # KB-RAG 使用的 collection 名称（与 modules/kb_rag/ingest/vector_store.py 保持一致）
+# L-12 注意：legacy rag/ 与 KB-RAG 使用相同的 collection 名 "rag_documents"，
+# 但分属不同的 Qdrant 实例或命名空间。rag/knowledge_base.py 通过
+# qdrant_client 直接连接传统 RAG Qdrant 服务（端口 6333），而
+# modules/kb_rag/ 通过 qdrant_client 连接 KB-RAG 专属 Qdrant 实例（端口 6334）。
+# 两者在物理上隔离，不会产生数据混淆。
 COLLECTION_NAME = "rag_documents"
 
 
@@ -43,12 +50,14 @@ class RAGKnowledgeBase:
         self.embedder = get_embedder()
         self.vector_size = self.embedder.get_sentence_embedding_dimension()
 
-        qdrant_host = "qdrant" if os.getenv("DOCKER_ENV") == "true" else "localhost"
-        port = int(os.getenv("QDRANT_PORT", "6333"))
+        from shared.config import QDRANT_HOST, QDRANT_PORT, RAG_SCORE_THRESHOLD
+        qdrant_host = QDRANT_HOST if QDRANT_HOST else ("qdrant" if os.getenv("DOCKER_ENV") == "true" else "localhost")
+        port = QDRANT_PORT
         self.client = QdrantClient(host=qdrant_host, port=port)
 
         self.collection_name = COLLECTION_NAME
         self.docs_dir = docs_dir or DEFAULT_DOCS_DIR
+        self.score_threshold = RAG_SCORE_THRESHOLD
 
     def _ensure_collection_exists(self):
         """确保 collection 存在，不存在则创建"""
@@ -116,7 +125,12 @@ class RAGKnowledgeBase:
                 if clean_text:
                     all_texts.append(clean_text)
                     all_payloads.append({
-                        "doc_id": hash(doc_id_str) % (2**31),  # 稳定的数字 ID
+                        # 使用 SHA256 前8字节转大端整数（64位，碰撞概率极低）
+                        # 与 modules/kb_rag/ingest/vector_store.py 的 _chunk_id_to_point_id 保持一致
+                        "doc_id": int.from_bytes(
+                            hashlib.sha256(doc_id_str.encode('utf-8')).digest()[:8],
+                            byteorder='big'
+                        ) & 0x7FFFFFFFFFFFFFFF,
                         "doc_code": doc_code,
                         "doc_id_str": doc_id_str,
                         "kb_id": 0,  # 0 表示默认知识库
@@ -227,9 +241,19 @@ class RAGKnowledgeBase:
         logger.info("RAG Knowledge Base built successfully!")
 
     def _extract_filter_tags(self, clinical_result: dict, pathology_result: dict) -> list:
-        """动态提取检索过滤标签。"""
-        from agents.pathology_agent import DISEASE_REGISTRY
+        """
+        根据临床和病理结果动态提取检索过滤标签。
 
+        根据疾病类型、病灶部位、TNM分期等因素生成过滤标签，
+        用于在向量检索时做标签预过滤，提高检索相关性。
+
+        Args:
+            clinical_result: 临床数据结构（包含病灶部位等）
+            pathology_result: 病理结果结构（包含疾病类型、分期等）
+
+        Returns:
+            list[str]: 过滤标签列表，如 ["MEL", "肢端", "T3", "高危"]
+        """
         filter_tags = ["通用"]
 
         disease_code = pathology_result.get("disease_type", "MEL") if pathology_result else "MEL"
@@ -264,9 +288,20 @@ class RAGKnowledgeBase:
         return list(set(filter_tags))
 
     def _build_multimodal_query(self, image_result: dict, clinical_result: dict, pathology_result: dict) -> str:
-        """利用疾病注册表中的模板构建多模态语义查询语句。"""
-        from agents.pathology_agent import DISEASE_REGISTRY
+        """
+        根据多模态输入构建语义检索查询语句。
 
+        利用疾病注册表中的 rag_template 模板，将疾病类型、病灶部位、
+        病理分期等信息融合为结构化查询文本，提高向量检索的语义匹配度。
+
+        Args:
+            image_result: 视觉特征结果（当前版本未使用）
+            clinical_result: 临床数据结构（包含病灶部位 region 等）
+            pathology_result: 病理结果结构（包含疾病类型、分期等）
+
+        Returns:
+            str: 构建好的语义查询语句，如"肢端型黑色素瘤，病灶位于足底的诊疗指南"
+        """
         disease_code = pathology_result.get("disease_type", "MEL") if pathology_result else "MEL"
         disease_config = DISEASE_REGISTRY.get(disease_code, DISEASE_REGISTRY["MEL"])
 
@@ -293,7 +328,21 @@ class RAGKnowledgeBase:
         return query_text
 
     def retrieve(self, image_result: dict, clinical_result: dict, pathology_result: dict, top_k: int = 3) -> list[str]:
-        """执行知识检索：构建语义查询 -> 提取过滤标签 -> 向量检索 -> 返回格式化片段。"""
+        """
+        执行知识检索：构建语义查询 -> 提取过滤标签 -> 向量检索 -> 返回格式化片段。
+
+        利用多模态输入（图像/临床/病理）动态构建语义查询语句，并通过疾病类型、
+        病灶部位、TNM分期等信息生成过滤标签，在向量检索时做标签预过滤以提高相关性。
+
+        Args:
+            image_result: 视觉特征结果（当前版本用于提取 location、coverage 等元信息）
+            clinical_result: 临床数据结构（包含病灶部位 region 等，用于生成肢端/黏膜等标签）
+            pathology_result: 病理结果结构（包含疾病类型、分期等，用于生成 MEL/BCC/SCC/T1~T4 等标签）
+            top_k: 返回的最相关片段数量，默认为 3
+
+        Returns:
+            list[str]: 格式化后的检索片段列表，格式为 "[文档ID] 文本内容"
+        """
         query_text = self._build_multimodal_query(image_result, clinical_result, pathology_result)
         logger.info(f"RAG Multimodal Query: {query_text}")
 
@@ -313,7 +362,7 @@ class RAGKnowledgeBase:
                 query=query_vector,
                 query_filter=query_filter,
                 limit=top_k,
-                score_threshold=0.3,
+                score_threshold=self.score_threshold,
                 with_payload=True
             )
         except Exception as e:
@@ -322,7 +371,7 @@ class RAGKnowledgeBase:
                 collection_name=self.collection_name,
                 query=query_vector,
                 limit=top_k,
-                score_threshold=0.3,
+                score_threshold=self.score_threshold,
                 with_payload=True
             )
 

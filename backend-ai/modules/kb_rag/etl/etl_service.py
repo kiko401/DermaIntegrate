@@ -1,8 +1,10 @@
 import io
 import logging
 import asyncio
+import httpx
 from datetime import datetime
 from typing import Dict, Optional, List, Tuple
+from shared.config import ETL_CONNECT_TIMEOUT, ETL_READ_TIMEOUT
 from ..ingest.parsers import extract_text_from_file
 from ..ingest.splitters import split_text
 from ..ingest.embeddings import generate_embeddings
@@ -12,9 +14,9 @@ from ..schemas import ETLJobStatus
 
 logger = logging.getLogger(__name__)
 
-# 内存级 ETL 任务状态（上限 200 条，超出后清理最早的已完成任务）
+# 内存级 ETL 任务状态（上限从 shared/config 统一读取）
 _ETL_JOBS: Dict[str, ETLJobStatus] = {}
-_MAX_ETL_JOBS = 200
+from shared.config import MAX_ETL_JOBS as _MAX_ETL_JOBS
 
 
 def _prune_etl_jobs():
@@ -33,10 +35,119 @@ def _prune_etl_jobs():
 
 
 def _clean_text(text: str) -> str:
-    """清洗逻辑：去除多余空格、换行"""
+    """
+    M-13 增强清洗逻辑：
+    1. 去除多余空格、换行
+    2. regex 替换（可配置敏感模式）
+    3. 去除重复行（如连续重复的标题/分隔符）
+    4. 去除空值占位符（null/none/NA/-- 等）
+    """
     import re
+
+    # 1. 去除多余空格、换行
     text = re.sub(r'\s+', ' ', text).strip()
+
+    # 2. 去除空值占位符（不同时打断有效文本）
+    null_placeholders = [r'\bN/A\b', r'\bNA\b', r'\bNULL\b', r'\bNone\b', r'\bnull\b', r'\b--\b', r'\b####\b']
+    for placeholder in null_placeholders:
+        text = re.sub(placeholder, '', text, flags=re.IGNORECASE)
+
+    # 3. 去除连续重复行（如多个空行分隔符 ------- / **** 等）
+    text = re.sub(r'(^[_*\-\s]{3,}\s*$(?:\n[_*\-\s]{3,}\s*$)*)', '', text, flags=re.MULTILINE)
+
+    # 4. 去除句末残余特殊字符
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+
+    # 5. 去除首尾非文字符号（如 #### 标题边框）
+    text = re.sub(r'^[#*=_\-\|~\^]{2,}\s*', '', text)
+    text = re.sub(r'\s*[#*=_\-\|~\^]{2,}$', '', text)
+
+    # 6. 合并孤立单字符（医学文本中无意义）
+    text = re.sub(r'\b(?<!\w)[a-zA-Z\u4e00-\u9fff]\b(?!\w)(?!\d)', '', text)
+
+    # 7. 再次清理多余空格
+    text = re.sub(r'\s+', ' ', text).strip()
+
     return text
+
+
+async def _fetch_from_database(
+    db_type: str,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    table_name: str,
+    sql_query: str,
+    chunk_field: str,
+) -> List[Dict]:
+    """
+    M-13 数据库源 ETL：从 MySQL/PostgreSQL 等数据库拉取数据。
+
+    Args:
+        db_type: mysql | postgresql
+        sql_query: 优先使用原始 SQL；否则基于 table_name 构建 SELECT *
+    Returns:
+        List[Dict] - 每行数据为一个 dict
+    """
+    import json
+
+    if db_type == "mysql":
+        import aiomysql
+        conn = await aiomysql.connect(
+            host=host, port=port, user=user, password=password, db=database,
+            connect_timeout=ETL_CONNECT_TIMEOUT, read_timeout=ETL_READ_TIMEOUT,
+        )
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            if sql_query:
+                await cur.execute(sql_query)
+            else:
+                await cur.execute(f"SELECT * FROM `{table_name}` LIMIT 10000")
+            rows = await cur.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    elif db_type == "postgresql":
+        import asyncpg
+        conn = await asyncpg.connect(
+            host=host, port=port, user=user, password=password, database=database,
+            timeout=ETL_READ_TIMEOUT,
+        )
+        if sql_query:
+            rows = await conn.fetch(sql_query)
+        else:
+            rows = await conn.fetch(f'SELECT * FROM "{table_name}" LIMIT 10000')
+        await conn.close()
+        return [dict(r) for r in rows]
+
+    else:
+        raise ValueError(f"Unsupported db_type: {db_type}. Supported: mysql, postgresql")
+
+
+def _rows_to_text(rows: List[Dict], chunk_field: str) -> str:
+    """
+    将 DB 行列表转换为文本。
+    - 如果指定了 chunk_field（逗号分隔的列名），只拼接这些列
+    - 否则将所有列的 key=value 形式拼接
+    """
+    if not rows:
+        return ""
+
+    if chunk_field:
+        fields = [f.strip() for f in chunk_field.split(",")]
+        parts = []
+        for row in rows:
+            line_parts = [str(row.get(f, "")) for f in fields if row.get(f) is not None]
+            if line_parts:
+                parts.append(" ".join(line_parts))
+    else:
+        parts = []
+        for row in rows:
+            line_parts = [f"{k}={v}" for k, v in row.items() if v is not None]
+            parts.append(" ".join(line_parts))
+
+    return " | ".join(parts)
 
 
 async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
@@ -55,7 +166,7 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
 
         import httpx
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=60)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=ETL_CONNECT_TIMEOUT, read=ETL_READ_TIMEOUT)) as client:
                 resp = await client.get(source_url)
                 resp.raise_for_status()
                 content = resp.content
@@ -68,6 +179,42 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
         asyncio.create_task(
             extract_and_ingest(content, filename, req.kb_id, 0, 0, job_id, job_name)
         )
+
+    elif req.source_type == "database":
+        # M-13: 数据库源 ETL
+        db_config = req.source_config or {}
+        db_type = db_config.get("db_type", "mysql")
+        table_name = db_config.get("table_name", "")
+        sql_query = db_config.get("sql_query", "")
+        chunk_field = db_config.get("chunk_field", "")  # 用于拼文本的 DB 字段
+
+        if not table_name and not sql_query:
+            raise ValueError("source_type=database requires source_config.table_name or source_config.sql_query")
+
+        try:
+            rows_data = await _fetch_from_database(
+                db_type=db_type,
+                host=db_config.get("host", ""),
+                port=int(db_config.get("port", 3306)),
+                user=db_config.get("user", ""),
+                password=db_config.get("password", ""),
+                database=db_config.get("database", ""),
+                table_name=table_name,
+                sql_query=sql_query,
+                chunk_field=chunk_field,
+            )
+            # 将每行数据拼接为文本
+            raw_text = _rows_to_text(rows_data, chunk_field)
+            content = raw_text.encode("utf-8")
+            filename = f"db_{table_name or 'query'}"
+        except Exception as e:
+            logger.error(f"Failed to fetch data from database for ETL: {e}")
+            raise RuntimeError(f"Failed to fetch database: {e}")
+
+        asyncio.create_task(
+            extract_and_ingest(content, filename, req.kb_id, 0, 0, job_id, job_name)
+        )
+
     else:
         # file/csv/excel 由 run_etl_file_endpoint 处理
         raise ValueError(f"source_type={req.source_type} should use /etl/run-file endpoint")
@@ -143,12 +290,14 @@ async def extract_and_ingest(
         job.progress = 100
         job.stage = "completed"
         logger.info(f"ETL job {job_id} succeeded.")
+        return job
 
     except Exception as e:
         logger.error(f"ETL job {job_id} failed: {e}")
         job.status = "failed"
         job.error_message = str(e)
         job.stage = "failed"
+        return job
 
 
 async def get_etl_job_status(job_id: str) -> Optional[Dict]:

@@ -1,54 +1,9 @@
 import logging
 import re
 
-logger = logging.getLogger(__name__)
+from shared.constants import DISEASE_REGISTRY
 
-# 疾病注册表：key=代码, value={name, keywords, is_malignant, needs_staging, rag_template}
-# 新增病种只需在此处配置，无需修改核心路由逻辑
-DISEASE_REGISTRY = {
-    "MEL": {
-        "name": "黑色素瘤",
-        "keywords": ["黑色素瘤", "恶黑", "恶性黑色素瘤"],
-        "is_malignant": True,
-        "needs_staging": True,
-        "rag_template": "{subtype}黑色素瘤，病灶位于{region}，病理分期为{stage}的诊疗指南"
-    },
-    "BCC": {
-        "name": "基底细胞癌",
-        "keywords": ["基底细胞癌", "基底细胞瘤", "bcc"],
-        "is_malignant": True,
-        "needs_staging": False,
-        "rag_template": "基底细胞癌，病灶位于{region}的诊疗指南"
-    },
-    "SCC": {
-        "name": "鳞状细胞癌",
-        "keywords": ["鳞状细胞癌", "鳞癌", "scc"],
-        "is_malignant": True,
-        "needs_staging": False,
-        "rag_template": "鳞状细胞癌，病灶位于{region}的诊疗指南"
-    },
-    "NEV": {
-        "name": "色素痣",
-        "keywords": ["痣", "色素痣", "皮内痣", "交界痣", "混合痣", "蓝痣", "梭形细胞痣"],
-        "is_malignant": False,
-        "needs_staging": False,
-        "rag_template": "色素痣，病灶位于{region}的诊疗指南"
-    },
-    "ACK": {
-        "name": "日光性角化病",
-        "keywords": ["日光性角化", "日光性角化病"],
-        "is_malignant": False,
-        "needs_staging": False,
-        "rag_template": "日光性角化病，病灶位于{region}的诊疗指南"
-    },
-    "SEK": {
-        "name": "脂溢性角化病",
-        "keywords": ["脂溢性角化", "老年斑", "脂溢性角化病"],
-        "is_malignant": False,
-        "needs_staging": False,
-        "rag_template": "脂溢性角化病，病灶位于{region}的诊疗指南"
-    }
-}
+logger = logging.getLogger(__name__)
 
 
 def _is_truthy(value) -> bool:

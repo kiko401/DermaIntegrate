@@ -10,20 +10,21 @@ BM25 稀疏向量结构：
 import re
 import logging
 import math
+import threading
 from typing import List, Dict, Tuple, Optional
 from collections import Counter
 
+from shared.constants import BM25_K1, BM25_B, AVG_DOC_LEN
+
 logger = logging.getLogger(__name__)
 
-# BM25 参数
-BM25_K1 = 1.5   # 词频饱和参数
-BM25_B = 0.75   # 文档长度归一化参数
-AVG_DOC_LEN = 200  # 估算平均文档长度（字符数）
-
-# 全局词表和IDF缓存（按collection隔离）
-_COLLECTION_VOCAB: Dict[str, List[str]] = {}
-_COLLECTION_IDF: Dict[str, Dict[str, float]] = {}
+# BM25 参数（已统一到 shared/constants.py）
 _CACHE_VERSION: Dict[str, int] = {}  # 用于判断是否需要重建索引
+
+# 全局 BM25 缓存（按 collection 隔离，必须初始化为字面量 dict）
+_COLLECTION_VOCAB: Dict[str, List[str]] = {}  # {collection_name: vocab_list}
+_COLLECTION_IDF: Dict[str, Dict[str, float]] = {}  # {collection_name: {token: idf_value}}
+_CACHE_LOCK = threading.RLock()  # M-07: 保护全局缓存的线程安全访问
 
 
 class BM25Vectorizer:
@@ -31,7 +32,7 @@ class BM25Vectorizer:
 
     def __init__(self, collection_name: str):
         self.collection_name = collection_name
-        self.vocab: List[str] = []       # 词表 [token -> index]
+        self.vocab: Dict[str, int] = {}    # M-06: 词表 {token: index}，O(1)查找
         self.idf: Dict[str, float] = {}   # 每个词的 IDF 得分
         self.doc_count = 0
 
@@ -68,8 +69,9 @@ class BM25Vectorizer:
             token_counter.update(tokens)
 
         # 词表 = 出现次数 >= 2 的词（或取 top 50000）
+        # M-06: 使用 dict {token: index} 而非 list，transform 时 O(1) 查找
         frequent_tokens = [t for t, c in token_counter.most_common(50000) if c >= 2]
-        self.vocab = frequent_tokens
+        self.vocab = {t: i for i, t in enumerate(frequent_tokens)}
 
         # 构建 IDF
         self.idf = self._compute_idf(dict(token_to_docs), self.doc_count)
@@ -99,7 +101,7 @@ class BM25Vectorizer:
         for token in set(tokens):
             if token not in self.vocab:
                 continue
-            idx = self.vocab.index(token)
+            idx = self.vocab[token]  # M-06: O(1) dict lookup
             tf = token_freq[token]
             idf = self.idf.get(token, 0.0)
 
@@ -129,16 +131,33 @@ class BM25Vectorizer:
 # ===== 全局缓存访问函数 =====
 
 def get_bm25_vectorizer(collection_name: str) -> BM25Vectorizer:
-    """获取或创建 BM25 向量化器（按 collection 隔离）"""
-    if collection_name not in _COLLECTION_VOCAB or not _COLLECTION_VOCAB[collection_name]:
+    """
+    获取已拟合的 BM25 向量化器（按 collection 隔离）。
+
+    注意：必须先调用 fit_bm25_on_collection 填充缓存，此函数才能返回有效的向量化器。
+    如果 collection 未被拟合（vocab 为空），返回一个带有空词表的向量化器，
+    其 transform() 会返回空结果（不崩溃）。
+    """
+    with _CACHE_LOCK:
+        # 情况1：collection 从未被记录过（未 fit），创建空壳并标记
+        if collection_name not in _COLLECTION_VOCAB:
+            vectorizer = BM25Vectorizer(collection_name)
+            _COLLECTION_VOCAB[collection_name] = {}
+            _COLLECTION_IDF[collection_name] = {}
+            logger.warning(f"BM25 vectorizer for '{collection_name}' requested before fit. Returning empty vectorizer.")
+            return vectorizer
+
+        # 情况2：collection 存在但 vocab 为空（上次 fit 失败或刚创建），返回空壳
+        if not _COLLECTION_VOCAB[collection_name]:
+            logger.warning(f"BM25 vectorizer for '{collection_name}' has empty vocab (not fitted). Returning empty vectorizer.")
+            vectorizer = BM25Vectorizer(collection_name)
+            return vectorizer
+
+        # 情况3：已拟合，从缓存重建
         vectorizer = BM25Vectorizer(collection_name)
-        _COLLECTION_VOCAB[collection_name] = []
+        vectorizer.vocab = _COLLECTION_VOCAB[collection_name]
+        vectorizer.idf = _COLLECTION_IDF.get(collection_name, {})
         return vectorizer
-    # 从缓存重建（有词表但未fit的情况，仅用于transform）
-    vectorizer = BM25Vectorizer(collection_name)
-    vectorizer.vocab = _COLLECTION_VOCAB[collection_name]
-    vectorizer.idf = _COLLECTION_IDF.get(collection_name, {})
-    return vectorizer
 
 
 def fit_bm25_on_collection(collection_name: str, texts: List[str]):
@@ -153,9 +172,10 @@ def fit_bm25_on_collection(collection_name: str, texts: List[str]):
     vectorizer = BM25Vectorizer(collection_name)
     vectorizer.fit(texts)
 
-    _COLLECTION_VOCAB[collection_name] = vectorizer.vocab
-    _COLLECTION_IDF[collection_name] = vectorizer.idf
-    _CACHE_VERSION[collection_name] = _CACHE_VERSION.get(collection_name, 0) + 1
+    with _CACHE_LOCK:
+        _COLLECTION_VOCAB[collection_name] = vectorizer.vocab
+        _COLLECTION_IDF[collection_name] = vectorizer.idf
+        _CACHE_VERSION[collection_name] = _CACHE_VERSION.get(collection_name, 0) + 1
 
     logger.info(f"BM25 fitted for collection '{collection_name}': vocab={len(vectorizer.vocab)}, idf_terms={len(vectorizer.idf)}")
 
@@ -169,13 +189,26 @@ def generate_sparse_vector(text: str, collection_name: str = "rag_documents") ->
         collection_name: 集合名（用于隔离词表）
 
     Returns:
-        (indices, values) - 稀疏向量
+        (indices, values) - 稀疏向量（未 fit 时返回空列表）
+
+    Raises:
+        在 collection 未被 fit 时记录 warning 但不崩溃。
     """
     vectorizer = get_bm25_vectorizer(collection_name)
+    if not vectorizer.vocab:
+        logger.warning(f"generate_sparse_vector called on unfitted collection '{collection_name}'. Returning empty sparse vector.")
+        return [], []
     return vectorizer.transform(text)
 
 
 def generate_sparse_vectors_batch(texts: List[str], collection_name: str = "rag_documents") -> List[Tuple[List[int], List[float]]]:
-    """批量生成 BM25 稀疏向量"""
+    """
+    批量生成 BM25 稀疏向量。
+
+    在 collection 未被 fit 时记录 warning 但不崩溃。
+    """
     vectorizer = get_bm25_vectorizer(collection_name)
+    if not vectorizer.vocab:
+        logger.warning(f"generate_sparse_vectors_batch called on unfitted collection '{collection_name}'. Returning empty results.")
+        return [([], []) for _ in texts]
     return vectorizer.transform_batch(texts)

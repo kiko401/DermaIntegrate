@@ -53,19 +53,9 @@ async def lifespan(app: FastAPI):
 
     rag_init_task = asyncio.create_task(asyncio.to_thread(_init_rag))
 
-    # 3. KB-RAG 初始化：同样在后台线程池运行
-    if ENABLE_KB_RAG:
-        def _init_kb_rag():
-            try:
-                from modules.kb_rag.ingest.vector_store import init_qdrant_collection
-                from modules.kb_rag.ingest.embeddings import get_embedder
-                init_qdrant_collection()
-                get_embedder()
-                logger.info("KB-RAG background init completed.")
-            except Exception as e:
-                logger.error(f"KB-RAG background init failed: {e}")
-
-        asyncio.create_task(asyncio.to_thread(_init_kb_rag))
+    # 3. KB-RAG 初始化由 modules.kb_rag.__init__.py 的 startup_event 统一处理
+    #    （register_kb_rag_module 在下面调用，startup_event 在 startup 时执行）
+    #    此处无需重复初始化，避免双重初始化竞态
 
     # 4. 启动清理任务（异步，无阻塞）
     cleanup_task = asyncio.create_task(cleanup_loop())
@@ -98,7 +88,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

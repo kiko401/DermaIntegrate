@@ -31,6 +31,7 @@ async def stream_chat_endpoint(
         similarity_threshold: float = Query(0.35),
         enable_tools: bool = Query(True),
         enable_agent: bool = Query(True),
+        use_rerank: bool = Query(False),
         patient_context: Optional[str] = Query(None),  # JSON string of PatientContextObject
         history: Optional[str] = Query(None),  # JSON string of List[Dict[str, str]]
 ):
@@ -43,7 +44,18 @@ async def stream_chat_endpoint(
             import json as _json
             parsed_history = _json.loads(history)
         except Exception:
-            pass  # 忽略解析错误，视为空历史
+            logger.warning(f"Failed to parse history JSON for conversation {conversation_id}, ignoring.")
+
+    # 解析 patient_context（JSON 字符串）
+    parsed_patient_context = None
+    if patient_context:
+        try:
+            parsed_patient_context = PatientContextObject.model_validate_json(patient_context)
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail=f"patient_context JSON 格式错误: {patient_context[:100]}"
+            )
 
     req = ChatRequest(
         conversation_id=conversation_id,
@@ -55,17 +67,22 @@ async def stream_chat_endpoint(
             "similarity_threshold": similarity_threshold,
             "stream": True,
             "enable_tools": enable_tools,
-            "enable_agent": enable_agent
-        }
+            "enable_agent": enable_agent,
+            "use_rerank": use_rerank,
+        },
+        patient_context=parsed_patient_context,
     )
 
-    if patient_context:
+    async def error_safe_stream():
+        """包装流式生成器，捕获异常并以 SSE 错误事件返回"""
         try:
-            req.patient_context = PatientContextObject.parse_raw(patient_context)
-        except Exception:
-            pass  # 忽略解析错误，视为无上下文
+            async for chunk in stream_rag_workflow(req):
+                yield chunk
+        except Exception as e:
+            logger.error(f"Stream error for conversation {conversation_id}: {e}", exc_info=True)
+            yield f"event: error\ndata: {e}\n\n"
 
     return StreamingResponse(
-        stream_rag_workflow(req),
+        error_safe_stream(),
         media_type="text/event-stream"
     )

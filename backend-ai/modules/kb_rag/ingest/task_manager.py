@@ -2,12 +2,21 @@ import os
 import httpx
 import logging
 import asyncio
+from shared.config import (
+    CALLBACK_CONNECT_TIMEOUT, CALLBACK_READ_TIMEOUT,
+    CALLBACK_WRITE_TIMEOUT, CALLBACK_POOL_TIMEOUT,
+)
 from ..schemas import IngestCallback
 
 logger = logging.getLogger(__name__)
 
-# 5s connect + 15s read，防止回调无限挂起
-CALLBACK_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=15.0)
+# 回调超时配置（从 shared/config 统一读取）
+CALLBACK_TIMEOUT = httpx.Timeout(
+    connect=CALLBACK_CONNECT_TIMEOUT,
+    read=CALLBACK_READ_TIMEOUT,
+    write=CALLBACK_WRITE_TIMEOUT,
+    pool=CALLBACK_POOL_TIMEOUT,
+)
 MAX_CALLBACK_RETRIES = 3
 CALLBACK_RETRY_DELAY = 1.0  # 秒
 
@@ -41,7 +50,7 @@ async def send_task_callback(task_id: int, task_code: str, chunk_count: int, err
     for attempt in range(1, MAX_CALLBACK_RETRIES + 1):
         try:
             async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT) as client:
-                response = await client.post(callback_url, json=payload.dict(), headers=headers)
+                response = await client.post(callback_url, json=payload.model_dump(), headers=headers)
                 if response.status_code == 200:
                     logger.info(f"Callback succeeded for task {task_id} (attempt {attempt})")
                     return
@@ -58,4 +67,6 @@ async def send_task_callback(task_id: int, task_code: str, chunk_count: int, err
         if attempt < MAX_CALLBACK_RETRIES:
             await asyncio.sleep(CALLBACK_RETRY_DELAY)
 
+    # M-15: 回调失败时抛出异常，不再静默忽略
     logger.error(f"Callback exhausted all {MAX_CALLBACK_RETRIES} retries for task {task_id}. Last error: {last_error}")
+    raise RuntimeError(f"Task callback failed for task_id={task_id} after {MAX_CALLBACK_RETRIES} retries: {last_error}")

@@ -29,12 +29,12 @@ from typing import TypedDict, Optional, List, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 from ..schemas import (
     ChatRequest, ChatResponse, ToolCallObject, AgentTraceObject,
-    RiskHighlightObject
+    RiskHighlightObject, PatientContextObject
 )
 from ..generation.guardrails import check_input, extract_risk_highlights
 from ..retrieval.rewrite_service import rewrite_and_classify
 from ..retrieval.retriever import retrieve
-from ..generation.chat_service import _call_llm
+from ..generation.answer_builder import _call_llm
 from ..generation.answer_builder import build_response
 from .tool_executor import execute_tool, init_agent_trace, update_agent_trace, get_agent_run_trace
 from ..rules.matcher import apply_rejection_rules, apply_rule_answers
@@ -44,7 +44,7 @@ from ..utils import detect_phi, mask_phi
 logger = logging.getLogger(__name__)
 
 # 路由类型白名单
-VALID_ROUTES = ["knowledge_query", "patient_context_query", "tool_call", "general_chat", "agent_workflow"]
+VALID_ROUTES = ["knowledge_query", "patient_context_query", "tool_call", "general_chat", "agent_workflow", "rule_answer"]
 
 
 class AgentState(TypedDict):
@@ -136,13 +136,12 @@ async def rejection_check(state: AgentState) -> AgentState:
     """
     req = state["req"]
 
-    rejection_result = apply_rejection_rules(req.question)
+    rejection_result = await apply_rejection_rules(req.question)
     if rejection_result:
         if rejection_result.log_only:
             # 仅记录日志，不阻断流程
             try:
-                asyncio.create_task(asyncio.to_thread(
-                    add_rejection_log,
+                asyncio.create_task(add_rejection_log(
                     rule_id=rejection_result.rule_id,
                     rule_pattern=rejection_result.rule_pattern,
                     user_question=req.question,
@@ -154,8 +153,7 @@ async def rejection_check(state: AgentState) -> AgentState:
         else:
             # 拒绝回答
             try:
-                asyncio.create_task(asyncio.to_thread(
-                    add_rejection_log,
+                asyncio.create_task(add_rejection_log(
                     rule_id=rejection_result.rule_id,
                     rule_pattern=rejection_result.rule_pattern,
                     user_question=req.question,
@@ -188,8 +186,9 @@ async def rule_match(state: AgentState) -> AgentState:
     """
     req = state["req"]
 
-    rule_result = apply_rule_answers(req.question)
+    rule_result = await apply_rule_answers(req.question)
     if rule_result:
+        state["route"] = "rule_answer"  # 必须在 build_response 之前设置，供后续条件边判断
         state["response"] = build_response(
             req,
             rule_result.answer,
@@ -197,7 +196,6 @@ async def rule_match(state: AgentState) -> AgentState:
             "rule_answer",
             1.0,
             "completed",
-            blocked_reason=f"规则回答 rule_id={rule_result.rule_id}"
         )
         state["is_blocked"] = True
         logger.info(f"Rule answer matched: rule_id={rule_result.rule_id}")
@@ -341,11 +339,17 @@ async def tool_decision(state: AgentState) -> AgentState:
     exec_result = await execute_tool(tool_name, args)
 
     # 构建工具调用对象
+    exec_status = exec_result.get("status", "failed")
+    exec_result_str = exec_result.get("result")
+    output_summary: str | None = None
+    if exec_status == "completed" and exec_result_str is not None:
+        output_summary = str(exec_result_str)[:200]
+    # status=failed 时 output_summary 固定为 None（文档规定）
     state["tool_call_obj"] = ToolCallObject(
         tool_name=tool_name,
         arguments=args,
-        status=exec_result.get("status", "failed"),
-        output_summary=str(exec_result.get("result", exec_result.get("error", "")))[:200]
+        status=exec_status,
+        output_summary=output_summary,
     )
     state["tool_result"] = exec_result
 
@@ -488,16 +492,18 @@ workflow.add_edge("rejection_check", "rule_match")
 workflow.add_edge("rule_match", "intent_route")
 workflow.add_edge("intent_route", "rewrite")
 
-# rewrite 之后根据路由分支
+# rewrite 之后根据路由分支（is_blocked 优先，确保规则命中等阻断场景直接到达终点）
 workflow.add_conditional_edges(
     "rewrite",
-    lambda state: state["route"],
+    lambda state: "blocked" if state.get("is_blocked") else state["route"],
     {
+        "blocked": "response_finalize",  # 被阻断直接结束
         "knowledge_query": "retrieval",
         "patient_context_query": "retrieval",
         "tool_call": "tool_decision",
         "general_chat": "answer_builder",
         "agent_workflow": "retrieval",  # agent_workflow 也先检索
+        "rule_answer": "response_finalize",  # 规则命中的直接走响应封装（is_blocked=True，response已构建）
     }
 )
 
@@ -620,8 +626,6 @@ async def run_agent_workflow_simple(
     Returns:
         ChatResponse: 完整的响应对象
     """
-    from ..schemas import PatientContextObject
-
     req = ChatRequest(
         conversation_id=0,
         question=question,

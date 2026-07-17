@@ -52,7 +52,11 @@ class AIFeature(Base):
 
 
 # 数据库连接配置
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,  # 取连接前探测是否存活，防止 MySQL 8h 空闲断连
+)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

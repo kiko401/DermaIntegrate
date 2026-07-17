@@ -18,16 +18,13 @@ from collections import Counter
 from ..ingest.embeddings import get_embedder
 from ..ingest.vector_store import get_qdrant_client, COLLECTION_NAME, DENSE_VECTOR_NAME
 from qdrant_client.http import models
+from shared.constants import BM25_K1, BM25_B, AVG_DOC_LEN
 
 from .reranker import rerank
 
 logger = logging.getLogger(__name__)
 
-# BM25 参数（与bm25.py保持一致）
-BM25_K1 = 1.5
-BM25_B = 0.75
-AVG_DOC_LEN = 200
-
+# BM25 参数（已统一到 shared/constants.py）
 # RRF 融合参数
 RRF_K = 60  # 标准值
 
@@ -207,7 +204,7 @@ async def retrieve(
         fetch_limit = top_k * 4 if use_hybrid else top_k
 
         # ===== 1. Dense 向量检索（Qdrant 同步调用包装为异步）=====
-        async def _search_dense():
+        def _search_dense():
             client = get_qdrant_client()
             return client.query_points(
                 collection_name=COLLECTION_NAME,
@@ -302,15 +299,12 @@ async def retrieve(
             final_chunks = fused_chunks[:top_k]
 
         # ===== 4. 低置信度阻断 =====
-        max_dense_score = max((c.get("dense_score", 0) for c in final_chunks), default=0)
-        if max_dense_score < threshold and not use_hybrid:
-            logger.warning(f"Retrieval blocked: max_dense_score={max_dense_score} < threshold={threshold}")
-            return [], True
-
-        # 混合模式下用归一化 dense 分数判断
+        # 使用归一化 dense 分数（0~1）判断，兼容 hybrid 和 dense-only 两种模式
+        # dense_norm 已在融合阶段计算（dense_score / max_dense），保证跨模式可比性
         max_norm = max((c.get("dense_norm", 0) for c in final_chunks), default=0)
-        if use_hybrid and max_norm < threshold:
-            logger.warning(f"Hybrid retrieval blocked: max_norm={max_norm} < threshold={threshold}")
+        if max_norm < threshold:
+            mode = "hybrid" if use_hybrid else "dense"
+            logger.warning(f"Retrieval blocked: {mode} max_norm={max_norm:.4f} < threshold={threshold}")
             return [], True
 
         return final_chunks, False

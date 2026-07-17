@@ -24,10 +24,18 @@ class LesionExtractor:
                 sess_options = ort.SessionOptions()
                 sess_options.intra_op_num_threads = 2
                 sess_options.inter_op_num_threads = 1
+                # L-13: 优先使用 CUDA provider（GPU 加速），若不可用则回退到 CPU
+                available_providers = ort.get_available_providers()
+                if 'CUDAExecutionProvider' in available_providers:
+                    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+                    logger.info("Using CUDAExecutionProvider for ONNX inference.")
+                else:
+                    providers = ['CPUExecutionProvider']
+                    logger.info("CUDA not available, using CPUExecutionProvider.")
                 self.session = ort.InferenceSession(
                     model_path,
                     sess_options=sess_options,
-                    providers=['CPUExecutionProvider']
+                    providers=providers
                 )
                 logger.info(f"Successfully loaded ONNX model from {model_path}")
             except Exception as e:

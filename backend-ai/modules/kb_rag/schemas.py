@@ -82,6 +82,8 @@ class ChatRequest(BaseModel):
                 "enable_tools": True,
                 "enable_agent": True,
                 "use_rerank": False,
+                "max_length": 0,
+                "max_paragraphs": 0,
             }
         else:
             # 深度合并：用户提供的值覆盖默认值
@@ -92,6 +94,9 @@ class ChatRequest(BaseModel):
                 "enable_tools": True,
                 "enable_agent": True,
                 "use_rerank": False,
+                # M-06: 回答长度限制
+                "max_length": 0,        # 0=不限制，最大字符数
+                "max_paragraphs": 0,   # 0=不限制，最大段落数
             }
             defaults.update(self.options)
             self.options = defaults
@@ -215,3 +220,11 @@ class CloneKbIndexRequest(BaseModel):
     """知识库克隆请求，将源知识库的向量复制到目标知识库。"""
     source_kb_id: int
     target_kb_id: int
+
+
+class VectorOptimizeRequest(BaseModel):
+    """向量优化请求，对指定 kb_id 执行清理优化操作。"""
+    kb_id: int
+    remove_duplicates: bool = False
+    rebuild_bm25_idf: bool = False
+    compact_collection: bool = False

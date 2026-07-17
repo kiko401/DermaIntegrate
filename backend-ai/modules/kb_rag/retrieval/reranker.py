@@ -12,6 +12,7 @@
 rerank_score = 0.6 * dense_norm + 0.3 * bm25_norm + 0.1 * keyword_hit_ratio
 """
 import logging
+import copy
 from typing import List, Dict
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ def rerank(query: str, chunks: List[Dict], top_k: int = 5) -> List[Dict]:
 
     Returns:
         重排后的 chunk 列表（score 字段替换为 rerank_score）
+        注意：返回新列表，不修改原始输入列表（M-08）
     """
     if not chunks:
         return []
@@ -50,11 +52,14 @@ def rerank(query: str, chunks: List[Dict], top_k: int = 5) -> List[Dict]:
 
     scored_chunks = []
     for c in chunks:
-        dense_norm = c.get("dense_norm", 0.0)
-        bm25_raw = c.get("bm25_score", 0.0)
+        # M-08: 深拷贝避免修改原始输入列表
+        chunk_copy = copy.deepcopy(c)
+
+        dense_norm = chunk_copy.get("dense_norm", 0.0)
+        bm25_raw = chunk_copy.get("bm25_score", 0.0)
         bm25_norm = bm25_raw / max_bm25
 
-        text_tokens = set(_tokenize_for_rerank(c.get("text", "")))
+        text_tokens = set(_tokenize_for_rerank(chunk_copy.get("text", "")))
         keyword_hits = len(query_tokens & text_tokens)
         # 命中密度：命中词数 / query 总词数（避免 query 长度影响）
         total_query_tokens = len(query_tokens) if query_tokens else 1
@@ -66,10 +71,10 @@ def rerank(query: str, chunks: List[Dict], top_k: int = 5) -> List[Dict]:
             + RERANK_WEIGHT_KEYWORD * keyword_hit_ratio
         )
 
-        c["score"] = round(rerank_score, 6)
-        c["rerank_score"] = round(rerank_score, 6)
-        c["keyword_hits"] = keyword_hits
-        scored_chunks.append(c)
+        chunk_copy["score"] = round(rerank_score, 6)
+        chunk_copy["rerank_score"] = round(rerank_score, 6)
+        chunk_copy["keyword_hits"] = keyword_hits
+        scored_chunks.append(chunk_copy)
 
     scored_chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
     logger.info(f"Reranked {len(scored_chunks)} chunks: top score={scored_chunks[0]['rerank_score']:.4f}")

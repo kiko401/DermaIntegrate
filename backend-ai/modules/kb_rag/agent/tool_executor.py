@@ -27,7 +27,11 @@ async def execute_tool(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "completed", "result": result}
 
         elif tool_name == "kb_lookup_debug":
-            chunks, is_blocked = await kb_lookup(args.get("query"), args.get("kb_ids", []))
+            query = args.get("query", "")
+            kb_ids = args.get("kb_ids", [])
+            top_k = args.get("top_k", 5)
+            similarity_threshold = args.get("similarity_threshold", 0.35)
+            chunks, is_blocked = await kb_lookup(query, kb_ids, top_k=top_k, threshold=similarity_threshold)
             return {"status": "completed", "result": {"chunks": chunks, "is_blocked": is_blocked}}
 
         elif tool_name == "clinical_context_summarizer":
@@ -82,10 +86,12 @@ def init_agent_trace(run_id: str) -> AgentRunTraceObject:
 
 
 def update_agent_trace(run_id: str, node_name: str, status: str):
-    if run_id in _RUN_TRACES:
-        _RUN_TRACES[run_id].nodes.append({"name": node_name, "status": status})
+    if run_id not in _RUN_TRACES:
+        logger.warning(f"update_agent_trace: run_id={run_id} not found in traces. Initializing.")
+        init_agent_trace(run_id)
+    _RUN_TRACES[run_id].nodes.append({"name": node_name, "status": status})
 
 
 async def get_agent_run_trace(run_id: str) -> Optional[Dict]:
     trace = _RUN_TRACES.get(run_id)
-    return trace.dict() if trace else None
+    return trace.model_dump() if trace else None

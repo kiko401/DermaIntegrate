@@ -8,9 +8,16 @@ def split_text(text: str, chunk_size: int, chunk_overlap: int, doc_id: int, doc_
     """
     滑动窗口切分文本。
     强制生成 chunk_id 格式: {doc_id}_{doc_version_id}_{chunk_index(补零三位)}
+
+    M-13: chunk_overlap >= chunk_size 时自动修正为 chunk_size // 2
     """
     if not text:
         return []
+
+    # M-13: 防止步进 <= 0 导致无限循环
+    if chunk_overlap >= chunk_size:
+        logger.warning(f"chunk_overlap ({chunk_overlap}) >= chunk_size ({chunk_size}), auto-correcting to {chunk_size // 2}")
+        chunk_overlap = chunk_size // 2
 
     chunks = []
     start = 0

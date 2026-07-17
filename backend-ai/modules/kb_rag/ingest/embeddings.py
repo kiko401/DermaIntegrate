@@ -21,7 +21,13 @@ def get_embedder():
             raise
     return _embedder_instance
 
-def generate_embeddings(texts: List[str]) -> List[List[float]]:
-    """生成向量"""
+def generate_embeddings(texts: List[str], batch_size: int = 32) -> List[List[float]]:
+    """
+    生成向量
+
+    Args:
+        texts: 文本列表
+        batch_size: 批处理大小，控制每批发送的文本数量，避免大文档集内存溢出
+    """
     embedder = get_embedder()
-    return embedder.encode(texts, normalize_embeddings=True).tolist()
+    return embedder.encode(texts, batch_size=batch_size, normalize_embeddings=True).tolist()

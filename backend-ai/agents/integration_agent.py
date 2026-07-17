@@ -4,6 +4,8 @@ from pathlib import Path
 from openai import OpenAI
 import json_repair
 from config import settings
+from shared.constants import INTERNAL_SOURCE_ID
+from shared.config import LLM_READ_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +103,8 @@ def run_integration_agent(
         return {
             "task_id": task_id,
             "risk_level": risk_msg,
-            "key_concerns": [{"item": concern_msg, "source_id": "R00"}],
-            "recommendations": [{"item": "建议优先完善相关检查或寻求第二意见", "source_id": "R00"}],
+            "key_concerns": [{"item": concern_msg, "source_id": INTERNAL_SOURCE_ID}],
+            "recommendations": [{"item": "建议优先完善相关检查或寻求第二意见", "source_id": INTERNAL_SOURCE_ID}],
             "differential": ["推理服务暂不可用"],
             "disclaimer": "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断",
             "status": "incomplete"
@@ -126,8 +128,8 @@ def run_integration_agent(
         return {
             "task_id": task_id,
             "risk_level": risk_msg,
-            "key_concerns": [{"item": concern_text, "source_id": "R00"}],
-            "recommendations": [{"item": "请完善相关检查 (Mock建议)", "source_id": "R00"}],
+            "key_concerns": [{"item": concern_text, "source_id": INTERNAL_SOURCE_ID}],
+            "recommendations": [{"item": "请完善相关检查 (Mock建议)", "source_id": INTERNAL_SOURCE_ID}],
             "differential": ["Mock黑色素瘤", "Mock色素痣"],
             "disclaimer": "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断",
             "status": "complete" if is_complete else "incomplete"
@@ -147,7 +149,7 @@ def run_integration_agent(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             response_format={"type": "json_object"},
-            timeout=15.0
+            timeout=LLM_READ_TIMEOUT
         )
 
         result_str = response.choices[0].message.content
@@ -169,8 +171,8 @@ def run_integration_agent(
         final_data = {
             "task_id": task_id,
             "risk_level": parsed_data.get("risk_level", "数据不足无法评估"),
-            "key_concerns": parsed_data.get("key_concerns", [{"item": "未提取到关注要点", "source_id": "R00"}]),
-            "recommendations": parsed_data.get("recommendations", [{"item": "请结合临床判断", "source_id": "R00"}]),
+            "key_concerns": parsed_data.get("key_concerns", [{"item": "未提取到关注要点", "source_id": INTERNAL_SOURCE_ID}]),
+            "recommendations": parsed_data.get("recommendations", [{"item": "请结合临床判断", "source_id": INTERNAL_SOURCE_ID}]),
             "differential": parsed_data.get("differential", ["未知"]),
             "disclaimer": parsed_data.get("disclaimer",
                                           "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断"),

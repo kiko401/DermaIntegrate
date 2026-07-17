@@ -6,40 +6,22 @@ import logging
 import asyncio
 import threading
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Optional
+
+from api.schemas import SSEResultEvent
 
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from config import settings
+from shared.config import TASK_TIMEOUT_SECONDS
 from models.database import get_db, ImageResource as ImageDB, AITask as TaskDB, AIFeature as FeatureDB, async_session
 from pipeline.runner import run_pipeline_with_cancel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Diagnosis"])
-
-
-class KeyConcern(BaseModel):
-    item: str
-    source_id: str
-
-
-class Recommendation(BaseModel):
-    item: str
-    source_id: str
-
-
-class SSEResultEvent(BaseModel):
-    task_id: str
-    risk_level: str
-    key_concerns: List[KeyConcern]
-    recommendations: List[Recommendation]
-    differential: List[str]
-    disclaimer: str
-    status: str = "complete"
 
 
 @router.get("/stream/{task_id}")
@@ -67,7 +49,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
     task.status = "running"
     await db.commit()
 
-    rag_kb = request.app.state.rag_kb
+    rag_kb = getattr(request.app.state, "rag_kb", None)
 
     async def event_generator():
         cancel_event = threading.Event()
@@ -84,6 +66,10 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
         )
         inference_thread.start()
 
+        # M-16: 任务超时保护（从 shared/config 统一读取）
+        _task_timeout = TASK_TIMEOUT_SECONDS
+        last_event_time = asyncio.get_event_loop().time()
+
         try:
             while True:
                 if await request.is_disconnected():
@@ -92,12 +78,30 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                     break
 
                 try:
-                    event_type, data = queue.get_nowait()
+                    # M-16: 带超时的 queue.get()，超时说明推理线程卡住
+                    event_type, data = await asyncio.wait_for(
+                        queue.get(), timeout=_task_timeout
+                    )
+                    last_event_time = asyncio.get_event_loop().time()
 
                     if event_type == "step":
-                        yield f"event: step\ndata: {json.dumps(data)}\n\n"
+                        # 发送 progress 事件（文档定义格式）
+                        step_name = data.get("step", "")
+                        stage_map = {
+                            "image_done": ("vlm", 30),
+                            "clinical_done": ("clinical", 50),
+                            "pathology_done": ("pathology", 70),
+                            "final": ("integration", 90),
+                        }
+                        if step_name in stage_map:
+                            stage, percent = stage_map[step_name]
+                            yield f"event: progress\ndata: {json.dumps({'stage': stage, 'percent': percent})}\n\n"
+                        # 发送 step 事件（仅包含 step 和 message 字段，与文档一致）
+                        yield f"event: step\ndata: {json.dumps({'step': step_name, 'message': data.get('message', '')})}\n\n"
                     elif event_type == "error":
-                        yield f"event: error\ndata: {json.dumps(data)}\n\n"
+                        # 文档定义 error 事件格式为 {error: string}，转换 runner 发出的 {error_code, message}
+                        error_msg = data.get("message", data.get("error", "未知错误"))
+                        yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n"
                         break
                     elif event_type == "final_data":
                         try:
@@ -107,7 +111,12 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                                 task_res = await session.execute(
                                     select(TaskDB).where(TaskDB.task_id == task_id)
                                 )
-                                db_task = task_res.scalar_one()
+                                # M-17: 使用 scalar_one_or_none 避免 task 被删除时抛 NoResultFound
+                                db_task = task_res.scalar_one_or_none()
+                                if db_task is None:
+                                    logger.error(f"Task {task_id} not found when saving results (may have been deleted)")
+                                    yield f"event: error\ndata: {json.dumps({'error': '任务已被删除，无法保存结果'})}\n\n"
+                                    break
                                 db_task.status = "completed"
                                 db_task.completed_at = datetime.now(timezone.utc)
 
@@ -129,13 +138,19 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                                 await session.commit()
                         except Exception as db_e:
                             logger.error(f"Error saving inference results to DB: {db_e}")
+                            # 文档定义：结果已生成但保存失败时，发送特殊 error 事件后仍发 result
+                            yield f"event: error\ndata: {json.dumps({'error': '结果已生成但保存失败，请稍后查询 /features/{task_id}'})}\n\n"
 
                         yield f"event: result\ndata: {result_event.model_dump_json()}\n\n"
                         break
 
-                except asyncio.QueueEmpty:
-                    yield f"event: heartbeat\ndata: {{}}\n\n"
-                    await asyncio.sleep(15)
+                except asyncio.TimeoutError:
+                    # M-16: queue.get() 超时，说明推理线程卡住超过 _task_timeout
+                    elapsed = asyncio.get_event_loop().time() - last_event_time
+                    logger.error(f"Task {task_id} appears stuck (no events for {elapsed:.0f}s). Forcing cancellation.")
+                    cancel_event.set()
+                    yield f"event: error\ndata: {json.dumps({'error': f'任务执行超时（{_task_timeout}秒），请稍后重试或联系管理员'})}\n\n"
+                    break
 
         except asyncio.CancelledError:
             cancel_event.set()

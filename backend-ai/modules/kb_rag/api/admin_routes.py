@@ -4,11 +4,11 @@
 提供规则回答、拒绝策略、敏感词管理、模型配置的增删改查及日志审计接口。
 
 接口列表：
-GET/POST/PUT/DELETE  /rag/admin/rules          - 规则回答 CRUD
-GET/POST/PUT/DELETE  /rag/admin/rejections     - 拒绝规则 CRUD
-GET                   /rag/admin/rejection-logs - 拒绝日志（分页）
-GET/POST/PUT/DELETE  /rag/admin/sensitive-words - 敏感词 CRUD
-GET/PUT               /rag/admin/model-configs  - 模型配置查询/更新
+GET/POST/PUT/DELETE  /admin/rules          - 规则回答 CRUD
+GET/POST/PUT/DELETE  /admin/rejections     - 拒绝规则 CRUD
+GET                   /admin/rejection-logs - 拒绝日志（分页）
+GET/POST/PUT/DELETE  /admin/sensitive-words - 敏感词 CRUD
+GET/PUT               /admin/model-configs  - 模型配置查询/更新
 """
 import logging
 from typing import Optional
@@ -31,8 +31,8 @@ from ..rules.store import (
 from ..rules.matcher import invalidate_cache
 from ..generation.guardrails import invalidate_sensitive_word_cache
 from ..config import invalidate_model_config_cache
-from ..schemas import CloneKbIndexRequest
-from ..ingest.vector_store import clone_kb_index_async
+from ..schemas import CloneKbIndexRequest, VectorOptimizeRequest
+from ..ingest.vector_store import clone_kb_index_async, vector_optimize_async
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,11 +53,11 @@ class RuleAnswerDeleteResponse(BaseModel):
     message: str = "规则回答删除成功"
 
 
-@router.get("/rag/admin/rules", response_model=list[RuleAnswerResponse])
+@router.get("/admin/rules", response_model=list[RuleAnswerResponse])
 async def list_rule_answers(include_disabled: bool = Query(False)):
     """获取所有规则回答"""
     try:
-        rules = get_rule_answers(enabled_only=not include_disabled)
+        rules = await get_rule_answers(enabled_only=not include_disabled)
         return [
             RuleAnswerResponse(
                 rule_id=r["rule_id"],
@@ -76,11 +76,11 @@ async def list_rule_answers(include_disabled: bool = Query(False)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rag/admin/rules", status_code=201, response_model=RuleAnswerCreateResponse)
+@router.post("/admin/rules", status_code=201, response_model=RuleAnswerCreateResponse)
 async def create_rule_answer(req: RuleAnswerRequest):
     """新增规则回答"""
     try:
-        rule_id = add_rule_answer(
+        rule_id = await add_rule_answer(
             match_type=req.match_type.value,
             pattern=req.pattern,
             answer=req.answer,
@@ -94,11 +94,11 @@ async def create_rule_answer(req: RuleAnswerRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/rag/admin/rules/{rule_id}", response_model=RuleAnswerUpdateResponse)
+@router.put("/admin/rules/{rule_id}", response_model=RuleAnswerUpdateResponse)
 async def update_rule_answer_endpoint(rule_id: int, req: RuleAnswerRequest):
     """更新规则回答"""
     try:
-        updated = update_rule_answer(
+        updated = await update_rule_answer(
             rule_id=rule_id,
             match_type=req.match_type.value,
             pattern=req.pattern,
@@ -117,11 +117,11 @@ async def update_rule_answer_endpoint(rule_id: int, req: RuleAnswerRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/rag/admin/rules/{rule_id}", response_model=RuleAnswerDeleteResponse)
+@router.delete("/admin/rules/{rule_id}", response_model=RuleAnswerDeleteResponse)
 async def delete_rule_answer_endpoint(rule_id: int):
     """删除规则回答"""
     try:
-        deleted = delete_rule_answer(rule_id)
+        deleted = await delete_rule_answer(rule_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="规则回答不存在")
         invalidate_cache()
@@ -148,11 +148,11 @@ class RejectionRuleDeleteResponse(BaseModel):
     message: str = "拒绝规则删除成功"
 
 
-@router.get("/rag/admin/rejections", response_model=list[RejectionRuleResponse])
+@router.get("/admin/rejections", response_model=list[RejectionRuleResponse])
 async def list_rejection_rules(include_disabled: bool = Query(False)):
     """获取所有拒绝规则"""
     try:
-        rules = get_rejection_rules(enabled_only=not include_disabled)
+        rules = await get_rejection_rules(enabled_only=not include_disabled)
         return [
             RejectionRuleResponse(
                 rule_id=r["rule_id"],
@@ -171,11 +171,11 @@ async def list_rejection_rules(include_disabled: bool = Query(False)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rag/admin/rejections", status_code=201, response_model=RejectionRuleCreateResponse)
+@router.post("/admin/rejections", status_code=201, response_model=RejectionRuleCreateResponse)
 async def create_rejection_rule(req: RejectionRuleRequest):
     """新增拒绝规则"""
     try:
-        rule_id = add_rejection_rule(
+        rule_id = await add_rejection_rule(
             match_type=req.match_type.value,
             pattern=req.pattern,
             reject_reason=req.reject_reason,
@@ -189,11 +189,11 @@ async def create_rejection_rule(req: RejectionRuleRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/rag/admin/rejections/{rule_id}", response_model=RejectionRuleUpdateResponse)
+@router.put("/admin/rejections/{rule_id}", response_model=RejectionRuleUpdateResponse)
 async def update_rejection_rule_endpoint(rule_id: int, req: RejectionRuleRequest):
     """更新拒绝规则"""
     try:
-        updated = update_rejection_rule(
+        updated = await update_rejection_rule(
             rule_id=rule_id,
             match_type=req.match_type.value,
             pattern=req.pattern,
@@ -212,11 +212,11 @@ async def update_rejection_rule_endpoint(rule_id: int, req: RejectionRuleRequest
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/rag/admin/rejections/{rule_id}", response_model=RejectionRuleDeleteResponse)
+@router.delete("/admin/rejections/{rule_id}", response_model=RejectionRuleDeleteResponse)
 async def delete_rejection_rule_endpoint(rule_id: int):
     """删除拒绝规则"""
     try:
-        deleted = delete_rejection_rule(rule_id)
+        deleted = await delete_rejection_rule(rule_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="拒绝规则不存在")
         invalidate_cache()
@@ -237,14 +237,14 @@ class RejectionLogsResponse(BaseModel):
     offset: int
 
 
-@router.get("/rag/admin/rejection-logs", response_model=RejectionLogsResponse)
+@router.get("/admin/rejection-logs", response_model=RejectionLogsResponse)
 async def list_rejection_logs(
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
 ):
     """查看拒绝命中日志（分页）"""
     try:
-        logs, total = get_rejection_logs(limit=limit, offset=offset)
+        logs, total = await get_rejection_logs(limit=limit, offset=offset)
         return RejectionLogsResponse(
             logs=[
                 RejectionLogResponse(
@@ -282,11 +282,11 @@ class SensitiveWordDeleteResponse(BaseModel):
     message: str = "敏感词删除成功"
 
 
-@router.get("/rag/admin/sensitive-words", response_model=list[SensitiveWordResponse])
+@router.get("/admin/sensitive-words", response_model=list[SensitiveWordResponse])
 async def list_sensitive_words(include_disabled: bool = Query(False)):
     """获取敏感词列表"""
     try:
-        words = get_sensitive_words(enabled_only=not include_disabled)
+        words = await get_sensitive_words(enabled_only=not include_disabled)
         return [
             SensitiveWordResponse(
                 word_id=w["word_id"],
@@ -301,11 +301,11 @@ async def list_sensitive_words(include_disabled: bool = Query(False)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rag/admin/sensitive-words", status_code=201, response_model=SensitiveWordCreateResponse)
+@router.post("/admin/sensitive-words", status_code=201, response_model=SensitiveWordCreateResponse)
 async def create_sensitive_word(req: SensitiveWordRequest):
     """新增敏感词"""
     try:
-        word_id = add_sensitive_word(word=req.word, enabled=req.enabled)
+        word_id = await add_sensitive_word(word=req.word, enabled=req.enabled)
         invalidate_sensitive_word_cache()
         return SensitiveWordCreateResponse(word_id=word_id)
     except Exception as e:
@@ -313,11 +313,11 @@ async def create_sensitive_word(req: SensitiveWordRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/rag/admin/sensitive-words/{word_id}", response_model=SensitiveWordUpdateResponse)
+@router.put("/admin/sensitive-words/{word_id}", response_model=SensitiveWordUpdateResponse)
 async def update_sensitive_word_endpoint(word_id: int, req: SensitiveWordRequest):
     """更新敏感词"""
     try:
-        updated = update_sensitive_word(word_id=word_id, word=req.word, enabled=req.enabled)
+        updated = await update_sensitive_word(word_id=word_id, word=req.word, enabled=req.enabled)
         if not updated:
             raise HTTPException(status_code=404, detail="敏感词不存在")
         invalidate_sensitive_word_cache()
@@ -329,11 +329,11 @@ async def update_sensitive_word_endpoint(word_id: int, req: SensitiveWordRequest
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/rag/admin/sensitive-words/{word_id}", response_model=SensitiveWordDeleteResponse)
+@router.delete("/admin/sensitive-words/{word_id}", response_model=SensitiveWordDeleteResponse)
 async def delete_sensitive_word_endpoint(word_id: int):
     """删除敏感词"""
     try:
-        deleted = delete_sensitive_word(word_id)
+        deleted = await delete_sensitive_word(word_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="敏感词不存在")
         invalidate_sensitive_word_cache()
@@ -347,11 +347,11 @@ async def delete_sensitive_word_endpoint(word_id: int):
 
 # ===== 模型配置 =====
 
-@router.get("/rag/admin/model-configs", response_model=list[ModelConfigResponse])
+@router.get("/admin/model-configs", response_model=list[ModelConfigResponse])
 async def list_model_configs():
     """获取所有模型配置"""
     try:
-        configs = get_model_configs()
+        configs = await get_model_configs()
         return [
             ModelConfigResponse(
                 config_id=c["config_id"],
@@ -367,11 +367,11 @@ async def list_model_configs():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/rag/admin/model-configs/{config_key}", response_model=dict)
+@router.put("/admin/model-configs/{config_key}", response_model=dict)
 async def update_model_config(config_key: str, req: ModelConfigRequest):
     """更新模型配置（以 config_key 为唯一键，不存在则插入）"""
     try:
-        upsert_model_config(config_key=config_key, config_value=req.config_value)
+        await upsert_model_config(config_key=config_key, config_value=req.config_value)
         invalidate_model_config_cache()
         return {"message": "配置更新成功", "config_key": config_key, "config_value": req.config_value}
     except Exception as e:
@@ -386,7 +386,39 @@ class CloneKbIndexResponse(BaseModel):
     cloned_doc_ids: list[int]
 
 
-@router.post("/rag/admin/kb/clone-index", response_model=CloneKbIndexResponse)
+class VectorOptimizeResponse(BaseModel):
+    kb_id: int
+    total_chunks: int
+    duplicate_chunks: int
+    removed_duplicates: int
+    idf_terms_updated: int
+    optimizer_applied: bool
+
+
+@router.post("/admin/vector-optimize", response_model=VectorOptimizeResponse)
+async def vector_optimize_endpoint(req: VectorOptimizeRequest):
+    """
+    对指定知识库的向量进行优化处理。
+
+    操作选项（均为幂等操作）：
+    - remove_duplicates: 扫描并删除 text 完全重复的 chunk，保留 doc_version_id 最新的一个
+    - rebuild_bm25_idf: 对该 kb_id 下所有 chunk 重新计算 BM25 IDF 并持久化
+    - compact_collection: 触发 Qdrant 后台索引整理（vacuum/优化器）
+    """
+    try:
+        result = await vector_optimize_async(
+            kb_id=req.kb_id,
+            remove_duplicates=req.remove_duplicates,
+            rebuild_bm25_idf=req.rebuild_bm25_idf,
+            compact_collection=req.compact_collection,
+        )
+        return VectorOptimizeResponse(**result)
+    except Exception as e:
+        logger.error(f"Vector optimize failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/admin/kb/clone-index", response_model=CloneKbIndexResponse)
 async def clone_kb_index_endpoint(req: CloneKbIndexRequest):
     """
     将源知识库的向量复制到目标知识库（混合向量完整复制）。

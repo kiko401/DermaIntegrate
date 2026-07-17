@@ -1,12 +1,18 @@
 """
 安全 guardrails：敏感词过滤、输出脱敏、风险高亮提取
+
+架构改进（M-03修复）：
+- 使用 shared.event_loop.AsyncExecutor 替代 asyncio.new_event_loop()
+- 避免在已有事件循环的线程中创建新循环
 """
 import os
 import re
 import logging
 import time
+import threading
 from typing import List, Tuple, Optional
 
+from shared.config import SENSITIVE_WORD_CACHE_TTL
 from ..schemas import RiskHighlightObject
 
 logger = logging.getLogger(__name__)
@@ -23,14 +29,22 @@ except ImportError:
 
 class _SensitiveWordCache:
     """敏感词缓存容器，同时存储词表和 AC 自动机"""
-    words: List[str]
-    automaton: Optional[object]  # ahocorasick.Automaton when available
-    words_regex: Optional[re.Pattern]  # fallback regex pattern
+    __slots__ = ('words', 'automaton', 'words_regex')
+
+    def __init__(self):
+        self.words: List[str] = []
+        self.automaton: Optional[object] = None
+        self.words_regex: Optional[re.Pattern] = None
 
 
 _CACHE: Optional[_SensitiveWordCache] = None
-_CACHE_TTL: float = 300  # 5分钟
 _CACHE_AT: float = 0
+
+# 线程锁（保护缓存更新）
+_CACHE_LOCK = threading.RLock()
+
+# 缓存 TTL（从 shared/config 统一读取）
+_CACHE_TTL: float = SENSITIVE_WORD_CACHE_TTL
 
 
 def _build_automaton(words: List[str]):
@@ -56,14 +70,27 @@ def _build_words_regex(words: List[str]) -> Optional[re.Pattern]:
 
 
 def _reload_sensitive_words() -> _SensitiveWordCache:
-    """从 MySQL 重新加载启用的敏感词列表，重建缓存"""
+    """从 MySQL 同步加载启用的敏感词列表，重建缓存。
+
+    使用 shared.event_loop.AsyncExecutor 在独立线程中执行异步协程，
+    避免在已有事件循环的线程中创建新循环。
+    """
     try:
         from ..rules.store import get_sensitive_words
-        words = get_sensitive_words(enabled_only=True)
+
+        async def _fetch():
+            return await get_sensitive_words(enabled_only=True)
+
+        # 使用统一的 AsyncExecutor
+        from shared.event_loop import get_async_executor
+        words = get_async_executor().run_sync(_fetch, timeout=10.0)
         word_list = [w["word"] for w in words]
         logger.info(f"Reloaded {len(word_list)} sensitive words from DB.")
+    except TimeoutError:
+        logger.warning("Failed to reload sensitive words from DB: timeout, using file fallback.")
+        word_list = _load_from_file()
     except Exception as e:
-        logger.warning(f"Failed to reload sensitive words from DB, using file fallback: {e}")
+        logger.warning(f"Failed to reload sensitive words from DB: {e}, using file fallback.")
         word_list = _load_from_file()
 
     cache = _SensitiveWordCache()
@@ -83,20 +110,32 @@ def _load_from_file() -> List[str]:
 
 
 def _get_cache() -> _SensitiveWordCache:
-    """获取敏感词缓存（TTL 5分钟）"""
+    """获取敏感词缓存（TTL 5分钟，使用双重检查锁定）"""
     global _CACHE, _CACHE_AT
     now = time.monotonic()
-    if _CACHE is None or (now - _CACHE_AT) > _CACHE_TTL:
+
+    # 首次检查：缓存有效且未过期（读操作不加锁）
+    if _CACHE is not None and (now - _CACHE_AT) <= _CACHE_TTL:
+        return _CACHE
+
+    # 获取锁后进行二次检查和更新
+    with _CACHE_LOCK:
+        # 二次检查：其他线程可能已经刷新了缓存
+        if _CACHE is not None and (now - _CACHE_AT) <= _CACHE_TTL:
+            return _CACHE
+
+        # 缓存 miss 或过期，重新加载
         _CACHE = _reload_sensitive_words()
-        _CACHE_AT = now
-    return _CACHE
+        _CACHE_AT = time.monotonic()
+        return _CACHE
 
 
 def invalidate_sensitive_word_cache():
     """写操作后主动失效缓存，下一次 check 触发回源"""
     global _CACHE, _CACHE_AT
-    _CACHE = None
-    _CACHE_AT = 0
+    with _CACHE_LOCK:
+        _CACHE = None
+        _CACHE_AT = 0
     logger.info("Sensitive word cache invalidated.")
 
 

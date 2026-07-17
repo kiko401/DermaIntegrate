@@ -1,35 +1,13 @@
 """诊断结果路由：历史推理结果查询。"""
 
-from typing import List, Optional
-
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from models.database import get_db, AIFeature as FeatureDB
+from api.schemas import SSEResultEvent
 
 router = APIRouter(tags=["Diagnosis"])
-
-
-class KeyConcern(BaseModel):
-    item: str
-    source_id: str
-
-
-class Recommendation(BaseModel):
-    item: str
-    source_id: str
-
-
-class SSEResultEvent(BaseModel):
-    task_id: str
-    risk_level: str
-    key_concerns: List[KeyConcern]
-    recommendations: List[Recommendation]
-    differential: List[str]
-    disclaimer: str
-    status: str = "complete"
 
 
 @router.get("/features/{task_id}", response_model=SSEResultEvent)

@@ -52,6 +52,7 @@ urllib3>=1.26.14,<2.0.0
 # ----- Utils -----
 json-repair==0.60.1
 python-dotenv==1.0.0
+filelock==3.13.1
 
 # ----- LangChain / LangGraph -----
 langgraph==1.2.9

@@ -129,6 +129,11 @@ def run_pipeline_with_cancel(
             task_id, image_result, clinical_result, pathology_result, rag_passages
         )
 
+        # 先发送 final step 事件，触发 90% progress；再发送 final_data
+        queue.put_nowait(("step", {
+            "step": "final",
+            "message": "综合报告生成完成",
+        }))
         queue.put_nowait(("final_data", final_report_dict))
 
     except InterruptedError:

@@ -5,6 +5,7 @@ import copy
 from pathlib import Path
 from openai import OpenAI
 from config import settings
+from shared.config import LLM_READ_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,7 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
                     messages=[{"role": "user", "content": current_prompt}],
                     temperature=0.1,
                     response_format={"type": "json_object"},
-                    timeout=15.0
+                    timeout=LLM_READ_TIMEOUT
                 )
 
                 result_str = response.choices[0].message.content

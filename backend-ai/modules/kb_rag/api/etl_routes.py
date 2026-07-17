@@ -1,7 +1,9 @@
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import StreamingResponse
-from typing import Optional, List
+from typing import Optional, List, Dict
+import httpx
+from shared.config import APP_CONVERSATION_CONNECT_TIMEOUT, APP_CONVERSATION_READ_TIMEOUT
 from ..schemas import ETLJobStatus, ETLRunRequest, FeedbackExportRequest, ETLClinicalRequest
 from ..etl.etl_service import (
     extract_and_ingest,
@@ -38,7 +40,14 @@ async def run_etl_file_endpoint(
         chunk_overlap: int = Form(120),
 ):
     """文件上传方式的 ETL 触发（兼容原接口）"""
+    # M-12: 文件大小限制，默认 50MB
+    MAX_FILE_SIZE = 50 * 1024 * 1024
     content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE // (1024*1024)}MB）"
+        )
     filename = file.filename
     job_id = f"etl_job_{doc_id}_{doc_version_id}"
     job_status = await extract_and_ingest(content, filename, kb_id, doc_id, doc_version_id, job_id, job_name)
@@ -154,7 +163,7 @@ async def _fetch_conversation_data_from_app_domain(req: FeedbackExportRequest) -
     callback_url = f"{app_base_url}/api/rag/conversations"
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=30.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=APP_CONVERSATION_CONNECT_TIMEOUT, read=APP_CONVERSATION_READ_TIMEOUT)) as client:
             response = await client.get(
                 callback_url,
                 params=params,
