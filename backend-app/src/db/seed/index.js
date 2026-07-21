@@ -11,20 +11,16 @@ const seedPacs = require('./pacs');
 // 用 root 连接（不指定 database）执行建库+建表 SQL
 async function runSchema(schemaFile) {
   const sql = fs.readFileSync(path.join(__dirname, '../schema', schemaFile), 'utf8');
-  // 按分号拆分，过滤空语句
-  const statements = sql.split(';').map(s => s.trim()).filter(Boolean);
 
   const conn = await mysql.createConnection({
     host:     process.env.DB_HOST     || 'localhost',
     port:     parseInt(process.env.DB_PORT) || 3306,
     user:     process.env.DB_USER     || 'root',
     password: process.env.DB_PASSWORD || '',
-    multipleStatements: false,
+    multipleStatements: true,
   });
 
-  for (const stmt of statements) {
-    await conn.query(stmt);
-  }
+  await conn.query(sql);
   await conn.end();
   console.log(`[schema] ${schemaFile} OK`);
 }

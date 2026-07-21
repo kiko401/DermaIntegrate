@@ -6,7 +6,14 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node src/app.js",
-    "seed": "node src/db/seed/index.js"
+    "seed": "node src/db/seed/index.js",
+    "migrate:rag": "node scripts/run_rag_migrations.js",
+    "verify:rag-schema": "node scripts/verify_rag_schema.js",
+    "verify:rag-contract": "node scripts/verify_rag_v1_contract.js",
+    "seed:test-doctor-sql": "node scripts/run_sql_file.js src/db/seed/sql/20260721_test_doctors_and_kb_permissions.sql",
+    "seed:test-doctor-docs": "node scripts/seed_test_doctor_documents.js",
+    "seed:test-doctor-data": "npm run seed:test-doctor-sql && npm run seed:test-doctor-docs",
+    "rollback:test-doctor-data": "node scripts/seed_test_doctor_documents.js --cleanup-files && node scripts/run_sql_file.js src/db/seed/sql/20260721_test_doctors_and_kb_permissions.rollback.sql"
   },
   "dependencies": {
     "axios": "^1.18.1",

@@ -5,6 +5,7 @@ import { message } from 'ant-design-vue'
 import { apiFetch } from '@/utils/api'
 import { useSSE } from '@/hooks/useSSE'
 import ImageCompare from '@/components/ImageCompare.vue'
+import PatientChatPanel from '@/components/chat/PatientChatPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -14,6 +15,9 @@ const patientId = route.params.patientId
 const rightWidthPct = ref(30) // 15~45
 const isDragging = ref(false)
 const bodyRef = ref(null)
+
+// 右侧面板 Tab：ai-diagnosis | knowledge-chat
+const rightTab = ref('ai-diagnosis')
 
 function onDividerMousedown(e) {
   isDragging.value = true
@@ -545,6 +549,24 @@ function stepColor(type) {
       </div>
 
       <div class="cv-right" :style="{ flex: `0 0 ${rightWidthPct}%` }">
+        <!-- 右侧 Tab 切换：v-show 保持两个面板同时挂载，不销毁 AI 诊断 EventSource -->
+        <div class="cv-right-tabs">
+          <button
+            class="cv-right-tab"
+            :class="{ active: rightTab === 'ai-diagnosis' }"
+            @click="rightTab = 'ai-diagnosis'"
+            type="button"
+          >AI 诊断</button>
+          <button
+            class="cv-right-tab"
+            :class="{ active: rightTab === 'knowledge-chat' }"
+            @click="rightTab = 'knowledge-chat'"
+            type="button"
+          >知识问答</button>
+        </div>
+
+        <!-- Tab 1：AI 辅助诊断（原有内容完整保留） -->
+        <div v-show="rightTab === 'ai-diagnosis'" class="cv-right-panel">
         <div class="ai-panel">
           <div class="ai-panel-head">
             <span class="ai-panel-title">AI 辅助诊断</span>
@@ -727,6 +749,12 @@ function stepColor(type) {
               查看历史任务
             </a-button>
           </div>
+        </div>
+        </div>
+
+        <!-- Tab 2：知识问答 -->
+        <div v-show="rightTab === 'knowledge-chat'" class="cv-right-panel cv-right-panel--chat">
+          <PatientChatPanel :patientId="patientId" />
         </div>
       </div>
     </div>
@@ -983,9 +1011,11 @@ function stepColor(type) {
 
 .cv-right {
   flex-shrink: 0;
-  overflow-y: auto;
-  padding: 16px 24px 16px 8px;
+  overflow: hidden;
+  padding: 0;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .ai-panel {
@@ -1588,15 +1618,50 @@ function stepColor(type) {
   align-self: center;
 }
 
-@media (max-width: 768px) {
-  .ledger-row-rich {
-    flex-direction: column;
-    align-items: flex-start;
-  }
+.cv-right-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 8px 12px 0;
+  flex-shrink: 0;
+}
 
-  .ledger-detail-btn {
-    align-self: flex-end;
-  }
+.cv-right-tab {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #8aa0b8;
+  background: rgba(248, 251, 255, 0.8);
+  border: 1px solid rgba(116, 152, 193, 0.14);
+  border-radius: 10px 10px 0 0;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.cv-right-tab:hover {
+  color: #2f6fed;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.cv-right-tab.active {
+  color: #2f6fed;
+  background: #fff;
+  border-bottom-color: #fff;
+  border-color: rgba(47, 111, 237, 0.18);
+}
+
+.cv-right-panel {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 8px 16px 16px 8px;
+}
+
+.cv-right-panel--chat {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
 }
 
 </style>

@@ -67,6 +67,30 @@ const router = createRouter({
       component: () => import('../views/admin/rag/DocumentCenter.vue'),
       meta: { requiresAdmin: true },
     },
+    {
+      path: '/admin/rag/vectors',
+      name: 'admin-rag-vectors',
+      component: () => import('../views/admin/rag/VectorAdmin.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/rag/logs',
+      name: 'admin-rag-logs',
+      component: () => import('../views/admin/rag/ConversationLogs.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/rag/settings',
+      name: 'admin-rag-settings',
+      component: () => import('../views/admin/rag/RAGSettings.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/rag/debug',
+      name: 'admin-rag-debug',
+      component: () => import('../views/admin/rag/RAGDebug.vue'),
+      meta: { requiresAdmin: true },
+    },
   ],
 })
 
