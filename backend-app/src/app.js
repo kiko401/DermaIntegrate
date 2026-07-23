@@ -44,6 +44,7 @@ app.use('/api/patients', requireDoctor, require('./routes/patients'));
 app.use('/api/rag/tasks',     require('./routes/rag_tasks'));
 app.use('/api/rag/kbs',       requireAuth,  require('./routes/rag_kb'));
 app.use('/api/rag/documents', requireAuth,  require('./routes/rag_documents'));
+app.use('/api/rag',           require('./routes/rag_chat'));
 app.use('/api/rag',           requireAdmin, require('./routes/rag_debug'));
 
 app.get('/', (req, res) => {

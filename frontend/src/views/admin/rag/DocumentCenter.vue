@@ -33,6 +33,14 @@ const previewErr = ref('')
 const taskProgress = reactive({})
 const taskSubs = {}
 
+// 同域名 HTTP/1.1 最多 6 个并发连接，SSE 是长连接，限制最多 4 条，给普通 fetch 留槽
+const MAX_SSE = 4
+const sseQueue = [] // [{ docId, taskId }]
+
+function activeSseCount() {
+  return Object.keys(taskSubs).length
+}
+
 const versionsOpen = ref(false)
 const versionsDoc = ref(null)
 const versionsList = ref([])
@@ -170,6 +178,7 @@ function shouldShowProgressMessage(docId) {
 
 onMounted(async () => {
   await Promise.all([fetchDocs(), fetchKbs()])
+  await restoreActiveTaskSubscriptions()
 })
 
 onUnmounted(() => {
@@ -200,6 +209,16 @@ async function fetchKbs() {
   const data = await res.json()
   kbs.value = Array.isArray(data) ? data : (data.data || [])
   if (!uploadKbId.value && kbs.value.length) uploadKbId.value = String(kbs.value[0].id)
+}
+
+async function restoreActiveTaskSubscriptions() {
+  // latest_task_id 由文档列表接口随文档对象返回（requireAuth，非 admin 也可访问）
+  // 无需调 GET /api/rag/tasks（requireAdmin），避免非 admin 用户刷新后进度丢失
+  docs.value.forEach(doc => {
+    if (doc.latest_task_id && doc.status === 'parsing') {
+      enqueueTask(doc.id, doc.latest_task_id)
+    }
+  })
 }
 
 function onFilterChange() {
@@ -244,13 +263,39 @@ async function handleFiles(e) {
 
     const items = data.data || []
     items.forEach(item => {
-      if (item.doc_id && item.task_id) subscribeTask(item.doc_id, item.task_id)
+      if (item.doc_id && item.task_id) enqueueTask(item.doc_id, item.task_id)
     })
   } catch (err) {
     uploadErr.value = err.message || '上传失败'
   } finally {
     uploading.value = false
     e.target.value = ''
+  }
+}
+
+function enqueueTask(docId, taskId) {
+  // 已有活跃订阅则跳过（重建索引等场景会先 close 再 enqueue）
+  if (taskSubs[docId]) return
+  if (activeSseCount() < MAX_SSE) {
+    subscribeTask(docId, taskId)
+  } else {
+    // 队列中已有同一 docId 则覆盖，避免重复
+    const idx = sseQueue.findIndex(q => q.docId === docId)
+    if (idx >= 0) sseQueue.splice(idx, 1, { docId, taskId })
+    else sseQueue.push({ docId, taskId })
+    // 占位显示，让进度条能展示出来
+    if (!taskProgress[docId]) {
+      taskProgress[docId] = buildTaskProgressState({
+        stage: 'queued', progress: 0, message: '等待订阅槽...', status: 'running',
+      })
+    }
+  }
+}
+
+function drainSseQueue() {
+  while (sseQueue.length > 0 && activeSseCount() < MAX_SSE) {
+    const next = sseQueue.shift()
+    subscribeTask(next.docId, next.taskId)
   }
 }
 
@@ -304,6 +349,7 @@ function subscribeTask(docId, taskId) {
 
     closeTaskSubscription(docId)
     scheduleProgressDismiss(docId, { fetchDelay: 300, hideDelay: 3000 })
+    drainSseQueue()
   })
 
   es.addEventListener('error', (ev) => {
@@ -327,6 +373,7 @@ function subscribeTask(docId, taskId) {
     patchDoc(docId, { status: 'failed' })
     closeTaskSubscription(docId)
     scheduleProgressDismiss(docId, { fetchDelay: 300, hideDelay: 5000 })
+    drainSseQueue()
   })
 
   es.onerror = () => {
@@ -334,6 +381,7 @@ function subscribeTask(docId, taskId) {
     if (taskSubs[docId] !== es) return
     if (es.readyState === EventSource.CLOSED) {
       delete taskSubs[docId]
+      drainSseQueue()
     }
   }
 }
@@ -562,6 +610,7 @@ function fmtDate(str) {
         <table v-else class="doc-table">
           <thead>
             <tr>
+              <th>Doc ID</th>
               <th>标题</th>
               <th>所属知识库</th>
               <th>格式</th>
@@ -577,6 +626,7 @@ function fmtDate(str) {
               :key="doc.id"
               :class="{ 'row-active': previewDoc?.id === doc.id }"
             >
+              <td class="id-cell">#{{ doc.id }}</td>
               <td class="doc-title" :title="doc.title">{{ doc.title }}</td>
               <td>{{ kbName(doc.kb_id) }}</td>
               <td class="ext-cell">{{ doc.file_ext }}</td>
@@ -637,6 +687,7 @@ function fmtDate(str) {
 
         <template v-else-if="preview">
           <div class="preview-meta">
+            <span>Doc ID #{{ preview.doc_id }}</span>
             <span>版本 v{{ preview.version_no }}</span>
             <span>模型 {{ preview.embedding_model }}</span>
             <span>{{ preview.chunk_count }} chunks</span>
@@ -666,6 +717,9 @@ function fmtDate(str) {
 
           <div v-show="previewTab === 'chunks'" class="preview-body">
             <div v-if="preview.chunks_preview && preview.chunks_preview.length">
+              <div v-if="preview.chunks_status === 'fallback'" class="chunk-notice">
+                AI 域 chunk 详情不可用，当前展示为应用域文本回退预览。
+              </div>
               <div
                 v-for="chunk in preview.chunks_preview"
                 :key="chunk.chunk_index"
@@ -678,8 +732,11 @@ function fmtDate(str) {
                 <p class="chunk-text">{{ chunk.text }}</p>
               </div>
             </div>
+            <div v-else-if="preview.chunks_status === 'fallback'" class="empty-tip-sm">
+              {{ preview.chunks_error || 'AI 域 chunk 详情不可用，已回退为本地文本预览' }}
+            </div>
             <div v-else-if="preview.chunks_status === 'failed'" class="empty-tip-sm">
-              Chunk 加载失败：{{ preview.chunks_error || '请稍后重试' }}
+              {{ preview.chunks_error || 'AI 域 chunk 详情加载失败' }}
             </div>
             <div v-else class="empty-tip-sm">
               {{ preview.chunk_count > 0 ? '暂无 Chunk 预览数据' : '暂无 Chunk 数据（ingest 完成后可见）' }}
@@ -801,6 +858,7 @@ function fmtDate(str) {
 .doc-table tr:hover td { background: #f8fafc; }
 .row-active td { background: #eff6ff !important; }
 
+.id-cell { white-space: nowrap; color: #64748b; font-size: 12px; font-variant-numeric: tabular-nums; }
 .doc-title { font-weight: 500; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ext-cell { color: #64748b; font-size: 12px; }
 .num-cell { text-align: right; font-variant-numeric: tabular-nums; }
@@ -904,6 +962,7 @@ function fmtDate(str) {
   margin: 0; font-family: 'Courier New', monospace;
 }
 .truncate-hint { font-size: 11px; color: #94a3b8; margin: 8px 0 0; text-align: right; }
+.chunk-notice { margin-bottom: 10px; padding: 8px 10px; border: 1px solid #fde68a; background: #fffbeb; color: #92400e; border-radius: 6px; font-size: 12px; line-height: 1.5; }
 .chunk-item { margin-bottom: 12px; border: 1px solid #f1f5f9; border-radius: 6px; overflow: hidden; }
 .chunk-header { display: flex; justify-content: space-between; align-items: center; padding: 5px 10px; background: #f8fafc; border-bottom: 1px solid #f1f5f9; }
 .chunk-id { font-size: 11px; font-family: monospace; color: #2563eb; }

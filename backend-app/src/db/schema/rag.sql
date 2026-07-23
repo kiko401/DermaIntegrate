@@ -429,6 +429,8 @@ INSERT IGNORE INTO rag_system_configs (config_key, config_val, value_type, descr
   ('chunk_size',             '800',                      'integer', 'ingest 默认 chunk 大小'),
   ('chunk_overlap',          '120',                      'integer', 'ingest 默认 chunk 重叠'),
   ('embedding_model',        'BAAI/bge-small-zh-v1.5',  'string',  '默认 embedding 模型'),
-  ('disclaimer_text',        '⚠️ 本回答由 AI 基于知识库生成，仅供参考，不能替代执业医师临床判断', 'string', '问答免责声明');
+  ('disclaimer_text',        '⚠️ 本回答由 AI 基于知识库生成，仅供参考，不能替代执业医师临床判断', 'string', '问答免责声明'),
+  ('max_length',             '0',                        'integer', '回答最大字符数，0=不限制'),
+  ('max_paragraphs',         '0',                        'integer', '回答最大段落数，0=不限制');
 
 -- 历史库结构变更统一放入 src/db/migrations/，禁止在基线 DDL 中混入迁移。

@@ -9,6 +9,43 @@ const INTERNAL_HEADERS = process.env.X_INTERNAL_SECRET
   ? { 'X-Internal-Token': process.env.X_INTERNAL_SECRET }
   : {};
 
+function safeJsonParse(value, fallback = {}) {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function splitTextByChunkMeta(text, chunkMeta = {}) {
+  const content = String(text || '').trim();
+  if (!content) return [];
+
+  const chunkSize = Math.max(1, Number(chunkMeta.chunk_size) || 800);
+  const overlap = Math.max(0, Math.min(chunkSize - 1, Number(chunkMeta.chunk_overlap) || 120));
+  const step = Math.max(1, chunkSize - overlap);
+
+  const chunks = [];
+  let start = 0;
+  let index = 0;
+  while (start < content.length) {
+    const end = Math.min(content.length, start + chunkSize);
+    const chunkText = content.slice(start, end);
+    chunks.push({
+      chunk_index: index,
+      chunk_id: `local_preview_${String(index).padStart(3, '0')}`,
+      text: chunkText,
+      length: chunkText.length,
+    });
+    if (end >= content.length) break;
+    start += step;
+    index += 1;
+  }
+  return chunks;
+}
+
 async function getKbAccess(doctor, kbId) {
   const [[kb]] = await db.query(
     `SELECT kb.id, kb.scope_type, kb.scope_owner_id, kb.manager_doctor_id, kb.default_model
@@ -203,7 +240,8 @@ async function list(doctor, query = {}) {
   const [rows] = await db.query(
     `SELECT d.*,
        dv.version_no, dv.embedding_model, dv.chunk_meta,
-       (SELECT COUNT(*) FROM rag_document_versions v2 WHERE v2.doc_id = d.id) AS version_count
+       (SELECT COUNT(*) FROM rag_document_versions v2 WHERE v2.doc_id = d.id) AS version_count,
+       (SELECT id FROM rag_tasks t2 WHERE t2.doc_id = d.id AND t2.status IN ('pending','running') ORDER BY t2.id DESC LIMIT 1) AS latest_task_id
      FROM rag_documents d
      JOIN rag_knowledge_bases kb ON kb.id = d.kb_id AND kb.deleted_at IS NULL
      ${doctor.role !== 'admin'
@@ -225,7 +263,8 @@ async function get(doctor, docId) {
   const [[row]] = await db.query(
     `SELECT d.*,
        dv.version_no, dv.embedding_model, dv.chunk_meta,
-       (SELECT COUNT(*) FROM rag_document_versions v2 WHERE v2.doc_id = d.id) AS version_count
+       (SELECT COUNT(*) FROM rag_document_versions v2 WHERE v2.doc_id = d.id) AS version_count,
+       (SELECT id FROM rag_tasks t2 WHERE t2.doc_id = d.id AND t2.status IN ('pending','running') ORDER BY t2.id DESC LIMIT 1) AS latest_task_id
      FROM rag_documents d
      LEFT JOIN rag_document_versions dv ON dv.id = d.active_version_id
      WHERE d.id = ? AND d.deleted_at IS NULL`, [docId]
@@ -251,6 +290,7 @@ function _toDocumentObject(row) {
     version_count: Number(row.version_count || 0),
     chunk_count: chunkMeta.chunk_count || 0,
     uploaded_by: row.uploaded_by,
+    latest_task_id: row.latest_task_id || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -276,9 +316,7 @@ async function preview(doctor, docId) {
     });
   }
 
-  const chunkMeta = typeof version.chunk_meta === 'string'
-    ? JSON.parse(version.chunk_meta)
-    : (version.chunk_meta || {});
+  const chunkMeta = safeJsonParse(version.chunk_meta, {});
 
   let chunksPreview = [];
   let chunksStatus = 'empty';
@@ -314,9 +352,17 @@ async function preview(doctor, docId) {
         : [];
       chunksStatus = chunksPreview.length ? 'ready' : 'empty';
     } catch (error) {
-      chunksPreview = [];
-      chunksStatus = 'failed';
-      chunksError = error.response?.data?.detail || error.message || 'Failed to load chunks preview';
+      const fallbackChunks = splitTextByChunkMeta(version.cleaned_text || version.raw_text || '', chunkMeta);
+      if (fallbackChunks.length) {
+        chunksPreview = fallbackChunks;
+        chunksStatus = 'fallback';
+        chunksError = 'AI 域 chunk 详情不可用，已回退为本地文本预览';
+      } else {
+        chunksPreview = [];
+        chunksStatus = 'failed';
+        const reason = error.response?.data?.detail || error.response?.statusText || error.message || 'Unknown error';
+        chunksError = `AI 域 chunk 详情加载失败：${reason}`;
+      }
     }
   }
 
@@ -384,7 +430,7 @@ async function update(doctor, docId, body) {
       await conn.beginTransaction();
       await conn.query(
         `UPDATE rag_document_versions SET status = 'archived'
-         WHERE doc_id = ? AND status = 'active'`,
+         WHERE doc_id = ? AND status IN ('active', 'draft')`,
         [docId]
       );
       const [versionResult] = await conn.query(
@@ -445,14 +491,19 @@ async function remove(doctor, docId) {
   const { doc, access } = accessible;
   assertCanManage(doctor, access);
 
+  // pending 超 10 分钟视为提交失败（dispatch 是同步发起的，不应长时间停留 pending）
+  // running 超 2 小时视为 AI 域异常中断，此时 AI 域已无法回调，强制关闭不会产生孤儿向量
   await db.query(
     `UPDATE rag_tasks
      SET status = 'failed',
          error_message = COALESCE(error_message, 'stale task auto-closed during delete'),
          completed_at = COALESCE(completed_at, NOW())
      WHERE doc_id = ?
-       AND status IN ('pending','running')
-       AND created_at < DATE_SUB(NOW(), INTERVAL 30 MINUTE)`,
+       AND (
+         (status = 'pending'  AND created_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE))
+         OR
+         (status = 'running'  AND created_at < DATE_SUB(NOW(), INTERVAL 2 HOUR))
+       )`,
     [docId]
   );
 
@@ -468,8 +519,9 @@ async function remove(doctor, docId) {
 
   await db.query(`UPDATE rag_documents SET deleted_at = NOW(), status = 'deleted' WHERE id = ?`, [docId]);
 
+  // 不传 doc_version_id，让 AI 域按 doc_id 清理该文档所有版本的向量（API_SPEC §2.3.3 doc_version_id 为可选，APP_SPEC §3.7 明确「传 doc_id」）
   await ragTaskService.createDeleteIndexTask(doctor, {
-    kb_id: doc.kb_id, doc_id: docId, doc_version_id: doc.active_version_id,
+    kb_id: doc.kb_id, doc_id: docId,
   });
 }
 
@@ -487,33 +539,6 @@ async function removeBatch(doctor, docIds) {
   return { deleted, failed };
 }
 
-async function cloneDocument(doctor, sourceDoc, targetKbId) {
-  const doc_code = `doc_${nanoid(10)}`;
-  const [docResult] = await db.query(
-    `INSERT INTO rag_documents (doc_code, kb_id, title, file_name, file_ext, storage_path, source_type, mime_type, status, uploaded_by)
-     VALUES (?, ?, ?, ?, ?, ?, 'clone', ?, 'uploaded', ?)`,
-    [doc_code, targetKbId, sourceDoc.title, sourceDoc.file_name, sourceDoc.file_ext,
-     sourceDoc.storage_path, sourceDoc.mime_type || '', doctor.id]
-  );
-  const newDocId = docResult.insertId;
-
-  const [verResult] = await db.query(
-    `INSERT INTO rag_document_versions (doc_id, version_no, embedding_model, status, created_by)
-     VALUES (?, 1, 'BAAI/bge-small-zh-v1.5', 'draft', ?)`,
-    [newDocId, doctor.id]
-  );
-  const versionId = verResult.insertId;
-
-  await db.query(`UPDATE rag_documents SET active_version_id = ? WHERE id = ?`, [versionId, newDocId]);
-
-  await ragTaskService.createIngestTask(doctor, {
-    kb_id: targetKbId, doc_id: newDocId, doc_version_id: versionId,
-    file_path: sourceDoc.storage_path, original_name: sourceDoc.file_name,
-  });
-
-  return { doc_id: newDocId, version_id: versionId };
-}
-
 async function getDownloadInfo(doctor, docId) {
   const accessible = await getAccessibleDoc(doctor, docId);
   if (!accessible) {
@@ -525,4 +550,4 @@ async function getDownloadInfo(doctor, docId) {
   return { filePath: accessible.doc.storage_path, fileName: accessible.doc.file_name };
 }
 
-module.exports = { upload, list, get, preview, getDownloadInfo, update, remove, removeBatch, cloneDocument };
+module.exports = { upload, list, get, preview, getDownloadInfo, update, remove, removeBatch };

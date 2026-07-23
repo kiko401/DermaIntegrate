@@ -112,6 +112,54 @@ const pacsCompareHint = computed(() =>
     isViewingHistoryPacs.value ? '历史参考影像未关联当前 AI 热区' : 'AI 热区辅助展示'
 )
 
+const patientChatContext = computed(() => {
+  if (!patient.value) return null
+
+  const gender = patient.value.gender || patient.value.sex || '??'
+  const age = patient.value.age ?? patient.value.age_years ?? null
+  const chiefComplaint = his.value[0]?.chief_complaint || his.value[0]?.complaint || ''
+  const diagnosis = pathology.value[0]?.diagnosis_text || pathology.value[0]?.histological_type || his.value[0]?.diagnosis_name || ''
+  const pathologyPoints = pathology.value
+    .map(item => {
+      const points = []
+      if (item.histological_type) points.push(String(item.histological_type))
+      if (item.breslow_thickness_mm != null) points.push(`Breslow ${item.breslow_thickness_mm} mm`)
+      if (item.ulceration != null) points.push(item.ulceration ? '???' : '???')
+      if (item.braf_mutation) points.push(`BRAF ${item.braf_mutation}`)
+      return points.join('?')
+    })
+    .filter(Boolean)
+    .slice(0, 3)
+  const pacsPoints = pacs.value
+    .slice(0, 3)
+    .map(item => {
+      const parts = []
+      if (item.body_part) parts.push(String(item.body_part))
+      if (item.description) parts.push(String(item.description))
+      return parts.join('?')
+    })
+    .filter(Boolean)
+
+  const summaryParts = [
+    `??${gender}${age != null ? `?${age}?` : ''}`,
+    chiefComplaint ? `???${chiefComplaint}` : '',
+    diagnosis ? `??/?????${diagnosis}` : '',
+    pathologyPoints.length ? `?????${pathologyPoints.join('?')}` : '',
+    pacsPoints.length ? `?????${pacsPoints.join('?')}` : '',
+  ].filter(Boolean)
+
+  return {
+    summary_text: summaryParts.join('?') + '?',
+    structured: {
+      gender,
+      age,
+      recent_diagnosis: diagnosis || undefined,
+      pathology_key_points: pathologyPoints,
+      pacs_key_points: pacsPoints,
+    },
+  }
+})
+
 function selectPacsRecord(index) {
   selectedPacsIndex.value = index
 }
@@ -754,7 +802,7 @@ function stepColor(type) {
 
         <!-- Tab 2：知识问答 -->
         <div v-show="rightTab === 'knowledge-chat'" class="cv-right-panel cv-right-panel--chat">
-          <PatientChatPanel :patientId="patientId" />
+          <PatientChatPanel v-if="patientChatContext" :patientId="patientId" :patientContext="patientChatContext" />
         </div>
       </div>
     </div>

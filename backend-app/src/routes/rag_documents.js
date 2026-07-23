@@ -34,8 +34,13 @@ const upload = multer({
   },
 });
 
-// 上传文档（多文件），响应 202 { data: [{doc_id, file_name, task_id, status}] }
-router.post('/upload', (req, res) => {
+/**
+ * 统一处理文档上传。
+ * 说明：
+ * - 所有中文注释与字符串均保持 UTF-8 编码；
+ * - import-local 语义入口会在进入此函数前强制覆盖 source_type=import_local。
+ */
+function handleUploadRequest(req, res, overrides = {}) {
   upload.array('files', 20)(req, res, async (err) => {
     if (err) {
       if (err.code === 'UNSUPPORTED_FORMAT') {
@@ -53,12 +58,23 @@ router.post('/upload', (req, res) => {
       files.forEach(f => {
         f.originalname = normalizeUploadedFilename(f.originalname);
       });
-      const results = await Promise.all(files.map(f => svc.upload(req.doctor, f, req.body)));
+      const requestBody = { ...req.body, ...overrides };
+      const results = await Promise.all(files.map(f => svc.upload(req.doctor, f, requestBody)));
       res.status(202).json({ data: results });
     } catch (e) {
       res.status(e.status || 500).json({ error: e.code || e.message, message: e.message });
     }
   });
+}
+
+// 上传文档（多文件），响应 202 { data: [{doc_id, file_name, task_id, status}] }
+router.post('/upload', (req, res) => {
+  handleUploadRequest(req, res);
+});
+
+// 本地资料批量导入（语义入口，与 /upload 共用实现）
+router.post('/import-local', (req, res) => {
+  handleUploadRequest(req, res, { source_type: 'import_local' });
 });
 
 // 批量删除（需在 /:docId 前注册，避免路由冲突）

@@ -1,9 +1,10 @@
 const router = require('express').Router();
 const svc = require('../services/ragTaskService');
 const { requireAuth } = require('../middleware/auth');
+const { requireAdmin } = require('../middleware/requireAdmin');
 
 // 任务列表
-router.get('/', requireAuth, async (req, res) => {
+router.get('/', requireAdmin, async (req, res) => {
   try {
     const rows = await svc.list(req.doctor, req.query);
     res.json(rows);
@@ -15,11 +16,13 @@ router.get('/', requireAuth, async (req, res) => {
 // 获取单个任务
 router.get('/:taskId', requireAuth, async (req, res) => {
   try {
-    const task = await svc.get(req.params.taskId);
-    if (!task) return res.status(404).json({ error: 'not found' });
+    const task = await svc.get(req.doctor, req.params.taskId);
+    if (!task) {
+      return res.status(404).json({ error: 'TASK_NOT_FOUND', message: '任务不存在或无权访问' });
+    }
     res.json(task);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.code || 'INTERNAL_ERROR', message: e.message });
   }
 });
 
@@ -37,37 +40,56 @@ router.get('/:taskId/stream', requireAuth, async (req, res) => {
   };
 
   try {
-    const task = await svc.get(taskId);
+    const task = await svc.get(req.doctor, taskId);
     if (!task) {
-      send('error', { task_id: taskId, code: 'TASK_NOT_FOUND', message: '任务不存在' });
+      send('error', { task_id: taskId, code: 'TASK_NOT_FOUND', message: '任务不存在或无权访问' });
       return res.end();
     }
 
     // 已完成直接推结束事件
+    const resultJson = task.result_json || {};
     if (task.status === 'succeeded') {
-      send('done', { task_id: task.task_code, status: 'succeeded', chunk_count: task.result_json?.chunk_count ?? 0 });
+      send('done', { task_id: task.id, status: 'succeeded', chunk_count: resultJson.chunk_count ?? 0 });
       return res.end();
     }
     if (task.status === 'failed') {
-      send('error', { task_id: task.task_code, code: 'INGEST_FAILED', message: task.error_message || '任务失败' });
+      send('error', { task_id: task.id, code: 'INGEST_FAILED', message: task.error_message || '任务失败' });
       return res.end();
+    }
+
+    // 对已在运行中的任务，先补发一条当前快照，避免客户端错过此前进度事件。
+    const latestEvent = await svc.getLatestTaskEvent(task.id);
+    if (task.status === 'running' && latestEvent?.stage) {
+      send('progress', {
+        task_id: task.id,
+        stage: latestEvent.stage,
+        progress: latestEvent.progress ?? task.progress_percent ?? 0,
+        message: latestEvent.message ?? '',
+      });
+    } else if (task.status === 'pending') {
+      send('progress', {
+        task_id: task.id,
+        stage: 'queued',
+        progress: task.progress_percent ?? 0,
+        message: '任务已创建，等待 AI 域处理',
+      });
     }
 
     // 注册 SSE 监听，等待 callback 触发推送
     const off = svc.onTaskUpdate(taskId, (update) => {
       if (update.status === 'running' && update.stage) {
         send('progress', {
-          task_id: task.task_code,
+          task_id: task.id,
           stage: update.stage,
           progress: update.progress ?? 0,
           message: update.message ?? '',
         });
       } else if (update.status === 'succeeded') {
-        send('done', { task_id: task.task_code, status: 'succeeded', chunk_count: update.chunk_count ?? 0 });
+        send('done', { task_id: task.id, status: 'succeeded', chunk_count: update.chunk_count ?? 0 });
         off();
         res.end();
       } else if (update.status === 'failed') {
-        send('error', { task_id: task.task_code, code: 'INGEST_FAILED', message: update.error_message || '任务失败' });
+        send('error', { task_id: task.id, code: 'INGEST_FAILED', message: update.error_message || '任务失败' });
         off();
         res.end();
       }
@@ -86,7 +108,10 @@ router.post('/:taskId/callback', require('../middleware/internalToken'), async (
     await svc.handleCallback(req.params.taskId, req.body);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({
+      error: e.code || 'INTERNAL_ERROR',
+      message: e.message,
+    });
   }
 });
 
