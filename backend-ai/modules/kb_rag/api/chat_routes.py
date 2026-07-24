@@ -1,0 +1,88 @@
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from typing import List, Optional
+from ..schemas import ChatRequest, ChatResponse, PatientContextObject
+from ..generation.chat_service import run_rag_workflow
+from ..generation.stream_service import stream_rag_workflow
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(req: ChatRequest):
+    """非流式问答接口"""
+    try:
+        response = await run_rag_workflow(req)
+        return response
+    except Exception as e:
+        logger.error(f"Chat failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/stream/{conversation_id}")
+async def stream_chat_endpoint(
+        conversation_id: int,
+        question: str = Query(...),
+        kb_ids: List[int] = Query([]),
+        top_k: int = Query(5),
+        similarity_threshold: float = Query(0.35),
+        enable_tools: bool = Query(True),
+        enable_agent: bool = Query(True),
+        use_rerank: bool = Query(False),
+        patient_context: Optional[str] = Query(None),  # JSON string of PatientContextObject
+        history: Optional[str] = Query(None),  # JSON string of List[Dict[str, str]]
+):
+    """SSE 流式问答接口 (GET 方法)"""
+
+    # 构造 ChatRequest 对象
+    parsed_history = []
+    if history:
+        try:
+            import json as _json
+            parsed_history = _json.loads(history)
+        except Exception:
+            logger.warning(f"Failed to parse history JSON for conversation {conversation_id}, ignoring.")
+
+    # 解析 patient_context（JSON 字符串）
+    parsed_patient_context = None
+    if patient_context:
+        try:
+            parsed_patient_context = PatientContextObject.model_validate_json(patient_context)
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail=f"patient_context JSON 格式错误: {patient_context[:100]}"
+            )
+
+    req = ChatRequest(
+        conversation_id=conversation_id,
+        question=question,
+        history=parsed_history,
+        kb_ids=kb_ids,
+        options={
+            "top_k": top_k,
+            "similarity_threshold": similarity_threshold,
+            "stream": True,
+            "enable_tools": enable_tools,
+            "enable_agent": enable_agent,
+            "use_rerank": use_rerank,
+        },
+        patient_context=parsed_patient_context,
+    )
+
+    async def error_safe_stream():
+        """包装流式生成器，捕获异常并以 SSE 错误事件返回"""
+        try:
+            async for chunk in stream_rag_workflow(req):
+                yield chunk
+        except Exception as e:
+            logger.error(f"Stream error for conversation {conversation_id}: {e}", exc_info=True)
+            yield f"event: error\ndata: {e}\n\n"
+
+    return StreamingResponse(
+        error_safe_stream(),
+        media_type="text/event-stream"
+    )
