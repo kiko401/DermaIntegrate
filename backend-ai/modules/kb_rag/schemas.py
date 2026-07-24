@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any, Literal
 class PatientContextObject(BaseModel):
     """患者上下文对象，用于向知识库问答传递患者概要信息。"""
     summary_text: str
-    structured: Dict[str, Any] = {}
+    structured: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SourceObject(BaseModel):
@@ -17,7 +17,7 @@ class SourceObject(BaseModel):
     chunk_index: int
     score: float
     snippet: str
-    source_location: Dict[str, Any] = {}
+    source_location: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RiskHighlightObject(BaseModel):
@@ -51,7 +51,7 @@ class AgentTraceObject(BaseModel):
     GET /rag/agents/runs/:run_id 查询响应中保留 created_at（见 AgentRunTraceObject）。
     """
     workflow: str
-    nodes: List[AgentTraceNode] = []
+    nodes: List[AgentTraceNode] = Field(default_factory=list)
 
 
 class AgentRunTraceObject(BaseModel):
@@ -59,7 +59,7 @@ class AgentRunTraceObject(BaseModel):
     Agent 运行轨迹响应对象（GET /rag/agents/runs/:run_id 专用，含 created_at）。
     """
     workflow: str
-    nodes: List[AgentTraceNode] = []
+    nodes: List[AgentTraceNode] = Field(default_factory=list)
     created_at: str
 
 
@@ -74,6 +74,11 @@ class ChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def _merge_options(self):
+        if not self.question or not self.question.strip():
+            raise ValueError("question must not be empty")
+        if not self.kb_ids:
+            raise ValueError("kb_ids is required")
+        self.history = self.history[-10:]
         if self.options is None:
             self.options = {
                 "top_k": 5,
@@ -107,7 +112,7 @@ class ChatResponse(BaseModel):
     """知识库问答响应，包含答案、来源引用、风险高亮与 Agent 执行轨迹。"""
     trace_id: str
     message_id: str
-    route: Literal["knowledge_query", "patient_context_query", "tool_call", "general_chat", "agent_workflow", "rule_answer"]
+    route: Literal["knowledge_query", "patient_context_query", "tool_call", "general_chat", "agent_workflow"]
     answer: str
     sources: List[SourceObject] = []
     confidence: float
@@ -120,10 +125,16 @@ class ChatResponse(BaseModel):
 
 
 class IngestCallback(BaseModel):
-    """文档摄取回调，记录任务编码、执行状态与生成的 chunk 数量。"""
+    """ingest / reindex 回调；running 表示进度，succeeded/failed 表示最终状态。"""
     task_code: str
-    status: Literal["succeeded", "failed"]
-    chunk_count: int
+    status: Literal["running", "succeeded", "failed"]
+    chunk_count: int = 0
+    stage: Optional[str] = None
+    progress: Optional[int] = None
+    message: Optional[str] = None
+    raw_text: Optional[str] = None
+    cleaned_text: Optional[str] = None
+    chunk_meta: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
 
 
@@ -134,7 +145,7 @@ class ToolDefinition(BaseModel):
     args_schema: Dict[str, Any]
     enabled: bool = True
     timeout_seconds: int = 30
-    access_scope: List[str] = []
+    access_scope: List[str] = Field(default_factory=list)
 
 
 class ToolRunRequest(BaseModel):
@@ -148,10 +159,10 @@ class AgentRunRequest(BaseModel):
     workflow: str = "langgraph_rag_agent"
     conversation_id: int = 0
     question: str
-    history: List[Dict[str, str]] = []
-    kb_ids: List[int] = []
+    history: List[Dict[str, str]] = Field(default_factory=list)
+    kb_ids: List[int] = Field(default_factory=list)
     patient_context: Optional[PatientContextObject] = None
-    options: Dict[str, Any] = {}
+    options: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ETLJobStatus(BaseModel):
@@ -179,7 +190,7 @@ class ETLRunRequest(BaseModel):
     """ETL 任务触发请求，支持多源数据接入。"""
     job_name: Optional[str] = None
     source_type: Literal["file", "csv", "excel", "url", "database"] = "file"
-    source_config: Dict[str, Any] = {}
+    source_config: Dict[str, Any] = Field(default_factory=dict)
     kb_id: int
     chunk_size: int = 800
     chunk_overlap: int = 120
@@ -208,18 +219,29 @@ class ReindexTextRequest(BaseModel):
 
     应用域将历史版本文本通过此接口写入，AI 域先删旧版向量再入新版。
     """
+    task_id: int
+    task_code: str
     kb_id: int
     doc_id: int
     doc_version_id: int
     text: str
     chunk_size: int = 800
     chunk_overlap: int = 120
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+
+
+class CloneDocumentMapping(BaseModel):
+    """知识库克隆时的文档与版本 ID 映射。"""
+    source_doc_id: int
+    target_doc_id: int
+    version_id_map: Dict[int, int]
 
 
 class CloneKbIndexRequest(BaseModel):
     """知识库克隆请求，将源知识库的向量复制到目标知识库。"""
     source_kb_id: int
     target_kb_id: int
+    document_mappings: List[CloneDocumentMapping]
 
 
 class VectorOptimizeRequest(BaseModel):

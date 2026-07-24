@@ -32,6 +32,8 @@ async def stream_chat_endpoint(
         enable_tools: bool = Query(True),
         enable_agent: bool = Query(True),
         use_rerank: bool = Query(False),
+        max_length: int = Query(0),
+        max_paragraphs: int = Query(0),
         patient_context: Optional[str] = Query(None),  # JSON string of PatientContextObject
         history: Optional[str] = Query(None),  # JSON string of List[Dict[str, str]]
 ):
@@ -57,21 +59,26 @@ async def stream_chat_endpoint(
                 detail=f"patient_context JSON 格式错误: {patient_context[:100]}"
             )
 
-    req = ChatRequest(
-        conversation_id=conversation_id,
-        question=question,
-        history=parsed_history,
-        kb_ids=kb_ids,
-        options={
-            "top_k": top_k,
-            "similarity_threshold": similarity_threshold,
-            "stream": True,
-            "enable_tools": enable_tools,
-            "enable_agent": enable_agent,
-            "use_rerank": use_rerank,
-        },
-        patient_context=parsed_patient_context,
-    )
+    try:
+        req = ChatRequest(
+            conversation_id=conversation_id,
+            question=question,
+            history=parsed_history,
+            kb_ids=kb_ids,
+            options={
+                "top_k": top_k,
+                "similarity_threshold": similarity_threshold,
+                "stream": True,
+                "enable_tools": enable_tools,
+                "enable_agent": enable_agent,
+                "use_rerank": use_rerank,
+                "max_length": max_length,
+                "max_paragraphs": max_paragraphs,
+            },
+            patient_context=parsed_patient_context,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     async def error_safe_stream():
         """包装流式生成器，捕获异常并以 SSE 错误事件返回"""
@@ -80,7 +87,8 @@ async def stream_chat_endpoint(
                 yield chunk
         except Exception as e:
             logger.error(f"Stream error for conversation {conversation_id}: {e}", exc_info=True)
-            yield f"event: error\ndata: {e}\n\n"
+            payload = {"code": "RAG_STREAM_ERROR", "message": str(e)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         error_safe_stream(),

@@ -58,7 +58,7 @@ async def create_index_endpoint(kb_id: int = Form(...)):
 async def delete_index_endpoint(kb_id: int = Form(...)):
     """删除指定 kb_id 下的所有向量"""
     try:
-        delete_kb_index(kb_id)
+        await asyncio.to_thread(delete_kb_index, kb_id)
         return {"status": "succeeded", "kb_id": kb_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -72,10 +72,10 @@ async def ingest_document_endpoint(
         kb_id: int = Form(...),
         doc_id: int = Form(...),
         doc_version_id: int = Form(...),
+        background_tasks: BackgroundTasks = None,
         chunk_size: int = Form(800),
         chunk_overlap: int = Form(120),
         embedding_model: str = Form("BAAI/bge-small-zh-v1.5"),
-        background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
     文档入库主接口（M-10: 改用 BackgroundTasks 确保任务完成）。
@@ -89,7 +89,16 @@ async def ingest_document_endpoint(
     # M-10: BackgroundTasks 确保任务在后台执行，FastAPI 生命周期内完成
     background_tasks.add_task(
         process_and_ingest_document,
-        content, filename, task_id, task_code, kb_id, doc_id, doc_version_id, chunk_size, chunk_overlap
+        content,
+        filename,
+        task_id,
+        task_code,
+        kb_id,
+        doc_id,
+        doc_version_id,
+        chunk_size,
+        chunk_overlap,
+        embedding_model,
     )
     return {"task_id": task_id, "status": "accepted"}
 
@@ -102,10 +111,10 @@ async def reindex_document_endpoint(
         kb_id: int = Form(...),
         doc_id: int = Form(...),
         doc_version_id: int = Form(...),
+        background_tasks: BackgroundTasks = None,
         chunk_size: int = Form(800),
         chunk_overlap: int = Form(120),
         embedding_model: str = Form("BAAI/bge-small-zh-v1.5"),
-        background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
     文档重索引：先删除旧 chunk，再执行重新入库。
@@ -120,7 +129,16 @@ async def reindex_document_endpoint(
     # M-10: BackgroundTasks 确保任务在后台执行
     background_tasks.add_task(
         reindex_document,
-        content, filename, task_id, task_code, kb_id, doc_id, doc_version_id, chunk_size, chunk_overlap
+        content,
+        filename,
+        task_id,
+        task_code,
+        kb_id,
+        doc_id,
+        doc_version_id,
+        chunk_size,
+        chunk_overlap,
+        embedding_model,
     )
     return {"task_id": task_id, "status": "accepted"}
 
@@ -140,15 +158,21 @@ async def reindex_text_endpoint(
     background_tasks.add_task(
         reindex_text,
         text=req.text,
-        task_id=0,
-        task_code="reindex-text",
+        task_id=req.task_id,
+        task_code=req.task_code,
         kb_id=req.kb_id,
         doc_id=req.doc_id,
         doc_version_id=req.doc_version_id,
         chunk_size=req.chunk_size,
         chunk_overlap=req.chunk_overlap,
+        embedding_model=req.embedding_model,
     )
-    return {"status": "accepted", "doc_id": req.doc_id, "doc_version_id": req.doc_version_id}
+    return {
+        "task_id": req.task_id,
+        "status": "accepted",
+        "doc_id": req.doc_id,
+        "doc_version_id": req.doc_version_id,
+    }
 
 
 @router.post("/delete-index", status_code=status.HTTP_200_OK)
