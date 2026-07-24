@@ -3,6 +3,10 @@ import json
 import uuid
 import logging
 
+import jieba
+
+jieba.setLogLevel(logging.WARNING)  # 减少日志噪音
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,28 +66,33 @@ def tokenize(text: str) -> list:
     """
     中文/英文混合分词器（供检索、BM25、Rerank 共用）。
 
-    - 中文字符：逐字输出
-    - 英文字符序列：按空格/符号切分，转小写
+    - 中文：基于 jieba 词组分词（精确模式）
+    - 英文：按空格/符号切分，转小写
     - 其他字符：跳过
     """
     if not text:
         return []
     tokens = []
-    current = ""
-    for ch in text:
-        if '\u4e00' <= ch <= '\u9fff':  # 中文字符
-            if current:
-                tokens.append(current.lower())
-                current = ""
-            tokens.append(ch)
-        elif ch.isalpha() or ch.isdigit():
-            current += ch
+    for word in jieba.cut(text, cut_all=False):
+        word = word.strip()
+        if not word:
+            continue
+        # 英文词转小写，数字/标点丢弃
+        if re.match(r'^[a-zA-Z]+$', word):
+            tokens.append(word.lower())
+        elif re.match(r'^\d+$', word):
+            pass  # 纯数字不加入 token（减少噪音）
+        elif re.match(r'^[\u4e00-\u9fff]+$', word):
+            tokens.append(word)  # 保留完整中文词
         else:
-            if current:
-                tokens.append(current.lower())
-                current = ""
-    if current:
-        tokens.append(current.lower())
+            # 混合词（如 "PD-1"）拆解
+            sub = re.findall(r'[a-zA-Z]+|\d+|[^\da-zA-Z\u4e00-\u9fff]+', word)
+            for s in sub:
+                s = s.strip()
+                if s and re.match(r'^[a-zA-Z]+$', s):
+                    tokens.append(s.lower())
+                elif s and re.match(r'^[\u4e00-\u9fff]+$', s):
+                    tokens.append(s)
     return tokens
 
 

@@ -20,7 +20,7 @@ pydantic>=2.7.4,<3.0.0
 
 # ----- Database -----
 SQLAlchemy==2.0.25
-aiomysql==0.2.0
+aiomysql==0.3.2
 
 # ----- Medical Imaging -----
 pydicom==3.0.2
@@ -71,3 +71,4 @@ pandas==2.2.3
 
 # ----- BM25 / Hybrid Search -----
 rank-bm25==0.2.2
+jieba==0.42.1

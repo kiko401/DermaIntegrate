@@ -26,6 +26,7 @@ class OpenAICompatRequest(BaseModel):
     patient_context: Optional[PatientContextObject] = None
     options: Optional[Dict[str, Any]] = None
     question: Optional[str] = None
+    doctor_id: Optional[int] = None
 
 
 def _parse_kb_ids(x_kb_ids: Optional[str]) -> List[int]:
@@ -83,6 +84,7 @@ def _build_internal_request(req: OpenAICompatRequest, x_kb_ids: Optional[str]) -
             kb_ids=kb_ids,
             patient_context=req.patient_context,
             options=options,
+            doctor_id=req.doctor_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

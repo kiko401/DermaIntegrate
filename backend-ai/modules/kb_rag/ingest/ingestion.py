@@ -27,6 +27,7 @@ async def process_and_ingest_document(
         doc_version_id: int,
         chunk_size: int,
         chunk_overlap: int,
+        embedding_model: str = "BAAI/bge-small-zh-v1.5",
         progress_queue: Optional[asyncio.Queue] = None
 ):
     """
@@ -108,6 +109,7 @@ async def reindex_document(
         doc_version_id: int,
         chunk_size: int,
         chunk_overlap: int,
+        embedding_model: str = "BAAI/bge-small-zh-v1.5",
         progress_queue: Optional[asyncio.Queue] = None
 ):
     """重建索引：先删旧索引，再重新入库（混合向量）"""
@@ -118,7 +120,8 @@ async def reindex_document(
         logger.warning(f"Failed to delete old index for doc_id={doc_id}: {e}")
 
     await process_and_ingest_document(
-        content, filename, task_id, task_code, kb_id, doc_id, doc_version_id, chunk_size, chunk_overlap, progress_queue
+        content, filename, task_id, task_code, kb_id, doc_id, doc_version_id,
+        chunk_size, chunk_overlap, embedding_model, progress_queue
     )
 
 
@@ -131,6 +134,7 @@ async def reindex_text(
         doc_version_id: int,
         chunk_size: int,
         chunk_overlap: int,
+        embedding_model: str = "BAAI/bge-small-zh-v1.5",
         progress_queue: Optional[asyncio.Queue] = None
 ):
     """

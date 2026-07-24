@@ -57,20 +57,13 @@ services:
     environment:
       - DOCKER_ENV=true
       - DATABASE_URL=mysql+aiomysql://root:root@mysql:3306/derma_ai
-      - HF_ENDPOINT=https://hf-mirror.com
+      - HF_ENDPOINT=https://huggingface.co
       - LOG_LEVEL=INFO
       - ENABLE_KB_RAG=true
       - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3000}
       - X_INTERNAL_SECRET=derma_internal_secret
       - EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
-      - VLM_API_KEY=${VLM_API_KEY:-}
-      - VLM_BASE_URL=${VLM_BASE_URL:-https://api.minimaxi.com/v1}
-      - VLM_MODEL=${VLM_MODEL:-MiniMax-M3}
-      - USE_MOCK_VLM=${USE_MOCK_VLM:-true}
-      - INTEGRATION_API_KEY=${INTEGRATION_API_KEY:-}
-      - INTEGRATION_BASE_URL=${INTEGRATION_BASE_URL:-https://api.deepseek.com}
-      - INTEGRATION_MODEL=${INTEGRATION_MODEL:-deepseek-chat}
-      - USE_MOCK_INTEGRATION=${USE_MOCK_INTEGRATION:-false}
+      # INTEGRATION_* 全程从 env_file (.env) 读取，不从主机 shell 环境覆盖
       - OMP_NUM_THREADS=2
       - TORCH_NUM_THREADS=2
     depends_on:

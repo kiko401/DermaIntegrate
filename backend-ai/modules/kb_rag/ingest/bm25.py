@@ -7,7 +7,9 @@ BM25 稀疏向量结构：
 - indices: 非零维度（token在词表中的位置）的列表
 - values: 对应维度的 BM25 得分（归一化到 0~1）
 """
+import os
 import re
+import json
 import logging
 import math
 import threading
@@ -17,6 +19,25 @@ from collections import Counter
 from shared.constants import BM25_K1, BM25_B, AVG_DOC_LEN
 
 logger = logging.getLogger(__name__)
+
+# IDF 持久化路径（与 retriever.py 共用同一路径）
+_IDF_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "bm25_idf.json")
+
+
+def _save_bm25_idf(idf: Dict[str, float]):
+    """持久化 BM25 IDF 到本地文件（追加合并）"""
+    try:
+        existing = {}
+        if os.path.exists(_IDF_PATH):
+            with open(_IDF_PATH, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        existing.update(idf)
+        os.makedirs(os.path.dirname(_IDF_PATH), exist_ok=True)
+        with open(_IDF_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False)
+        logger.info(f"Saved BM25 IDF to {_IDF_PATH}: {len(idf)} new terms, {len(existing)} total.")
+    except Exception as e:
+        logger.warning(f"Failed to save BM25 IDF: {e}")
 
 # BM25 参数（已统一到 shared/constants.py）
 _CACHE_VERSION: Dict[str, int] = {}  # 用于判断是否需要重建索引
@@ -176,6 +197,9 @@ def fit_bm25_on_collection(collection_name: str, texts: List[str]):
         _COLLECTION_VOCAB[collection_name] = vectorizer.vocab
         _COLLECTION_IDF[collection_name] = vectorizer.idf
         _CACHE_VERSION[collection_name] = _CACHE_VERSION.get(collection_name, 0) + 1
+
+    # 持久化 IDF 到磁盘（供后续启动时加载，实现增量更新）
+    _save_bm25_idf(vectorizer.idf)
 
     logger.info(f"BM25 fitted for collection '{collection_name}': vocab={len(vectorizer.vocab)}, idf_terms={len(vectorizer.idf)}")
 

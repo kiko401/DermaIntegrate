@@ -36,6 +36,7 @@ async def stream_chat_endpoint(
         max_paragraphs: int = Query(0),
         patient_context: Optional[str] = Query(None),  # JSON string of PatientContextObject
         history: Optional[str] = Query(None),  # JSON string of List[Dict[str, str]]
+        doctor_id: Optional[int] = Query(None),  # 医生 ID（临床病例权限隔离）
 ):
     """SSE 流式问答接口 (GET 方法)"""
 
@@ -76,6 +77,7 @@ async def stream_chat_endpoint(
                 "max_paragraphs": max_paragraphs,
             },
             patient_context=parsed_patient_context,
+            doctor_id=doctor_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

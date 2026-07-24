@@ -339,6 +339,7 @@ async def clinical_etl_and_ingest(
         patient_context: Dict,
         case_text: str,
         doc_version_id: int,
+        doctor_id: Optional[int] = None,
         chunk_size: int = 800,
         chunk_overlap: int = 120,
 ) -> Tuple[int, str]:
@@ -370,11 +371,12 @@ async def clinical_etl_and_ingest(
     fit_bm25_on_collection(COLLECTION_NAME, texts)
     sparse_vectors = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
 
-    # 6. Payload 构建
+    # 6. Payload 构建（含医生权限隔离字段）
     payloads = [{
         "kb_id": kb_id,
         "doc_id": doc_id,
         "doc_version_id": doc_version_id,
+        "doctor_id": doctor_id,
         "chunk_id": c["chunk_id"],
         "text": c["text"],
     } for c in chunks]

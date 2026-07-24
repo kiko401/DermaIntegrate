@@ -65,13 +65,23 @@ class RAGKnowledgeBase:
         if not any(c.name == self.collection_name for c in collections):
             self.client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=models.VectorParams(size=512, distance=models.Distance.COSINE)
+                vectors_config={
+                    "size": 512,
+                    "distance": models.Distance.COSINE,
+                }
             )
             # 创建 payload 索引
             self.client.create_payload_index(self.collection_name, "kb_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "doc_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "doc_version_id", models.PayloadSchemaType.INTEGER)
+            self.client.create_payload_index(self.collection_name, "doctor_id", models.PayloadSchemaType.INTEGER)
             logger.info(f"Collection '{self.collection_name}' created with payload indexes.")
+        else:
+            # 对已有 collection 补加 doctor_id 索引（幂等）
+            try:
+                self.client.create_payload_index(self.collection_name, "doctor_id", models.PayloadSchemaType.INTEGER)
+            except Exception:
+                pass
 
     def _parse_documents(self, docs_dir: str) -> Tuple[List[str], List[Dict]]:
         """

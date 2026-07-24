@@ -42,20 +42,3 @@ def register_kb_rag_module(app: FastAPI):
 
     except Exception as e:
         logger.error(f"Failed to register KB_RAG routes: {e}", exc_info=True)
-
-    # 启动时预热 Qdrant 和 Embedding 模型 + 初始化规则表
-    @app.on_event("startup")
-    async def startup_kb_rag_event():
-        logger.info("KB_RAG startup: Initializing Qdrant collection and Embedding model...")
-        import asyncio
-        from .ingest.vector_store import init_qdrant_collection
-        from .ingest.embeddings import get_embedder
-        from .rules.store import init_rules_table
-        try:
-            # 避免在 async 函数中直接调用阻塞 sync 函数，使用 to_thread 托簂
-            await asyncio.to_thread(init_qdrant_collection)
-            await asyncio.to_thread(get_embedder)  # 预加载模型
-            await init_rules_table()  # 初始化规则表
-            logger.info("KB_RAG startup completed successfully.")
-        except Exception as e:
-            logger.error(f"KB_RAG startup failed: {e}", exc_info=True)

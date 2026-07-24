@@ -287,13 +287,14 @@ async def retrieval(state: AgentState) -> AgentState:
     threshold = req.options.get("similarity_threshold", 0.35)
     use_rerank = req.options.get("use_rerank", False)
 
-    # 执行检索
+    # 执行检索（含医生权限隔离）
     chunks, is_blocked = await retrieve(
         state["rewritten_query"],
         req.kb_ids,
         top_k,
         threshold,
         use_rerank=use_rerank,
+        doctor_id=req.doctor_id,
     )
 
     state["chunks"] = chunks
@@ -438,10 +439,10 @@ async def response_finalize(state: AgentState) -> AgentState:
     if state.get("response"):
         return state
 
-    # 计算置信度
+    # 计算置信度（使用归一化 dense 分数，与阻断阈值单位一致，0~1范围）
     chunks = state.get("chunks", [])
     if chunks:
-        confidence = max(c.get("score", 0.0) for c in chunks)
+        confidence = max(c.get("dense_norm", 0.0) for c in chunks)
     else:
         confidence = 0.8  # 闲聊等场景的默认置信度
 

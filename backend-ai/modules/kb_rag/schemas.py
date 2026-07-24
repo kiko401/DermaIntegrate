@@ -71,6 +71,8 @@ class ChatRequest(BaseModel):
     kb_ids: List[int] = []
     patient_context: Optional[PatientContextObject] = None
     options: Optional[Dict[str, Any]] = None
+    # 医生 ID（用于临床病例检索权限隔离；空则不启用医生维度过滤）
+    doctor_id: Optional[int] = None
 
     @model_validator(mode="after")
     def _merge_options(self):
@@ -209,6 +211,8 @@ class ETLClinicalRequest(BaseModel):
     patient_context: PatientContextObject
     case_text: str
     doc_version_id: int
+    # 负责医生的 ID（用于检索权限隔离）
+    doctor_id: Optional[int] = None
     chunk_size: int = 800
     chunk_overlap: int = 120
 

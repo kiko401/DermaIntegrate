@@ -53,15 +53,49 @@ async def lifespan(app: FastAPI):
 
     rag_init_task = asyncio.create_task(asyncio.to_thread(_init_rag))
 
-    # 3. KB-RAG 初始化由 modules.kb_rag.__init__.py 的 startup_event 统一处理
-    #    （register_kb_rag_module 在下面调用，startup_event 在 startup 时执行）
-    #    此处无需重复初始化，避免双重初始化竞态
+    # 3. KB-RAG 模块注册（在 yield 之前执行）
+    if ENABLE_KB_RAG:
+        try:
+            from modules.kb_rag import register_kb_rag_module
+            register_kb_rag_module(app)
+            logger.info("KB-RAG routes registered.")
+        except Exception as e:
+            logger.error(f"Failed to register KB-RAG routes: {e}")
+
+        # KB-RAG 初始化：规则表必须创建，Qdrant/Embedding 失败不阻断
+        try:
+            from modules.kb_rag.rules.store import init_rules_table
+            await init_rules_table()
+            logger.info("KB-RAG rules tables initialized.")
+            # Qdrant 集合初始化（网络问题不阻断）
+            try:
+                from modules.kb_rag.ingest.vector_store import init_qdrant_collection_async
+                await init_qdrant_collection_async()
+                logger.info("KB-RAG Qdrant collection initialized.")
+            except Exception as e:
+                logger.warning(f"KB-RAG Qdrant init skipped (non-fatal): {e}")
+            # Embedding 模型预热（网络问题不阻断启动）
+            try:
+                from modules.kb_rag.ingest.embeddings import get_embedder
+                await asyncio.to_thread(get_embedder)
+                logger.info("KB-RAG embedding model loaded.")
+            except Exception as e:
+                logger.warning(f"KB-RAG embedding model load skipped (non-fatal): {e}")
+            # BM25 全量拟合（从 Qdrant 加载所有 chunk，保证 sparse search 词表完整）
+            try:
+                from modules.kb_rag.retrieval.retriever import fit_bm25_on_qdrant_chunks
+                await asyncio.to_thread(fit_bm25_on_qdrant_chunks)
+                logger.info("KB-RAG BM25 vectorizer fitted on all chunks.")
+            except Exception as e:
+                logger.warning(f"KB-RAG BM25 fitting skipped (non-fatal): {e}")
+        except Exception as e:
+            logger.error(f"KB-RAG init failed: {e}")
 
     # 4. 启动清理任务（异步，无阻塞）
     cleanup_task = asyncio.create_task(cleanup_loop())
     logger.info("File cleanup background task started.")
 
-    # 5. 【关键】在 yield 之前等待 rag_init 完成，
+    # 6. 【关键】在 yield 之前等待 rag_init 完成，
     #    确保 app.state.rag_kb 在服务器接受第一个请求前就已赋值
     #    注意：rag_init 在线程池中运行，await asyncio.to_thread 的结果是
     #    在子线程完全执行完毕后主线程才继续——这仍然是阻塞 startup 的，
@@ -69,7 +103,7 @@ async def lifespan(app: FastAPI):
     rag_kb = await rag_init_task
     app.state.rag_kb = rag_kb
 
-    # 6. 服务器现在开始接受连接（cleanup_task 已在后台运行）
+    # 8. 服务器现在开始接受连接（cleanup_task 已在后台运行）
     yield
 
     # shutdown：取消清理任务
@@ -110,12 +144,3 @@ async def diagnosis_uncertain_handler(request: Request, exc: DiagnosisUncertainE
         content={"detail": str(exc)},
     )
 
-
-# KB-RAG 拓展路由（可选模块）
-if ENABLE_KB_RAG:
-    try:
-        from modules.kb_rag import register_kb_rag_module
-        register_kb_rag_module(app)
-        logger.info("KB-RAG routes registered.")
-    except Exception as e:
-        logger.error(f"Failed to register KB-RAG routes: {e}")
