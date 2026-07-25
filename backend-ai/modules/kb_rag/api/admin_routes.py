@@ -431,7 +431,11 @@ async def clone_kb_index_endpoint(req: CloneKbIndexRequest):
     AI 域仅负责 Qdrant 向量层面的复制。
     """
     try:
-        result = await clone_kb_index_async(req.source_kb_id, req.target_kb_id)
+        result = await clone_kb_index_async(
+            req.source_kb_id,
+            req.target_kb_id,
+            [mapping.model_dump() for mapping in req.document_mappings],
+        )
         return CloneKbIndexResponse(**result)
     except Exception as e:
         logger.error(f"Failed to clone KB index: {e}", exc_info=True)

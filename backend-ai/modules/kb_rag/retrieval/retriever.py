@@ -16,8 +16,10 @@ from typing import List, Dict, Any, Tuple, Optional
 from collections import Counter
 
 from ..ingest.embeddings import get_embedder
-from ..ingest.vector_store import get_qdrant_client, COLLECTION_NAME, DENSE_VECTOR_NAME
+from ..ingest.vector_store import get_qdrant_client, COLLECTION_NAME, DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
+from ..ingest.bm25 import get_bm25_vectorizer, fit_bm25_on_collection, generate_sparse_vector
 from qdrant_client.http import models
+from qdrant_client.http.models import SparseVector as QdrantSparseVector
 from shared.constants import BM25_K1, BM25_B, AVG_DOC_LEN
 
 from .reranker import rerank
@@ -27,6 +29,60 @@ logger = logging.getLogger(__name__)
 # BM25 参数（已统一到 shared/constants.py）
 # RRF 融合参数
 RRF_K = 60  # 标准值
+
+# BM25Vectorizer 全局初始拟合标志（防止重复拟合）
+_bm25_fitted = False
+
+
+def _load_all_chunk_texts() -> List[str]:
+    """从 Qdrant 加载所有 chunk 的原文（用于 BM25 全量拟合）"""
+    try:
+        client = get_qdrant_client()
+        all_texts = []
+        offset = None
+        while True:
+            pts, next_offset = client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for pt in pts:
+                text = pt.payload.get("text", "") if pt.payload else ""
+                if text:
+                    all_texts.append(text)
+            if next_offset is None:
+                break
+            offset = next_offset
+        return all_texts
+    except Exception as e:
+        logger.warning(f"Failed to load chunk texts from Qdrant for BM25 fitting: {e}")
+        return []
+
+
+def fit_bm25_on_qdrant_chunks() -> bool:
+    """
+    在 Qdrant 所有 chunk 上拟合 BM25Vectorizer（全量词表 + 全局 IDF）。
+    应在 KB-RAG 初始化时调用一次，使后续 generate_sparse_vector 生效。
+    """
+    global _bm25_fitted
+    if _bm25_fitted:
+        return True
+
+    texts = _load_all_chunk_texts()
+    if not texts:
+        logger.warning("No texts found in Qdrant for BM25 fitting.")
+        return False
+
+    try:
+        fit_bm25_on_collection(COLLECTION_NAME, texts)
+        _bm25_fitted = True
+        logger.info(f"BM25 fitted on {len(texts)} chunks from Qdrant.")
+        return True
+    except Exception as e:
+        logger.error(f"BM25 fitting failed: {e}")
+        return False
 
 
 def _tokenize(text: str) -> List[str]:
@@ -170,6 +226,7 @@ async def retrieve(
     threshold: float = 0.35,
     use_hybrid: bool = True,
     use_rerank: bool = False,
+    doctor_id: Optional[int] = None,
 ) -> Tuple[List[Dict], bool]:
     """
     执行混合检索（Dense + BM25 + RRF融合）
@@ -180,6 +237,7 @@ async def retrieve(
         top_k: 返回的最终结果数
         threshold: Dense向量相似度阈值（低于此值阻断）
         use_hybrid: 是否启用混合检索（False则仅用Dense）
+        doctor_id: 医生ID（用于临床病例权限隔离；空则不过滤）
 
     Returns:
         (chunks列表, 是否被低置信度阻断)
@@ -191,33 +249,55 @@ async def retrieve(
         embedder = get_embedder()
         query_vector = embedder.encode(query, normalize_embeddings=True).tolist()
 
-        # 多知识库过滤
-        kb_filter = models.Filter(
-            must=[
+        # 多知识库过滤 + 医生权限隔离
+        must_conditions = [
+            models.FieldCondition(
+                key="kb_id",
+                match=models.MatchAny(any=kb_ids)
+            )
+        ]
+        if doctor_id is not None:
+            must_conditions.append(
                 models.FieldCondition(
-                    key="kb_id",
-                    match=models.MatchAny(any=kb_ids)
+                    key="doctor_id",
+                    match=models.MatchValue(value=doctor_id)
                 )
-            ]
-        )
+            )
+        kb_filter = models.Filter(must=must_conditions)
 
         fetch_limit = top_k * 4 if use_hybrid else top_k
 
         # ===== 1. Dense 向量检索（Qdrant 同步调用包装为异步）=====
         def _search_dense():
             client = get_qdrant_client()
-            return client.query_points(
-                collection_name=COLLECTION_NAME,
-                query=query_vector,
-                query_filter=kb_filter,
-                limit=fetch_limit,
-                using=DENSE_VECTOR_NAME,
-                with_payload=True
-            )
+            # 优先用命名向量搜索
+            try:
+                return client.query_points(
+                    collection_name=COLLECTION_NAME,
+                    query=query_vector,
+                    query_filter=kb_filter,
+                    limit=fetch_limit,
+                    using=DENSE_VECTOR_NAME,
+                    with_payload=True
+                )
+            except Exception:
+                # fallback：尝试默认向量（兼容 legacy init 写入的无名向量数据）
+                try:
+                    return client.query_points(
+                        collection_name=COLLECTION_NAME,
+                        query=query_vector,
+                        query_filter=kb_filter,
+                        limit=fetch_limit,
+                        with_payload=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Dense search failed (both named and default): {e}")
+                    # 两个搜索都失败时返回 None，后续统一处理
+                    return None
 
         search_response = await asyncio.to_thread(_search_dense)
 
-        if not search_response.points:
+        if search_response is None or not search_response.points:
             logger.warning(f"Dense retrieval returned no results. Query: {query[:50]}")
             return [], True
 
@@ -236,22 +316,49 @@ async def retrieve(
                 "score": hit.score,  # 临时存 dense 分数
             })
 
-        # ===== 2. BM25 关键词检索 =====
+        # ===== 2. BM25 Sparse 向量检索（真实 Qdrant sparse index 查询）=====
         bm25_scores: Dict[str, float] = {}
         if use_hybrid:
-            idf = _get_global_idf()
-            if idf:
-                scorer = BM25Scorer(idf)
-                for c in candidates:
-                    bm25_s = scorer.score(query, c["text"])
-                    bm25_scores[c["chunk_id"]] = bm25_s
-            else:
-                # 无预存 IDF：使用关键词命中计数作为轻量级替代
-                query_tokens = set(_tokenize(query))
-                for c in candidates:
-                    doc_tokens = set(_tokenize(c["text"]))
-                    overlap = len(query_tokens & doc_tokens)
-                    bm25_scores[c["chunk_id"]] = float(overlap)
+            # 优先使用 Qdrant sparse index 做真正的 BM25 混合检索
+            sparse_indices, sparse_values = generate_sparse_vector(query, COLLECTION_NAME)
+            if sparse_indices:
+                def _search_sparse():
+                    try:
+                        client = get_qdrant_client()
+                        return client.query_points(
+                            collection_name=COLLECTION_NAME,
+                            query=QdrantSparseVector(indices=sparse_indices, values=sparse_values),
+                            using=SPARSE_VECTOR_NAME,
+                            query_filter=kb_filter,
+                            limit=fetch_limit,
+                            with_payload=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Sparse search failed: {e}")
+                        return None
+
+                sparse_resp = await asyncio.to_thread(_search_sparse)
+                if sparse_resp and sparse_resp.points:
+                    for hit in sparse_resp.points:
+                        payload = hit.payload or {}
+                        chunk_id = payload.get("chunk_id", "")
+                        bm25_scores[chunk_id] = hit.score
+                    logger.info(f"Sparse search retrieved {len(sparse_resp.points)} hits.")
+
+            # 兜底：如果 sparse 搜索无结果或未拟合，使用本地 BM25 评分（候选集重打分）
+            if not bm25_scores:
+                idf = _get_global_idf()
+                if idf:
+                    scorer = BM25Scorer(idf)
+                    for c in candidates:
+                        bm25_s = scorer.score(query, c["text"])
+                        bm25_scores[c["chunk_id"]] = bm25_s
+                else:
+                    query_tokens = set(_tokenize(query))
+                    for c in candidates:
+                        doc_tokens = set(_tokenize(c["text"]))
+                        overlap = len(query_tokens & doc_tokens)
+                        bm25_scores[c["chunk_id"]] = float(overlap)
 
         # ===== 3. RRF 融合 =====
         max_dense = max(dense_scores.values()) if dense_scores else 1.0

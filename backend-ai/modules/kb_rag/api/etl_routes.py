@@ -83,6 +83,7 @@ async def clinical_etl_endpoint(req: ETLClinicalRequest):
             patient_context=req.patient_context.model_dump(),
             case_text=req.case_text,
             doc_version_id=req.doc_version_id,
+            doctor_id=req.doctor_id,
             chunk_size=req.chunk_size,
             chunk_overlap=req.chunk_overlap,
         )

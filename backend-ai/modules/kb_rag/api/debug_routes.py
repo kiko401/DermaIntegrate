@@ -138,7 +138,7 @@ async def doc_versions_endpoint(req: DocVersionsRequest):
         all_points = []
         offset = None
         while True:
-            result = client.scroll(
+            points, next_offset = client.scroll(
                 collection_name=COLLECTION_NAME,
                 scroll_filter=kb_filter,
                 limit=500,
@@ -146,10 +146,10 @@ async def doc_versions_endpoint(req: DocVersionsRequest):
                 with_payload=True,
                 with_vectors=False,
             )
-            all_points.extend(result.points)
-            if result.next_page_offset is None:
+            all_points.extend(points)
+            if next_offset is None:
                 break
-            offset = result.next_page_offset
+            offset = next_offset
 
         if not all_points:
             return DocVersionsResponse(doc_id=req.doc_id, versions=[])
@@ -311,9 +311,16 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
         from ..utils import tokenize as _shared_tokenize
         from ..ingest.vector_store import COLLECTION_NAME
 
-        # 1. 解析关键词
-        keywords = req.query.strip().split()
-        if not keywords:
+        # 1. 解析关键词（对查询短语也进行分词，实现 token 级别匹配）
+        query_phrases = req.query.strip().split()
+        if not query_phrases:
+            raise ValueError("查询词不能为空")
+        # 将每个查询短语分词，展平为 token 列表
+        query_tokens: set[str] = set()
+        for phrase in query_phrases:
+            for tok in _shared_tokenize(phrase):
+                query_tokens.add(tok)
+        if not query_tokens:
             raise ValueError("查询词不能为空")
 
         # 2. 查询 Qdrant 获取所有候选 chunk（按 kb_id + doc_id 过滤）
@@ -330,7 +337,7 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
         all_points = []
         offset = None
         while True:
-            result = client.scroll(
+            points, next_offset = client.scroll(
                 collection_name=COLLECTION_NAME,
                 scroll_filter=kb_filter,
                 limit=500,
@@ -338,10 +345,10 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
                 with_payload=True,
                 with_vectors=False,
             )
-            all_points.extend(result.points)
-            if result.next_page_offset is None:
+            all_points.extend(points)
+            if next_offset is None:
                 break
-            offset = result.next_page_offset
+            offset = next_offset
 
         if not all_points:
             return KeywordSearchResponse(query=req.query, total_hits=0, results=[])
@@ -354,11 +361,10 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
             if not text:
                 continue
 
-            tokens = _shared_tokenize(text)
-            token_set = set(tokens)
+            doc_tokens = set(_shared_tokenize(text))
 
-            # 命中关键词
-            hit_keywords = [kw for kw in keywords if kw in token_set]
+            # 命中关键词：查询 token 与文档 token 的交集
+            hit_keywords = [tok for tok in query_tokens if tok in doc_tokens]
             if not hit_keywords:
                 continue
 

@@ -52,6 +52,18 @@ def _get_async_engine():
             max_overflow=5,
             pool_pre_ping=True,
         )
+        # SQLAlchemy 2.0.25 的 MySQLDialect_aiomysql 复用 pymysql.do_ping，
+        # 但 pymysql.do_ping 调用 dbapi_connection.ping() 不传参数，
+        # 而 aiomysql 的 AsyncAdapt_aiomysql_connection.ping(reconnect) 必填参数。
+        # 修复方案：patch ping 方法使其 reconnect 有默认值。
+        try:
+            from sqlalchemy.dialects.mysql.aiomysql import AsyncAdapt_aiomysql_connection
+            _orig_ping = AsyncAdapt_aiomysql_connection.ping
+            def _patched_ping(self, reconnect=True):
+                return _orig_ping(self, reconnect)
+            AsyncAdapt_aiomysql_connection.ping = _patched_ping
+        except Exception:
+            pass  # 非关键路径，失败不阻断
         _async_session_factory = async_sessionmaker(
             _async_engine, class_=AsyncSession, expire_on_commit=False
         )

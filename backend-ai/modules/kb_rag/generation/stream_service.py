@@ -38,7 +38,7 @@ def _format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _build_sse_events(resp_dict: dict, route: str) -> AsyncGenerator[str, None]:
+async def _build_sse_events(resp_dict: dict, route: str) -> AsyncGenerator[str, None]:
     """将 LangGraph 执行结果转换为 SSE 事件序列。
 
     严格按照文档定义的事件顺序和格式生成 SSE 事件流。
