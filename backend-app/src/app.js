@@ -44,6 +44,10 @@ app.use('/api/patients', requireDoctor, require('./routes/patients'));
 app.use('/api/rag/tasks',     require('./routes/rag_tasks'));
 app.use('/api/rag/kbs',       requireAuth,  require('./routes/rag_kb'));
 app.use('/api/rag/documents', requireAuth,  require('./routes/rag_documents'));
+// Phase 6：日志、反馈、配置路由（需在 rag_chat 前注册，避免路径被 /api/rag 通配截断）
+app.use('/api/rag',           require('./routes/rag_logs'));
+app.use('/api/rag',           require('./routes/rag_feedback'));
+app.use('/api/rag',           require('./routes/rag_config'));
 app.use('/api/rag',           require('./routes/rag_chat'));
 app.use('/api/rag',           requireAdmin, require('./routes/rag_debug'));
 

@@ -241,6 +241,7 @@ async function listForAiExport(query = {}) {
       answer: row.response_summary || '',
       confidence: row.confidence_score != null ? Number(row.confidence_score) : null,
       kb_id: kbList[0] || null,
+      kb_ids: kbList,
       feedback: ratingText,
       created_at: row.created_at,
     });
@@ -514,6 +515,9 @@ async function streamChat(doctor, conversationId, query, res) {
   qs.set('similarity_threshold', String(query.similarity_threshold ?? cfg.similarity_threshold ?? 0.35));
   qs.set('enable_tools', String(query.enable_tools ?? (cfg.enable_tools ? 'true' : 'false')));
   qs.set('enable_agent', String(query.enable_agent ?? (cfg.enable_agent ? 'true' : 'false')));
+  qs.set('use_rerank', String(query.use_rerank ?? (cfg.enable_rerank ? 'true' : 'false')));
+  qs.set('max_length', String(query.max_length ?? cfg.max_length ?? 0));
+  qs.set('max_paragraphs', String(query.max_paragraphs ?? cfg.max_paragraphs ?? 0));
   if (patientContext) qs.set('patient_context', JSON.stringify(patientContext));
   if (history.length) qs.set('history', JSON.stringify(history));
   selectedKbIds.forEach(id => qs.append('kb_ids', String(id)));
@@ -590,6 +594,10 @@ async function streamChat(doctor, conversationId, query, res) {
             latency_ms: Math.round(Date.now() - startAt),
             status: resultPayload.status === 'blocked' ? 'blocked' : 'success',
           });
+          // 通知前端已落库的 message_id，供反馈功能使用
+          try {
+            res.write(`event: saved\ndata: ${JSON.stringify({ message_id: assistantMsg.id })}\n\n`);
+          } catch { /* 客户端已断开，忽略 */ }
         } catch (e) {
           console.error('[streamChat] DB persist error:', e.message);
         }

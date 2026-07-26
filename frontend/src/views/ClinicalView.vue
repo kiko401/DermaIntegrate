@@ -115,8 +115,11 @@ const pacsCompareHint = computed(() =>
 const patientChatContext = computed(() => {
   if (!patient.value) return null
 
-  const gender = patient.value.gender || patient.value.sex || '??'
-  const age = patient.value.age ?? patient.value.age_years ?? null
+  const genderRaw = String(patient.value.gender ?? patient.value.sex ?? '')
+  const gender = (genderRaw === '1' || genderRaw === '男') ? '男'
+               : (genderRaw === '2' || genderRaw === '女') ? '女'
+               : '未知'
+  const age = patient.value.age ?? patient.value.age_years ?? calcAge(patient.value.birth_date)
   const chiefComplaint = his.value[0]?.chief_complaint || his.value[0]?.complaint || ''
   const diagnosis = pathology.value[0]?.diagnosis_text || pathology.value[0]?.histological_type || his.value[0]?.diagnosis_name || ''
   const pathologyPoints = pathology.value
@@ -124,9 +127,9 @@ const patientChatContext = computed(() => {
       const points = []
       if (item.histological_type) points.push(String(item.histological_type))
       if (item.breslow_thickness_mm != null) points.push(`Breslow ${item.breslow_thickness_mm} mm`)
-      if (item.ulceration != null) points.push(item.ulceration ? '???' : '???')
+      if (item.ulceration != null) points.push(item.ulceration ? '有溃疡' : '无溃疡')
       if (item.braf_mutation) points.push(`BRAF ${item.braf_mutation}`)
-      return points.join('?')
+      return points.join('，')
     })
     .filter(Boolean)
     .slice(0, 3)
@@ -136,20 +139,20 @@ const patientChatContext = computed(() => {
       const parts = []
       if (item.body_part) parts.push(String(item.body_part))
       if (item.description) parts.push(String(item.description))
-      return parts.join('?')
+      return parts.join('，')
     })
     .filter(Boolean)
 
   const summaryParts = [
-    `??${gender}${age != null ? `?${age}?` : ''}`,
-    chiefComplaint ? `???${chiefComplaint}` : '',
-    diagnosis ? `??/?????${diagnosis}` : '',
-    pathologyPoints.length ? `?????${pathologyPoints.join('?')}` : '',
-    pacsPoints.length ? `?????${pacsPoints.join('?')}` : '',
+    `患者：${gender}${age != null ? `，${age}岁` : ''}`,
+    chiefComplaint ? `主诉：${chiefComplaint}` : '',
+    diagnosis ? `诊断：${diagnosis}` : '',
+    pathologyPoints.length ? `病理要点：${pathologyPoints.join('；')}` : '',
+    pacsPoints.length ? `影像要点：${pacsPoints.join('；')}` : '',
   ].filter(Boolean)
 
   return {
-    summary_text: summaryParts.join('?') + '?',
+    summary_text: summaryParts.join('；'),
     structured: {
       gender,
       age,

@@ -169,6 +169,9 @@ async function sendMessage() {
           if (payload.disclaimer) msg.disclaimer = payload.disclaimer
           msg.confidence = payload.confidence
           msg._streaming = false
+        } else if (eventType === 'saved') {
+          // 后端落库完成，携带真实 message_id，供反馈使用
+          msg.id = payload.message_id
         } else if (eventType === 'disclaimer') {
           msg.disclaimer = payload.disclaimer
         } else if (eventType === 'progress') {
@@ -194,6 +197,26 @@ async function sendMessage() {
   } finally {
     loading.value = false
     scrollToBottom()
+  }
+}
+
+// ── 反馈 ──────────────────────────────────────────────────────────────
+const feedbackState = ref({}) // { [msgId]: 'up' | 'down' | 'sending' }
+
+async function submitFeedback(msg, rating) {
+  if (!msg.id) return
+  const key = msg.id
+  if (feedbackState.value[key] === 'sending') return
+  feedbackState.value[key] = 'sending'
+  try {
+    await apiFetch('/api/rag/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: msg.id, rating }),
+    })
+    feedbackState.value[key] = rating
+  } catch {
+    delete feedbackState.value[key]
   }
 }
 
@@ -438,6 +461,22 @@ function displayRisk(item) {
             </div>
 
             <div v-if="msg.disclaimer" class="msg-disclaimer">{{ msg.disclaimer }}</div>
+
+            <!-- 反馈按钮：只对有 id 的已落库消息展示 -->
+            <div v-if="msg.role === 'assistant' && msg.id && !msg._streaming" class="msg-feedback">
+              <button
+                :class="['fb-btn', feedbackState[msg.id] === 'up' && 'fb-active-up']"
+                :disabled="feedbackState[msg.id] === 'sending'"
+                title="有帮助"
+                @click="submitFeedback(msg, 'up')"
+              >👍</button>
+              <button
+                :class="['fb-btn', feedbackState[msg.id] === 'down' && 'fb-active-down']"
+                :disabled="feedbackState[msg.id] === 'sending'"
+                title="没帮助"
+                @click="submitFeedback(msg, 'down')"
+              >👎</button>
+            </div>
           </div>
         </div>
 
@@ -572,6 +611,13 @@ function displayRisk(item) {
 .msg-risks { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
 .risk-tag { font-size: 11px; padding: 2px 8px; border-radius: 12px; background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
 .msg-disclaimer { margin-top: 10px; font-size: 11px; color: #f59e0b; border-top: 1px solid #fef3c7; padding-top: 8px; }
+
+.msg-feedback { display: flex; gap: 6px; margin-top: 8px; }
+.fb-btn { border: 1px solid #e2e8f0; background: #fff; border-radius: 6px; padding: 2px 8px; font-size: 14px; cursor: pointer; color: #94a3b8; transition: border-color 0.15s, background 0.15s; }
+.fb-btn:hover:not(:disabled) { border-color: #2563eb; background: #eff6ff; }
+.fb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.fb-active-up { background: #dcfce7 !important; border-color: #16a34a !important; }
+.fb-active-down { background: #fee2e2 !important; border-color: #dc2626 !important; }
 
 .input-bar { display: flex; flex-direction: column; gap: 6px; padding: 16px 24px; background: #fff; border-top: 1px solid #e2e8f0; flex-shrink: 0; }
 .kb-hint { font-size: 12px; color: #b45309; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 12px; }

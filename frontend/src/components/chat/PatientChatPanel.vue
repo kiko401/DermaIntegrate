@@ -165,6 +165,8 @@ async function send() {
         if (eventType === 'result') {
           finalPayload = payload
           if (payload.answer) streamAnswer.value = payload.answer
+        } else if (eventType === 'saved') {
+          if (finalPayload) finalPayload._savedMessageId = payload.message_id
         } else if (eventType === 'disclaimer') {
           if (finalPayload) finalPayload.disclaimer = payload.disclaimer
         } else if (eventType === 'progress') {
@@ -179,6 +181,7 @@ async function send() {
     if (finalPayload) {
       messages.value.push({
         role: 'assistant',
+        id: finalPayload._savedMessageId || null,
         content_markdown: finalPayload.answer || streamAnswer.value || '',
         sources: finalPayload.sources || [],
         disclaimer: finalPayload.disclaimer || '',
@@ -210,6 +213,27 @@ function onKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     send()
+  }
+}
+
+// ── 反馈 ──────────────────────────────────────────────────────────────
+const feedbackState = ref({})
+
+async function submitFeedback(msg, rating) {
+  if (!msg.id) return
+  const key = msg.id
+  if (feedbackState.value[key] === 'sending') return
+  feedbackState.value[key] = 'sending'
+  try {
+    const res = await apiFetch('/api/rag/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: msg.id, rating }),
+    })
+    feedbackState.value[key] = res.ok ? rating : null
+    if (!res.ok) delete feedbackState.value[key]
+  } catch {
+    delete feedbackState.value[key]
   }
 }
 
@@ -306,6 +330,22 @@ onUnmounted(() => {
             <!-- 免责声明 -->
             <div v-if="msg.disclaimer" class="pcp-disclaimer">
               {{ msg.disclaimer }}
+            </div>
+
+            <!-- 反馈按钮 -->
+            <div v-if="msg.id" class="pcp-feedback">
+              <button
+                :class="['pcp-fb-btn', feedbackState[msg.id] === 'up' && 'pcp-fb-up']"
+                :disabled="feedbackState[msg.id] === 'sending'"
+                title="有帮助"
+                @click="submitFeedback(msg, 'up')"
+              >👍</button>
+              <button
+                :class="['pcp-fb-btn', feedbackState[msg.id] === 'down' && 'pcp-fb-down']"
+                :disabled="feedbackState[msg.id] === 'sending'"
+                title="没帮助"
+                @click="submitFeedback(msg, 'down')"
+              >👎</button>
             </div>
           </div>
         </div>
@@ -542,6 +582,13 @@ onUnmounted(() => {
   border-top: 1px solid rgba(116, 152, 193, 0.1);
   padding-top: 6px;
 }
+
+.pcp-feedback { display: flex; gap: 5px; margin-top: 6px; }
+.pcp-fb-btn { border: 1px solid #e2e8f0; background: #fff; border-radius: 5px; padding: 2px 7px; font-size: 13px; cursor: pointer; color: #94a3b8; transition: border-color 0.15s, background 0.15s; }
+.pcp-fb-btn:hover:not(:disabled) { border-color: #2563eb; background: #eff6ff; }
+.pcp-fb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pcp-fb-up { background: #dcfce7 !important; border-color: #16a34a !important; }
+.pcp-fb-down { background: #fee2e2 !important; border-color: #dc2626 !important; }
 
 .pcp-cursor {
   display: inline-block;
