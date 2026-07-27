@@ -63,7 +63,7 @@ def cleanup_old_files():
             for filename in os.listdir(dir_path):
                 file_path = os.path.join(dir_path, filename)
                 try:
-                    if os.isfile(file_path):
+                    if os.path.isfile(file_path):
                         file_mtime = os.path.getmtime(file_path)
                         if now - file_mtime > MAX_AGE_SECONDS:
                             os.remove(file_path)
