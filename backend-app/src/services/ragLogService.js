@@ -164,4 +164,44 @@ async function exportLogs(body = {}) {
   return exportAsCsv(headers, data);
 }
 
-module.exports = { listLogs, getStats, exportLogs };
+// Low-level fire-and-forget audit writer — does not throw
+async function writeLog({
+  log_type = 'api',
+  doctor_id = null,
+  conversation_id = null,
+  message_id = null,
+  kb_ids = [],
+  trace_id = null,
+  request_summary = null,
+  response_summary = null,
+  latency_ms = null,
+  status = 'success',
+  detail_json = null,
+} = {}) {
+  try {
+    await db.query(
+      `INSERT INTO rag_logs
+         (log_type, doctor_id, conversation_id, message_id,
+          kb_ids_json, trace_id, request_summary, response_summary,
+          latency_ms, status, detail_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        log_type,
+        doctor_id || null,
+        conversation_id || null,
+        message_id || null,
+        kb_ids && kb_ids.length ? JSON.stringify(kb_ids) : null,
+        trace_id || null,
+        request_summary ? String(request_summary).slice(0, 500) : null,
+        response_summary ? String(response_summary).slice(0, 500) : null,
+        latency_ms != null ? Math.round(latency_ms) : null,
+        status,
+        detail_json ? JSON.stringify(detail_json) : null,
+      ]
+    );
+  } catch {
+    // audit failure must never break the main flow
+  }
+}
+
+module.exports = { listLogs, getStats, exportLogs, writeLog };

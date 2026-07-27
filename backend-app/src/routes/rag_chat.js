@@ -4,6 +4,7 @@ const { requireAuth } = require('../middleware/auth');
 const ragApiAuth = require('../middleware/ragApiAuth');
 const internalToken = require('../middleware/internalToken');
 const svc = require('../services/ragConversationService');
+const { writeLog } = require('../services/ragLogService');
 
 const router = express.Router();
 const AI_BASE_URL = process.env.RAG_AI_BASE_URL || 'http://localhost:8000';
@@ -15,22 +16,32 @@ function requireRagAccess(req, res, next) {
   if (req.headers.authorization?.startsWith('Bearer ')) {
     return ragApiAuth(req, res, next);
   }
-  return res.status(401).json({ error: 'Unauthorized' });
+  return res.status(401).json({ error: 'AUTH_REQUIRED', message: '未认证或 Token 无效' });
 }
 
-async function proxyCompletionToAi(req, res) {
-  const upstream = await fetch(`${AI_BASE_URL}/rag/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
-      ...(req.headers['x-kb-ids'] ? { 'X-KB-IDS': req.headers['x-kb-ids'] } : {}),
-    },
-    body: JSON.stringify(req.body),
-  });
+async function proxyCompletionToAi(req, res, auditCtx) {
+  const startMs = Date.now();
+  let upstream;
+  try {
+    upstream = await fetch(`${AI_BASE_URL}/rag/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
+        ...(req.headers['x-kb-ids'] ? { 'X-KB-IDS': req.headers['x-kb-ids'] } : {}),
+      },
+      body: JSON.stringify(req.body),
+    });
+  } catch (e) {
+    writeLog({ ...auditCtx, latency_ms: Date.now() - startMs, status: 'failed',
+               detail_json: { error: e.message } });
+    throw e;
+  }
 
   if (!upstream.ok) {
     const raw = await upstream.text();
+    writeLog({ ...auditCtx, latency_ms: Date.now() - startMs, status: 'failed',
+               detail_json: { upstream_status: upstream.status } });
     try {
       return res.status(upstream.status).json(JSON.parse(raw));
     } catch {
@@ -39,6 +50,8 @@ async function proxyCompletionToAi(req, res) {
   }
 
   if (req.body?.stream) {
+    // Log immediately when stream starts; audit records the request, not full response
+    writeLog({ ...auditCtx, latency_ms: Date.now() - startMs, status: 'success' });
     res.status(upstream.status);
     res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -53,6 +66,13 @@ async function proxyCompletionToAi(req, res) {
   }
 
   const data = await upstream.json();
+  writeLog({
+    ...auditCtx,
+    latency_ms: Date.now() - startMs,
+    status: data?.status === 'blocked' ? 'blocked' : 'success',
+    response_summary: data?.answer,
+    detail_json: data?.trace_id ? { trace_id: data.trace_id } : null,
+  });
   return res.status(upstream.status).json(data);
 }
 
@@ -146,7 +166,22 @@ router.post('/chat/completions', requireRagAccess, async (req, res) => {
       return res.status(400).json({ error: 'KB_IDS_REQUIRED', message: 'kb_ids is required' });
     }
 
-    return await proxyCompletionToAi(req, res);
+    // Build audit context; doctor_id present for Cookie auth, apiKeyId for Bearer
+    const lastUserMsg = Array.isArray(req.body?.messages)
+      ? [...req.body.messages].reverse().find(m => m.role === 'user')
+      : null;
+    const kbIdsForLog = headerKbIds
+      ? headerKbIds.split(',').map(s => parseInt(s.trim())).filter(Boolean)
+      : (Array.isArray(bodyKbIds) ? bodyKbIds : []);
+    const auditCtx = {
+      log_type: 'api',
+      doctor_id: req.doctor?.id || null,
+      kb_ids: kbIdsForLog,
+      request_summary: lastUserMsg?.content || req.body?.question || null,
+      detail_json: req.apiKeyId ? { api_key_id: req.apiKeyId } : null,
+    };
+
+    return await proxyCompletionToAi(req, res, auditCtx);
   } catch (e) {
     const status = e.status || 500;
     res.status(status).json({ error: e.code || 'INTERNAL_ERROR', message: e.message });

@@ -50,6 +50,15 @@ app.use('/api/rag',           require('./routes/rag_feedback'));
 app.use('/api/rag',           require('./routes/rag_config'));
 app.use('/api/rag',           require('./routes/rag_chat'));
 app.use('/api/rag',           requireAdmin, require('./routes/rag_debug'));
+// Phase 7：API Key 管理（requireAdmin 安全修复，/api/rag/api-keys 须登录）
+app.use('/api/rag',           requireAdmin, require('./routes/rag_api_keys'));
+// Phase 9：ETL 管理（全部 requireAdmin，在路由内部已声明）
+app.use('/api/rag',           require('./routes/rag_etl'));
+// Phase 10：工具与 Agent 展示（requireAdmin 在路由内部声明）
+app.use('/api/rag',           require('./routes/rag_tools'));
+app.use('/api/rag',           require('./routes/rag_agents'));
+// Phase 11：Admin 治理代理路由（rules / rejections / sensitive-words / model-configs）
+app.use('/api/rag',           requireAdmin, require('./routes/rag_admin'));
 
 app.get('/', (req, res) => {
   res.json({
