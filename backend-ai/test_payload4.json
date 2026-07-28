@@ -1,0 +1,9 @@
+{
+  "conversation_id": 4,
+  "question": "今天天气怎么样？",
+  "kb_ids": [0],
+  "options": {
+    "top_k": 5,
+    "similarity_threshold": 0.35
+  }
+}

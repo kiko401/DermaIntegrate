@@ -1,0 +1,373 @@
+const { appPool: db, hisPool, lisPool, pacsPool } = require('../db')
+
+// 多级匹配逻辑：empi_index → 身份证 → 姓名+手机，无匹配返回 null（不自动创建患者）
+async function matchAndLink({ source_system, source_id, id_card, name, phone }) {
+  // 1. 已有映射
+  const [existing] = await db.query(
+    `SELECT e.*, p.name AS patient_name, p.id_card AS patient_id_card, p.phone AS patient_phone
+     FROM empi_index e JOIN patients p ON e.patient_id = p.id
+     WHERE e.source_system = ? AND e.source_id = ?`,
+    [source_system, source_id]
+  )
+  if (existing.length) {
+    return { patient: existing[0], matched_by: 'existing_index' }
+  }
+
+  let patient = null
+  let matched_by = null
+
+  // 2. 身份证精确匹配
+  if (id_card) {
+    const [rows] = await db.query('SELECT * FROM patients WHERE id_card = ?', [id_card])
+    if (rows.length) { patient = rows[0]; matched_by = 'id_card' }
+  }
+
+  // 3. 姓名 + 手机组合匹配
+  if (!patient && name && phone) {
+    const [rows] = await db.query(
+      'SELECT * FROM patients WHERE name = ? AND phone = ?',
+      [name, phone]
+    )
+    if (rows.length) { patient = rows[0]; matched_by = 'name_phone' }
+  }
+
+  if (!patient) return null
+
+  // 写入映射
+  await db.query(
+    'INSERT IGNORE INTO empi_index (source_system, source_id, patient_id) VALUES (?, ?, ?)',
+    [source_system, source_id, patient.id]
+  )
+
+  return { patient, matched_by }
+}
+
+// 查某内部患者在各系统的全部外部 ID
+async function getSourcesByPatientId(patientId) {
+  const [rows] = await db.query(
+    `SELECT source_system, source_id, linked_at
+     FROM empi_index
+     WHERE patient_id = ?
+     ORDER BY source_system`,
+    [patientId]
+  )
+  return rows
+}
+
+async function listExternalSources() {
+  const [hisRows, lisRows, pacsRows] = await Promise.all([
+    hisPool.query('SELECT \'HIS\' AS source_system, source_id, name, id_card, phone FROM his_patients').then(([r]) => r),
+    lisPool.query('SELECT \'LIS\' AS source_system, source_id, name, id_card, phone FROM lis_patients').then(([r]) => r),
+    pacsPool.query('SELECT \'PACS\' AS source_system, source_id, name, id_card, phone FROM pacs_patients').then(([r]) => r),
+  ])
+
+  const all = [...hisRows, ...lisRows, ...pacsRows]
+  if (!all.length) return []
+
+  // batch-fetch empi mappings for all (source_system, source_id) pairs
+  const conditions = all.map(() => '(e.source_system = ? AND e.source_id = ?)').join(' OR ')
+  const params = all.flatMap(r => [r.source_system, r.source_id])
+  const [empiRows] = await db.query(
+    `SELECT e.id AS empi_id, e.source_system, e.source_id, e.patient_id, e.linked_at, p.name AS internal_name
+     FROM empi_index e
+     JOIN patients p ON p.id = e.patient_id
+     WHERE ${conditions}`,
+    params
+  )
+
+  const empiMap = new Map(empiRows.map(r => [`${r.source_system}:${r.source_id}`, r]))
+
+  return all
+    .map(r => {
+      const match = empiMap.get(`${r.source_system}:${r.source_id}`)
+      return {
+        ...r,
+        empi_id:       match?.empi_id       ?? null,
+        patient_id:    match?.patient_id    ?? null,
+        linked_at:     match?.linked_at     ?? null,
+        internal_name: match?.internal_name ?? null,
+      }
+    })
+    .sort((a, b) => a.source_system.localeCompare(b.source_system) || a.source_id.localeCompare(b.source_id))
+}
+
+// 统一患者临床视图：聚合 EMPI + HIS + LIS + PACS + AI 任务
+async function getClinicalView(patientId) {
+  const [[patientRows], [sourcesRows]] = await Promise.all([
+    db.query('SELECT id, name, id_card, phone, birth_date, gender, created_at FROM patients WHERE id = ?', [patientId]),
+    db.query(
+      `SELECT source_system, source_id, linked_at
+       FROM empi_index
+       WHERE patient_id = ?
+       ORDER BY source_system`,
+      [patientId]
+    ),
+  ])
+
+  if (!patientRows.length) return null
+
+  // 收集各系统的 source_id，用于关联分型表
+  const hisIds  = sourcesRows.filter(r => r.source_system === 'HIS').map(r => r.source_id)
+  const lisIds  = sourcesRows.filter(r => r.source_system === 'LIS').map(r => r.source_id)
+  const pacsIds = sourcesRows.filter(r => r.source_system === 'PACS').map(r => r.source_id)
+
+  async function queryHis(sourceIds) {
+    if (!sourceIds.length) return []
+    const [pts] = await hisPool.query(
+      'SELECT id, source_id FROM his_patients WHERE source_id IN (?)',
+      [sourceIds]
+    )
+    if (!pts.length) return []
+    const ptIds = pts.map(p => p.id)
+    const [rows] = await hisPool.query(
+      `SELECT r.id, p.source_id AS source_patient_id,
+              r.visit_type, r.visit_date, r.department,
+              r.diagnosis_code, r.diagnosis_name, r.chief_complaint, r.created_at
+       FROM his_records r
+       JOIN his_patients p ON p.id = r.his_patient_id
+       WHERE r.his_patient_id IN (?)
+       ORDER BY r.visit_date DESC`,
+      [ptIds]
+    )
+    return rows
+  }
+
+  async function queryLis(sourceIds) {
+    if (!sourceIds.length) return { results: [], pathology: [] }
+    const [pts] = await lisPool.query(
+      'SELECT id, source_id FROM lis_patients WHERE source_id IN (?)',
+      [sourceIds]
+    )
+    if (!pts.length) return { results: [], pathology: [] }
+    const ptIds = pts.map(p => p.id)
+    const [[results], [pathology]] = await Promise.all([
+      lisPool.query(
+        `SELECT r.id, p.source_id AS source_patient_id,
+                r.test_name, r.value, r.unit, r.ref_range,
+                r.abnormal_flag, r.reported_at, r.created_at
+         FROM lis_results r
+         JOIN lis_patients p ON p.id = r.lis_patient_id
+         WHERE r.lis_patient_id IN (?)
+         ORDER BY r.reported_at DESC`,
+        [ptIds]
+      ),
+      lisPool.query(
+        `SELECT r.id, p.source_id AS source_patient_id,
+                r.report_no, r.sample_type, r.diagnosis_text,
+                r.histological_type, r.breslow_thickness_mm, r.ulceration,
+                r.mitotic_rate, r.clark_level, r.lymphovascular_invasion,
+                r.perineural_invasion, r.lymph_node_status, r.sentinel_node_biopsy,
+                r.braf_mutation, r.nras_mutation, r.kit_mutation, r.pd_l1_expression,
+                r.reported_at
+         FROM lis_pathology_reports r
+         JOIN lis_patients p ON p.id = r.lis_patient_id
+         WHERE r.lis_patient_id IN (?)
+         ORDER BY r.reported_at DESC`,
+        [ptIds]
+      ),
+    ])
+    return { results, pathology }
+  }
+
+  async function queryPacs(sourceIds) {
+    if (!sourceIds.length) return []
+    const [pts] = await pacsPool.query(
+      'SELECT id, source_id FROM pacs_patients WHERE source_id IN (?)',
+      [sourceIds]
+    )
+    if (!pts.length) return []
+    const ptIds = pts.map(p => p.id)
+    const [rows] = await pacsPool.query(
+      `SELECT r.id, p.source_id AS source_patient_id,
+              r.record_id, r.study_id, r.modality, r.body_part,
+              r.description,
+              r.image_path     AS image_url,
+              r.thumbnail_path AS thumbnail_url,
+              r.recorded_at, r.created_at
+       FROM pacs_records r
+       JOIN pacs_patients p ON p.id = r.pacs_patient_id
+       WHERE r.pacs_patient_id IN (?)
+       ORDER BY r.recorded_at DESC`,
+      [ptIds]
+    )
+    return rows.map(r => ({
+      ...r,
+      image_url:     r.image_url     ? '/pacs-static' + r.image_url     : null,
+      thumbnail_url: r.thumbnail_url ? '/pacs-static' + r.thumbnail_url : null,
+    }))
+  }
+
+  const [hisRows, lisData, pacsRows, aiRows] = await Promise.all([
+    queryHis(hisIds),
+    queryLis(lisIds),
+    queryPacs(pacsIds),
+    db.query(
+      `SELECT t.task_id, t.status, t.created_at,
+              v.visit_date, v.chief_complaint
+       FROM ai_tasks t
+       LEFT JOIN visits v ON v.id = t.visit_id
+       WHERE COALESCE(t.patient_id, v.patient_id) = ?
+       ORDER BY t.created_at DESC
+       LIMIT 10`,
+      [patientId]
+    ).then(([r]) => r),
+  ])
+
+  return {
+    patient:      patientRows[0],
+    empi_sources: sourcesRows,
+    his:          hisRows,
+    lis:          lisData.results,
+    lis_pathology: lisData.pathology,
+    pacs:         pacsRows,
+    ai_tasks:     aiRows,
+  }
+}
+
+async function getStats() {
+  const [[{ queued }]] = await db.query(
+    "SELECT COUNT(*) AS queued FROM ai_tasks WHERE status IN ('pending', 'processing', 'analyzing')"
+  )
+  return { queued_tasks: Number(queued) }
+}
+
+async function updateMapping(id, patient_id) {
+  const [[mapping]] = await db.query(
+    'SELECT id, source_system, source_id, patient_id FROM empi_index WHERE id = ?',
+    [id]
+  )
+  if (!mapping) {
+    const err = new Error('MAPPING_NOT_FOUND')
+    err.status = 404
+    throw err
+  }
+
+  const [[patient]] = await db.query(
+    'SELECT id, name FROM patients WHERE id = ?',
+    [patient_id]
+  )
+  if (!patient) {
+    const err = new Error('PATIENT_NOT_FOUND')
+    err.status = 404
+    throw err
+  }
+
+  await db.query(
+    'UPDATE empi_index SET patient_id = ? WHERE id = ?',
+    [patient_id, id]
+  )
+
+  return {
+    id: mapping.id,
+    source_system: mapping.source_system,
+    source_id: mapping.source_id,
+    patient_id: patient.id,
+    internal_name: patient.name,
+  }
+}
+
+async function deleteMappings(ids) {
+  if (!Array.isArray(ids) || !ids.length) return { deleted: 0 }
+
+  const cleanIds = ids
+    .map(v => Number(v))
+    .filter(v => Number.isInteger(v) && v > 0)
+
+  if (!cleanIds.length) return { deleted: 0 }
+
+  const [result] = await db.query(
+    'DELETE FROM empi_index WHERE id IN (?)',
+    [cleanIds]
+  )
+
+  return { deleted: Number(result.affectedRows || 0) }
+}
+
+async function scanConflicts() {
+  const [empiRows] = await db.query(
+    'SELECT id AS empi_id, source_system, source_id, patient_id FROM empi_index'
+  )
+  if (!empiRows.length) return []
+
+  const [hisRows, lisRows, pacsRows] = await Promise.all([
+    hisPool.query('SELECT source_id, id_card FROM his_patients WHERE id_card IS NOT NULL').then(([r]) => r),
+    lisPool.query('SELECT source_id, id_card FROM lis_patients WHERE id_card IS NOT NULL').then(([r]) => r),
+    pacsPool.query('SELECT source_id, id_card FROM pacs_patients WHERE id_card IS NOT NULL').then(([r]) => r),
+  ])
+
+  // 构建 "system:source_id" → id_card
+  const idCardMap = new Map()
+  for (const r of hisRows)  idCardMap.set(`HIS:${r.source_id}`,  r.id_card)
+  for (const r of lisRows)  idCardMap.set(`LIS:${r.source_id}`,  r.id_card)
+  for (const r of pacsRows) idCardMap.set(`PACS:${r.source_id}`, r.id_card)
+
+  // 按 id_card 分组，收集各组的 patient_id 集合 和 empi_id 集合
+  const cardToPatients = new Map() // id_card → Set<patient_id>
+  const cardToEmpiIds  = new Map() // id_card → Set<empi_id>
+
+  for (const row of empiRows) {
+    const idCard = idCardMap.get(`${row.source_system}:${row.source_id}`)
+    if (!idCard) continue
+    if (!cardToPatients.has(idCard)) {
+      cardToPatients.set(idCard, new Set())
+      cardToEmpiIds.set(idCard, new Set())
+    }
+    cardToPatients.get(idCard).add(row.patient_id)
+    cardToEmpiIds.get(idCard).add(row.empi_id)
+  }
+
+  // 同一 id_card 映射到多个不同 patient_id → 冲突
+  const conflictEmpiIds = new Set()
+  for (const [idCard, patientSet] of cardToPatients) {
+    if (patientSet.size > 1) {
+      for (const eid of cardToEmpiIds.get(idCard)) {
+        conflictEmpiIds.add(eid)
+      }
+    }
+  }
+
+  return [...conflictEmpiIds]
+}
+
+async function createMapping({ source_system, source_id, patient_id }) {
+  const [[patient]] = await db.query('SELECT id FROM patients WHERE id = ?', [patient_id])
+  if (!patient) {
+    const err = new Error('PATIENT_NOT_FOUND')
+    err.status = 404
+    throw err
+  }
+
+  try {
+    await db.query(
+      'INSERT INTO empi_index (source_system, source_id, patient_id) VALUES (?, ?, ?)',
+      [source_system, source_id, patient_id]
+    )
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') {
+      const err = new Error('EMPI_DUPLICATE_KEY')
+      err.status = 409
+      throw err
+    }
+    throw e
+  }
+
+  const [[created]] = await db.query(
+    `SELECT e.id AS empi_id, e.source_system, e.source_id, e.patient_id, e.linked_at, p.name AS internal_name
+     FROM empi_index e JOIN patients p ON p.id = e.patient_id
+     WHERE e.source_system = ? AND e.source_id = ?`,
+    [source_system, source_id]
+  )
+  return created
+}
+
+module.exports = {
+  matchAndLink,
+  getSourcesByPatientId,
+  listExternalSources,
+  getClinicalView,
+  getStats,
+  updateMapping,
+  deleteMappings,
+  scanConflicts,
+  createMapping,
+}

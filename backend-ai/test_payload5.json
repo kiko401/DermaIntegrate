@@ -1,0 +1,13 @@
+{
+  "conversation_id": 5,
+  "question": "那北京呢？",
+  "kb_ids": [0],
+  "history": [
+    {"role": "user", "content": "今天天气怎么样？"},
+    {"role": "assistant", "content": "抱歉，我无法回答这个问题。根据提供的参考资料，内容仅涉及日光性角化病、淋巴瘤和皮肤黑色素瘤等医学信息，并未包含任何关于天气的资讯。建议您查询天气预报或相关气象服务。"}
+  ],
+  "options": {
+    "top_k": 5,
+    "similarity_threshold": 0.35
+  }
+}
