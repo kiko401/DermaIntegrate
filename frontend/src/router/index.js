@@ -91,6 +91,24 @@ const router = createRouter({
       component: () => import('../views/admin/rag/RAGDebug.vue'),
       meta: { requiresAdmin: true },
     },
+    {
+      path: '/admin/rag/etl',
+      name: 'admin-rag-etl',
+      component: () => import('../views/admin/rag/ETLCenter.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/rag/governance',
+      name: 'admin-rag-governance',
+      component: () => import('../views/admin/rag/RAGAdminGovernance.vue'),
+      meta: { requiresAdmin: true },
+    },
+    {
+      path: '/admin/rag/api-keys',
+      name: 'admin-rag-api-keys',
+      component: () => import('../views/admin/rag/RAGApiKeyManager.vue'),
+      meta: { requiresAdmin: true },
+    },
   ],
 })
 

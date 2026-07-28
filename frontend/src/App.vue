@@ -27,6 +27,9 @@ const adminNavItems = [
   { path: '/admin/rag/kbs',          label: '知识库' },
   { path: '/admin/rag/documents',    label: '文档管理' },
   { path: '/admin/rag/vectors',      label: '向量任务' },
+  { path: '/admin/rag/etl',          label: 'ETL 管理' },
+  { path: '/admin/rag/governance',   label: 'RAG治理' },
+  { path: '/admin/rag/api-keys',     label: 'API Keys' },
   { path: '/admin/rag/logs',         label: '问答日志' },
   { path: '/admin/rag/settings',     label: 'RAG配置' },
   { path: '/admin/rag/debug',        label: '调试' },
@@ -75,7 +78,14 @@ async function logout() {
 </template>
 
 <style scoped>
-.layout { display: flex; flex-direction: column; min-height: 100vh; background: #f1f5f9; }
+.layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+  background: #f1f5f9;
+}
 
 .topbar {
   display: flex;
@@ -122,5 +132,10 @@ async function logout() {
 }
 .logout-btn:hover { color: #64748b; }
 
-.main-content { flex: 1; min-width: 0; overflow: auto; }
+.main-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 </style>
