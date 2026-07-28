@@ -1,8 +1,0 @@
-{
-  "question": "黑色素瘤 AJCC 分期",
-  "kb_ids": [0],
-  "options": {
-    "top_k": 5,
-    "similarity_threshold": 0.3
-  }
-}
