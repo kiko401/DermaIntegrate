@@ -233,7 +233,7 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
 
         import httpx
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=ETL_CONNECT_TIMEOUT, read=ETL_READ_TIMEOUT)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=ETL_CONNECT_TIMEOUT, read=ETL_READ_TIMEOUT, write=ETL_READ_TIMEOUT, pool=ETL_CONNECT_TIMEOUT)) as client:
                 resp = await client.get(source_url)
                 resp.raise_for_status()
                 content = resp.content

@@ -19,7 +19,8 @@ from .parsers import extract_text_with_metadata
 from .splitters import split_text
 from .embeddings import generate_embeddings
 from .vector_store import upsert_vectors_async, delete_document_index_async
-from .bm25 import fit_bm25_on_collection, fit_bm25_incremental, get_collection_doc_count, COLLECTION_NAME
+from .bm25 import fit_bm25_on_collection, fit_bm25_incremental, get_collection_doc_count
+from .vector_store import COLLECTION_NAME
 from .ner import extract_medical_entities, get_entity_signature
 from .task_manager import send_task_callback
 

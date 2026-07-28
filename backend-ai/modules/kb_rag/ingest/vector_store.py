@@ -37,27 +37,30 @@ def get_qdrant_client() -> QdrantClient:
 # ========== 同步版本（向后兼容） ==========
 
 def init_qdrant_collection():
-    """启动时初始化 Qdrant 集合（无名向量格式，与 rag/knowledge_base.py 兼容）"""
+    """启动时初始化 Qdrant 集合（hybrid vectors 格式）"""
     client = get_qdrant_client()
     collections = client.get_collections().collections
 
     if not any(c.name == COLLECTION_NAME for c in collections):
-        # 使用无名向量格式（与 rag/knowledge_base.py 兼容）
-        # BM25 sparse vectors 存入 payload，不依赖 Qdrant sparse index
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config={
-                "size": 512,
-                "distance": models.Distance.COSINE,
-            },
-        )
-        client.create_payload_index(COLLECTION_NAME, "kb_id", models.PayloadSchemaType.INTEGER)
-        client.create_payload_index(COLLECTION_NAME, "doc_id", models.PayloadSchemaType.INTEGER)
-        client.create_payload_index(COLLECTION_NAME, "chunk_id", models.PayloadSchemaType.KEYWORD)
-        client.create_payload_index(COLLECTION_NAME, "doctor_id", models.PayloadSchemaType.INTEGER)
-        logger.info(f"Qdrant collection '{COLLECTION_NAME}' created with unnamed dense vectors.")
+        # 创建带有 named vectors 的 hybrid collection
+        _create_hybrid_collection(client)
     else:
-        # 已有 collection 时，补充 doctor_id 索引（幂等）
+        # 已有 collection 时，检查是否需要迁移到 hybrid 格式
+        try:
+            coll_info = client.get_collection(COLLECTION_NAME)
+            vectors_cfg = coll_info.config.params.vectors
+            # 检查是否配置了 named vectors（而非无名向量）
+            has_named_vectors = isinstance(vectors_cfg, dict) and DENSE_VECTOR_NAME in vectors_cfg
+            has_sparse_vectors = coll_info.config.params.sparse_vectors is not None
+            if not has_named_vectors or not has_sparse_vectors:
+                logger.info(f"Collection needs migration to hybrid format (named_vectors={has_named_vectors}, sparse_vectors={has_sparse_vectors}).")
+                # 直接触发迁移，不使用惰性迁移
+                _migrate_to_hybrid(client)
+            else:
+                logger.info(f"Collection already has hybrid vector config (named_vectors + sparse_vectors).")
+        except Exception as e:
+            logger.warning(f"Failed to check collection config: {e}")
+        # 补充 doctor_id 索引（幂等）
         try:
             client.create_payload_index(COLLECTION_NAME, "doctor_id", models.PayloadSchemaType.INTEGER)
         except Exception:
@@ -66,20 +69,29 @@ def init_qdrant_collection():
 
 def _create_hybrid_collection(client):
     """创建带有 dense + sparse 混合向量配置的 collection"""
-    # 使用无名向量格式（与 rag/knowledge_base.py 兼容）
-    # sparse_vectors 存入 payload 而非 Qdrant 命名向量（避免 collection 格式冲突）
+    # 使用 named vectors 配置，支持 dense 和 sparse (bm25) 两种向量
+    # legacy rag/knowledge_base.py 继续使用无名向量（Qdrant 兼容处理）
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config={
-            "size": 512,
-            "distance": models.Distance.COSINE,
+            DENSE_VECTOR_NAME: {
+                "size": 512,
+                "distance": models.Distance.COSINE,
+            }
+        },
+        sparse_vectors_config={
+            SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                index=models.SparseIndexParams(
+                    on_disk=False,
+                )
+            )
         },
     )
     client.create_payload_index(COLLECTION_NAME, "kb_id", models.PayloadSchemaType.INTEGER)
     client.create_payload_index(COLLECTION_NAME, "doc_id", models.PayloadSchemaType.INTEGER)
     client.create_payload_index(COLLECTION_NAME, "chunk_id", models.PayloadSchemaType.KEYWORD)
     client.create_payload_index(COLLECTION_NAME, "doctor_id", models.PayloadSchemaType.INTEGER)
-    logger.info(f"Qdrant collection '{COLLECTION_NAME}' created with hybrid vectors (dense + bm25 sparse).")
+    logger.info(f"Qdrant collection '{COLLECTION_NAME}' created with named hybrid vectors (dense + bm25 sparse).")
 
 
 def _migrate_to_hybrid(client):
@@ -169,15 +181,15 @@ def _migrate_to_hybrid(client):
             logger.warning(f"Point {pt.id} has no usable dense vector, skipping.")
             continue
 
-        # 新生成的 sparse 向量存入 payload（BM25 scoring 由 in-memory 向量化器完成）
+        # 使用 named vectors 格式（dense + sparse）
         sparse_indices, sparse_values = sparse_vectors_list[i] if i < len(sparse_vectors_list) else ([], [])
+        point_vec: Dict[str, Any] = {DENSE_VECTOR_NAME: dense_vec}
         if sparse_indices:
-            payload["bm25_indices"] = sparse_indices
-            payload["bm25_values"] = sparse_values
+            point_vec[SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=sparse_indices, values=sparse_values)
 
         new_points.append(models.PointStruct(
             id=pt.id,
-            vector=dense_vec,
+            vector=point_vec,
             payload=payload,
         ))
 
@@ -223,7 +235,7 @@ def _upsert_vectors_impl(
     payloads: List[Dict[str, Any]],
     sparse_vectors: Optional[List[Tuple[List[int], List[float]]]] = None
 ):
-    """写入混合向量内部实现"""
+    """写入混合向量内部实现（使用 named vectors）"""
     # 惰性迁移：如果启动时检测到 collection 无 sparse_vectors，在此触发一次性迁移
     global _needs_lazy_migration
     if _needs_lazy_migration:
@@ -234,18 +246,18 @@ def _upsert_vectors_impl(
     points = []
 
     for i, (v, p) in enumerate(zip(vectors, payloads)):
-        # 使用无名向量（plain list），与 rag/knowledge_base.py 兼容
-        # sparse vectors 存入 payload（BM25 scoring 由 in-memory 向量化器计算，不依赖 Qdrant sparse index）
+        # 使用 named vectors 格式（dense + 可选 sparse）
+        # Qdrant sparse vector 存储在专门的 sparse_vectors 字段中
+        from qdrant_client.http.models import SparseVector as QdrantSparseVector
         point_dict: Dict[str, Any] = {
             "id": _chunk_id_to_point_id(p["chunk_id"]),
-            "vector": v,  # 无名向量 plain list
+            "vector": {DENSE_VECTOR_NAME: v},  # Named dense vector
             "payload": p,
         }
         if sparse_vectors and i < len(sparse_vectors):
             indices, values = sparse_vectors[i]
             if indices:
-                point_dict["payload"]["bm25_indices"] = indices
-                point_dict["payload"]["bm25_values"] = values
+                point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
 
         points.append(models.PointStruct(**point_dict))
     client.upsert(collection_name=COLLECTION_NAME, points=points)
@@ -371,9 +383,15 @@ def _clone_kb_index_impl(
                 sparse_indices = list(sparse_vec_data.indices)
                 sparse_values = list(sparse_vec_data.values)
 
+        # 构建命名向量（dense + 可选 sparse）
+        from qdrant_client.http.models import SparseVector as QdrantSparseVector
+        named_vector: Dict[str, Any] = {DENSE_VECTOR_NAME: dense_vec}
+        if sparse_indices:
+            named_vector[SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=sparse_indices, values=sparse_values)
+
         target_points.append(models.PointStruct(
             id=point_id,
-            vector=dense_vec,
+            vector=named_vector,
             payload=payload,
         ))
     client.upsert(collection_name=COLLECTION_NAME, points=target_points)

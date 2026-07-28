@@ -69,7 +69,7 @@ def _load_cached_state(collection_name: str):
 
         _COLLECTION_IDF[collection_name] = vocab.get(collection_name, {})
         _COLLECTION_TOKEN_DOC_COUNTS[collection_name] = token_doc_counts.get(collection_name, {})
-        _COLLECTION_DOC_COUNT[collection_name] = doc_count.get(collection_name, 0)
+        _COLLECTION_DOC_COUNT[collection_name] = doc_count
 
         # 重建 vocab（从 token -> index 的映射）
         _COLLECTION_VOCAB[collection_name] = {

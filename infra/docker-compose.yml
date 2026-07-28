@@ -57,7 +57,7 @@ services:
     environment:
       - DOCKER_ENV=true
       - DATABASE_URL=mysql+aiomysql://root:root@mysql:3306/derma_ai
-      - HF_ENDPOINT=https://huggingface.co
+      - HF_ENDPOINT=https://hf-mirror.com
       - LOG_LEVEL=INFO
       - ENABLE_KB_RAG=true
       - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3000}
@@ -76,6 +76,9 @@ services:
     volumes:
       - ../backend-ai/static:/app/static
       - ../backend-ai/uploads:/app/uploads
+      - C:/Users/19798/.cache/huggingface:/root/.cache/huggingface
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   mysql_data:

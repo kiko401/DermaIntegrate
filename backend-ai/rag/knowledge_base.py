@@ -23,6 +23,9 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
 from modules.kb_rag.ingest.embeddings import get_embedder
+from modules.kb_rag.ingest.bm25 import fit_bm25_on_collection, generate_sparse_vectors_batch
+from modules.kb_rag.ingest.vector_store import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
+from qdrant_client.http.models import SparseVector as QdrantSparseVector
 from shared.constants import DISEASE_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -60,22 +63,31 @@ class RAGKnowledgeBase:
         self.score_threshold = RAG_SCORE_THRESHOLD
 
     def _ensure_collection_exists(self):
-        """确保 collection 存在，不存在则创建"""
+        """确保 collection 存在，不存在则创建（使用 named hybrid vectors 配置）"""
         collections = self.client.get_collections().collections
         if not any(c.name == self.collection_name for c in collections):
+            from modules.kb_rag.ingest.vector_store import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config={
-                    "size": 512,
-                    "distance": models.Distance.COSINE,
-                }
+                    DENSE_VECTOR_NAME: {
+                        "size": 512,
+                        "distance": models.Distance.COSINE,
+                    }
+                },
+                sparse_vectors_config={
+                    SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                        index=models.SparseIndexParams(on_disk=False),
+                    )
+                },
             )
             # 创建 payload 索引
             self.client.create_payload_index(self.collection_name, "kb_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "doc_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "doc_version_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "doctor_id", models.PayloadSchemaType.INTEGER)
-            logger.info(f"Collection '{self.collection_name}' created with payload indexes.")
+            self.client.create_payload_index(self.collection_name, "chunk_id", models.PayloadSchemaType.KEYWORD)
+            logger.info(f"Collection '{self.collection_name}' created with named hybrid vectors (dense + bm25 sparse).")
         else:
             # 对已有 collection 补加 doctor_id 索引（幂等）
             try:
@@ -192,19 +204,27 @@ class RAGKnowledgeBase:
             logger.warning("未找到任何文档，知识库初始化取消")
             return {"status": "skipped", "message": "未找到文档", "count": 0}
 
-        # 4. 向量化
+        # 4. 向量化（dense embedding）
         logger.info(f"正在向量化 {len(texts)} 条文档...")
         vectors = self.embedder.encode(texts, normalize_embeddings=True).tolist()
 
-        # 5. 构建 points
-        points = [
-            models.PointStruct(
-                id=payloads[i]["doc_id"],
-                vector=vectors[i],
-                payload=payloads[i]
-            )
-            for i in range(len(texts))
-        ]
+        # 4a. 拟合 BM25 并生成 sparse vectors
+        logger.info(f"正在生成 BM25 sparse 向量（{len(texts)} 条）...")
+        fit_bm25_on_collection(self.collection_name, texts)
+        sparse_vectors = generate_sparse_vectors_batch(texts, self.collection_name)
+
+        # 5. 构建 points（named dense + sparse）
+        points = []
+        for i in range(len(texts)):
+            indices, values = sparse_vectors[i]
+            point_dict = {
+                "id": payloads[i]["doc_id"],
+                "vector": {DENSE_VECTOR_NAME: vectors[i]},
+                "payload": payloads[i]
+            }
+            if indices:
+                point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
+            points.append(models.PointStruct(**point_dict))
 
         # 6. 写入向量数据库
         self.client.upsert(collection_name=self.collection_name, points=points)
@@ -237,16 +257,23 @@ class RAGKnowledgeBase:
 
         self._ensure_collection_exists()
 
-        vectors = self.embedder.encode(texts, show_progress_bar=False)
+        vectors = self.embedder.encode(texts, show_progress_bar=False).tolist()
 
-        points = [
-            models.PointStruct(
-                id=idx,
-                vector=vectors[idx].tolist(),
-                payload={"text": texts[idx], **payloads[idx]}
-            )
-            for idx in range(len(texts))
-        ]
+        # 生成 BM25 sparse vectors
+        fit_bm25_on_collection(self.collection_name, texts)
+        sparse_vectors = generate_sparse_vectors_batch(texts, self.collection_name)
+
+        points = []
+        for idx in range(len(texts)):
+            indices, values = sparse_vectors[idx]
+            point_dict = {
+                "id": idx,
+                "vector": {DENSE_VECTOR_NAME: vectors[idx]},
+                "payload": {"text": texts[idx], **payloads[idx]}
+            }
+            if indices:
+                point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
+            points.append(models.PointStruct(**point_dict))
         self.client.upsert(collection_name=self.collection_name, points=points)
         logger.info("RAG Knowledge Base built successfully!")
 

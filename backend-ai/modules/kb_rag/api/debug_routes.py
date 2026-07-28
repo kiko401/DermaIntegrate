@@ -341,7 +341,7 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
     """
     try:
         from ..utils import tokenize as _shared_tokenize
-        from ..ingest.bm25 import _get_global_idf
+        from ..retrieval.retriever import _get_global_idf
         from collections import Counter
 
         # 1. 解析关键词（对查询短语也进行分词，实现 token 级别匹配）

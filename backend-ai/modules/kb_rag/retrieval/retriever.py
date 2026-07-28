@@ -381,8 +381,13 @@ async def retrieve(
     try:
         # ===== 第1步：Embedding =====
         t0 = time.perf_counter()
-        embedder = get_embedder()
-        query_vector = embedder.encode(query, normalize_embeddings=True).tolist()
+        embedder = None
+        query_vector = None
+        try:
+            embedder = get_embedder()
+            query_vector = embedder.encode(query, normalize_embeddings=True).tolist()
+        except Exception as e:
+            logger.warning(f"Embedding model load failed, dense search will be skipped: {e}")
         dense_start = time.perf_counter()
 
         # ===== 第2步：构建 RBAC 过滤条件 =====
@@ -390,22 +395,15 @@ async def retrieve(
         fetch_limit = top_k * MAX_CANDIDATE_MULTIPLIER
 
         # ===== 第3步：Dense 检索 =====
-        def _search_dense():
-            client = get_qdrant_client()
-            try:
-                return client.query_points(
-                    collection_name=COLLECTION_NAME,
-                    query=query_vector,
-                    query_filter=kb_filter,
-                    limit=fetch_limit,
-                    using=DENSE_VECTOR_NAME,
-                    with_payload=True
-                )
-            except Exception:
+        search_response = None
+        if query_vector is not None:
+            def _search_dense():
+                client = get_qdrant_client()
                 try:
                     return client.query_points(
                         collection_name=COLLECTION_NAME,
                         query=query_vector,
+                        using=DENSE_VECTOR_NAME,
                         query_filter=kb_filter,
                         limit=fetch_limit,
                         with_payload=True
@@ -414,37 +412,26 @@ async def retrieve(
                     logger.warning(f"Dense search failed: {e}")
                     return None
 
-        search_response = await asyncio.to_thread(_search_dense)
+            search_response = await asyncio.to_thread(_search_dense)
         dense_latency = (time.perf_counter() - t0) * 1000
-
-        if search_response is None or not search_response.points:
-            total_latency = (time.perf_counter() - total_start) * 1000
-            _log_retrieval_event(
-                trace_id=trace_id, phase="dense", kb_ids=kb_ids,
-                doctor_id=doctor_id, use_hybrid=use_hybrid, use_rerank=use_rerank,
-                latency_ms=total_latency, chunks_returned=0,
-                blocked=True, max_dense_norm=0.0, max_rerank_score=0.0,
-                dense_count=0, bm25_count=0, rerank_mode="none",
-                entity_boost_count=0,
-            )
-            return [], True
 
         # 构建 candidates（含所有 payload 元数据）
         dense_scores: Dict[str, float] = {}
         candidates: List[Dict] = []
-        for hit in search_response.points:
-            payload = hit.payload or {}
-            chunk_id = payload.get("chunk_id", "")
-            dense_scores[chunk_id] = hit.score
-            candidates.append({
-                "doc_id": payload.get("doc_id"),
-                "doc_version_id": payload.get("doc_version_id"),
-                "chunk_id": chunk_id,
-                "text": payload.get("text", ""),
-                "score": hit.score,
-                # 扩展元数据
-                "source_filename": payload.get("source_filename", ""),
-                "section_title": payload.get("section_title", ""),
+        if search_response is not None and search_response.points:
+            for hit in search_response.points:
+                payload = hit.payload or {}
+                chunk_id = payload.get("chunk_id", "")
+                dense_scores[chunk_id] = hit.score
+                candidates.append({
+                    "doc_id": payload.get("doc_id"),
+                    "doc_version_id": payload.get("doc_version_id"),
+                    "chunk_id": chunk_id,
+                    "text": payload.get("text", ""),
+                    "score": hit.score,
+                    # 扩展元数据
+                    "source_filename": payload.get("source_filename", ""),
+                    "section_title": payload.get("section_title", ""),
                 "page_number": payload.get("page_number"),
                 "chunk_position": payload.get("chunk_position", "middle"),
                 "is_table": payload.get("is_table", False),
@@ -479,12 +466,33 @@ async def retrieve(
                         return None
 
                 sparse_resp = await asyncio.to_thread(_search_sparse)
+                sparse_hits: List[Dict[str, Any]] = []
                 if sparse_resp and sparse_resp.points:
                     for hit in sparse_resp.points:
                         p = hit.payload or {}
                         cid = p.get("chunk_id", "")
                         bm25_scores[cid] = hit.score
+                        sparse_hits.append({
+                            "doc_id": p.get("doc_id"),
+                            "doc_version_id": p.get("doc_version_id"),
+                            "chunk_id": cid,
+                            "text": p.get("text", ""),
+                            "score": hit.score,
+                            "source_filename": p.get("source_filename", ""),
+                            "section_title": p.get("section_title", ""),
+                            "page_number": p.get("page_number"),
+                            "chunk_position": p.get("chunk_position", "middle"),
+                            "is_table": p.get("is_table", False),
+                            "table_meta": p.get("table_meta"),
+                            "entities": p.get("entities", []),
+                            "entity_sig": p.get("entity_sig", {}),
+                            "access_level": p.get("access_level", "internal"),
+                            "department_id": p.get("department_id"),
+                        })
                     logger.info(f"Sparse search: {len(sparse_resp.points)} hits.")
+                    # 当 dense 无结果时，用 sparse_hits 补充 candidates
+                    if not candidates and sparse_hits:
+                        candidates.extend(sparse_hits)
 
         bm25_latency = (time.perf_counter() - bm25_start) * 1000
 
@@ -511,6 +519,10 @@ async def retrieve(
             chunk_id_to_data = {c["chunk_id"]: c for c in candidates}
             fused_chunks = []
             for cid, fused_score in fused_order:
+                # 如果 cid 不在 candidates 中（只有 sparse 结果），需要跳过或使用默认值
+                if cid not in chunk_id_to_data:
+                    logger.warning(f"Chunk ID {cid} found in BM25 scores but not in candidates, skipping.")
+                    continue
                 c = chunk_id_to_data[cid]
                 norm_dense = c["score"] / max_dense if max_dense > 0 else 0
                 fused_chunks.append({
@@ -628,7 +640,7 @@ async def retrieve(
                 "entity_boost_latency_ms": round(entity_boost_latency, 1),
                 "rerank_latency_ms": round(rerank_latency, 1),
                 "query_entity_count": len(query_entity_names),
-                "query_entity_types": list(set(e["type"] for e in query_sig.get("all", []))),
+                "query_entity_types": [k for k, v in query_sig.items() if k != "all" and v],
             }
         )
 
