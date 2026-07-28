@@ -396,8 +396,8 @@ async def tool_decision(state: AgentState) -> AgentState:
 
     logger.info(f"Executing tool: {tool_name} with args: {args}")
 
-    # 执行工具
-    exec_result = await execute_tool(tool_name, args)
+    # 执行工具（传入 doctor_id 以保持 RBAC 权限过滤）
+    exec_result = await execute_tool(tool_name, args, doctor_id=req.doctor_id)
 
     # 构建工具调用对象
     exec_status = exec_result.get("status", "failed")

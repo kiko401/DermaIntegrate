@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import asyncio
 import httpx
 from typing import Tuple, Optional, Any
 from shared.config import REWRITE_CONNECT_TIMEOUT, REWRITE_READ_TIMEOUT
@@ -57,20 +56,15 @@ async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
         {"role": "user", "content": f"历史对话: {json.dumps(history, ensure_ascii=False)}\n当前问题: {query}"}
     ]
 
-    def _sync_http_call() -> str:
-        """同步 HTTP 调用，封装为 to_thread 可调用的形式"""
-        with httpx.Client(timeout=REWRITE_TIMEOUT) as client:
-            response = client.post(
+    try:
+        async with httpx.AsyncClient(timeout=REWRITE_TIMEOUT) as client:
+            response = await client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={"model": model, "messages": messages, "temperature": 0.1}
             )
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
-
-    try:
-        # 使用 asyncio.to_thread 在线程池中执行同步 HTTP 调用，避免阻塞事件循环
-        content = await asyncio.to_thread(_sync_http_call)
+            content = response.json()["choices"][0]["message"]["content"]
 
         # 尝试解析 JSON
         result = json.loads(content.strip())
@@ -175,18 +169,16 @@ async def classify_query_type(query: str, patient_context: Optional[Any] = None,
         {"role": "user", "content": prompt}
     ]
 
-    def _sync_http_call() -> str:
-        with httpx.Client(timeout=REWRITE_TIMEOUT) as client:
-            response = client.post(
+    try:
+        async with httpx.AsyncClient(timeout=REWRITE_TIMEOUT) as client:
+            response = await client.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={"model": model, "messages": messages, "temperature": 0.1}
             )
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            content = response.json()["choices"][0]["message"]["content"]
 
-    try:
-        content = await asyncio.to_thread(_sync_http_call)
         result = json.loads(content.strip())
         qt = result.get("query_type", "general")
         if qt not in VALID_QUERY_TYPES:

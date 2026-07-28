@@ -97,6 +97,16 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
             event_type = event.get("event")
             event_name = event.get("name", "")
 
+            # 0. 节点开始事件 -> 发送 thinking 提示（让用户知道接下来要做什么）
+            if event_type == "on_node_start":
+                node_name = event_name
+                if node_name in NODE_PROGRESS:
+                    _, start_msg, _ = NODE_PROGRESS[node_name]
+                    yield _format_sse("thinking", {
+                        "step": node_name,
+                        "message": start_msg
+                    })
+
             # 1. 节点结束事件 -> 发送进度和追踪事件
             if event_type == "on_node_end":
                 node_name = event_name
