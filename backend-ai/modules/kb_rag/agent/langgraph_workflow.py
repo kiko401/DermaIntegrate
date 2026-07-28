@@ -32,7 +32,7 @@ from ..schemas import (
     RiskHighlightObject, PatientContextObject
 )
 from ..generation.guardrails import check_input, extract_risk_highlights
-from ..retrieval.rewrite_service import rewrite_and_classify
+from ..retrieval.rewrite_service import rewrite_and_classify, classify_query_type
 from ..retrieval.retriever import retrieve
 from ..generation.answer_builder import _call_llm
 from ..generation.answer_builder import build_response
@@ -53,6 +53,7 @@ class AgentState(TypedDict):
     run_id: str
     rewritten_query: str
     route: str
+    query_type: str              # 查指南(guideline)还是查病例(case)，由 classify_query_type 确定
     chunks: list
     is_blocked: bool
     phi_detected: bool
@@ -270,13 +271,52 @@ async def rewrite(state: AgentState) -> AgentState:
 
 
 @node_handler
+async def query_type_classify(state: AgentState) -> AgentState:
+    """
+    节点7（新增）: 查询类型分类
+    在检索之前，判断本次查询是"查指南"还是"查病例"。
+
+    - guideline: 查通用医学指南/规范（NCCN/AJCC/药品说明书等）
+    - case: 查本院脱敏临床病例
+    - general: 无法明确归类，按通用医学知识处理
+
+    query_type 会影响 retrieval 节点的 kb_ids 行为：
+    - guideline: 使用请求中传入的 kb_ids（通常为指南库）
+    - case: 自动将 kb_ids 切换为病例库（通常配置在 options.case_kb_ids）
+    """
+    route = state["route"]
+
+    # 只有知识问答类路由需要分类
+    if route in ["general_chat", "tool_call"]:
+        state["query_type"] = "general"
+        return state
+
+    req = state["req"]
+
+    # 调用 LLM 进行第二层分类
+    query_type = await classify_query_type(
+        query=state["rewritten_query"],
+        patient_context=req.patient_context,
+        history=req.history,
+    )
+    state["query_type"] = query_type
+    logger.info(f"Query type classified: query_type={query_type}, route={route}")
+
+    return state
+
+
+@node_handler
 async def retrieval(state: AgentState) -> AgentState:
     """
-    节点7: 知识库检索
-    基于改写后的问题检索知识库，获取相关 chunks
+    节点8: 知识库检索
+    基于改写后的问题检索知识库，获取相关 chunks。
+    根据 query_type 决定查哪个知识库：
+    - guideline: 使用原始 kb_ids（指南库）
+    - case: 自动切换到 options.case_kb_ids（病例库）；若未配置则使用原始 kb_ids
     """
     req = state["req"]
     route = state["route"]
+    query_type = state.get("query_type", "general")
 
     # 只有知识问答类路由需要检索
     if route in ["general_chat", "tool_call"]:
@@ -287,10 +327,30 @@ async def retrieval(state: AgentState) -> AgentState:
     threshold = req.options.get("similarity_threshold", 0.35)
     use_rerank = req.options.get("use_rerank", False)
 
+    # 确定本次检索使用的 kb_ids
+    # - guideline: 直接使用请求中的 kb_ids
+    # - case: 优先使用 options.case_kb_ids（专门的病例库 ID）
+    # - general: 直接使用 kb_ids
+    if query_type == "case":
+        case_kb_ids = req.options.get("case_kb_ids", [])
+        if case_kb_ids:
+            kb_ids_to_search = case_kb_ids
+            logger.info(f"Query type=case: switching to case_kb_ids={kb_ids_to_search}")
+        else:
+            # 未配置专门的病例库 ID 时，fallback 到原始 kb_ids 并给出警告
+            kb_ids_to_search = req.kb_ids
+            logger.warning(
+                f"Query type=case but case_kb_ids not configured in options. "
+                f"Falling back to req.kb_ids={kb_ids_to_search}. "
+                f"Consider configuring options.case_kb_ids for proper case isolation."
+            )
+    else:
+        kb_ids_to_search = req.kb_ids
+
     # 执行检索（含医生权限隔离）
     chunks, is_blocked = await retrieve(
         state["rewritten_query"],
-        req.kb_ids,
+        kb_ids_to_search,
         top_k,
         threshold,
         use_rerank=use_rerank,
@@ -470,13 +530,14 @@ async def response_finalize(state: AgentState) -> AgentState:
 
 workflow = StateGraph(AgentState)
 
-# 添加节点（11节点）
+# 添加节点（12节点，新增 query_type_classify）
 workflow.add_node("policy_check", policy_check)
 workflow.add_node("phi_guard", phi_guard)
 workflow.add_node("rejection_check", rejection_check)
 workflow.add_node("rule_match", rule_match)
 workflow.add_node("intent_route", intent_route)
 workflow.add_node("rewrite", rewrite)
+workflow.add_node("query_type_classify", query_type_classify)  # 新增节点
 workflow.add_node("retrieval", retrieval)
 workflow.add_node("tool_decision", tool_decision)
 workflow.add_node("answer_builder", answer_builder)
@@ -494,17 +555,29 @@ workflow.add_edge("rule_match", "intent_route")
 workflow.add_edge("intent_route", "rewrite")
 
 # rewrite 之后根据路由分支（is_blocked 优先，确保规则命中等阻断场景直接到达终点）
+# knowledge_query / patient_context_query / agent_workflow 走 query_type_classify 做第二层分类
 workflow.add_conditional_edges(
     "rewrite",
     lambda state: "blocked" if state.get("is_blocked") else state["route"],
     {
         "blocked": "response_finalize",  # 被阻断直接结束
-        "knowledge_query": "retrieval",
-        "patient_context_query": "retrieval",
+        "knowledge_query": "query_type_classify",
+        "patient_context_query": "query_type_classify",
         "tool_call": "tool_decision",
         "general_chat": "answer_builder",
-        "agent_workflow": "retrieval",  # agent_workflow 也先检索
+        "agent_workflow": "query_type_classify",  # agent_workflow 也先做查询类型分类
         "rule_answer": "response_finalize",  # 规则命中的直接走响应封装（is_blocked=True，response已构建）
+    }
+)
+
+# query_type_classify 之后，知识类路由进入 retrieval；general 跳过检索
+workflow.add_conditional_edges(
+    "query_type_classify",
+    lambda state: state.get("query_type", "general"),
+    {
+        "general": "answer_builder",     # 无法归类，不检索直接 LLM 回答
+        "guideline": "retrieval",        # 查指南，进入检索
+        "case": "retrieval",            # 查病例，进入检索（kb_ids 会在 retrieval 中切换）
     }
 )
 
