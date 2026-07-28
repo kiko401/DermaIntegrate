@@ -11,6 +11,7 @@ GET/POST/PUT/DELETE  /admin/sensitive-words - 敏感词 CRUD
 GET/PUT               /admin/model-configs  - 模型配置查询/更新
 """
 import logging
+import json
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ from ..rules.store import (
     get_rule_answers, add_rule_answer, update_rule_answer, delete_rule_answer,
     get_rejection_rules, add_rejection_rule, update_rejection_rule, delete_rejection_rule,
     get_rejection_logs,
+    get_sensitive_hit_logs,
     get_sensitive_words, add_sensitive_word, update_sensitive_word, delete_sensitive_word,
     get_model_configs, upsert_model_config,
 )
@@ -264,6 +266,60 @@ async def list_rejection_logs(
         )
     except Exception as e:
         logger.error(f"Failed to list rejection logs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== 敏感词命中日志 =====
+
+class SensitiveHitLogResponse(BaseModel):
+    log_id: int
+    conversation_id: Optional[int] = None
+    rule_id: Optional[int] = None
+    rule_pattern: Optional[str] = None
+    user_question: str
+    hit_words: list[str] = []
+    action: str
+    created_at: Optional[str] = None
+
+
+class SensitiveHitLogsResponse(BaseModel):
+    logs: list[SensitiveHitLogResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/admin/sensitive-hit-logs", response_model=SensitiveHitLogsResponse)
+async def list_sensitive_hit_logs(
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+):
+    """查看敏感词命中日志（分页）"""
+    try:
+        logs, total = await get_sensitive_hit_logs(limit=limit, offset=offset)
+        return SensitiveHitLogsResponse(
+            logs=[
+                SensitiveHitLogResponse(
+                    log_id=log["log_id"],
+                    conversation_id=log.get("conversation_id"),
+                    rule_id=log.get("rule_id"),
+                    rule_pattern=log.get("rule_pattern"),
+                    user_question=log["user_question"],
+                    hit_words=(
+                        json.loads(log["hit_words_json"]) if isinstance(log.get("hit_words_json"), str)
+                        else (log.get("hit_words_json") or [])
+                    ),
+                    action=log["action"],
+                    created_at=str(log["created_at"]) if log.get("created_at") else None,
+                )
+                for log in logs
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        logger.error(f"Failed to list sensitive hit logs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

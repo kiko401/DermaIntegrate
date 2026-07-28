@@ -147,9 +147,9 @@ def check_input(text: str) -> Tuple[bool, List[str]]:
     if cache.automaton is not None:
         # AC 自动机：一次性多模式匹配
         found_words = set()
-        for _, length in cache.automaton.iter(text):
+        for end_idx, length in cache.automaton.iter(text):
             # 从末尾往前取 length 个字符即为匹配词
-            matched = text[_[0] - length + 1:_[0] + 1] if length > 0 else text[_[0]]
+            matched = text[end_idx - length + 1:end_idx + 1] if length > 0 else text[end_idx]
             found_words.add(matched)
         hits = list(found_words)
     elif cache.words_regex is not None:

@@ -38,7 +38,7 @@ from ..generation.answer_builder import _call_llm
 from ..generation.answer_builder import build_response
 from .tool_executor import execute_tool, init_agent_trace, update_agent_trace, get_agent_run_trace
 from ..rules.matcher import apply_rejection_rules, apply_rule_answers
-from ..rules.store import add_rejection_log
+from ..rules.store import add_rejection_log, add_sensitive_hit_log
 from ..utils import detect_phi, mask_phi
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,15 @@ async def policy_check(state: AgentState) -> AgentState:
 
     if not is_safe:
         logger.warning(f"Policy check blocked input: {hits}")
+        try:
+            asyncio.create_task(add_sensitive_hit_log(
+                user_question=req.question,
+                hit_words=hits,
+                conversation_id=req.conversation_id if req.conversation_id else None,
+                action="blocked",
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to log sensitive hit: {e}")
         state["response"] = build_response(
             req, f"输入包含违规词汇: {', '.join(hits)}",
             [], "general_chat", 0.0, "blocked", "敏感词拦截"

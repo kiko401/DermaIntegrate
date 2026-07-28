@@ -6,6 +6,7 @@
 
 所有函数均为异步接口，统一使用 aiomysql 引擎。
 """
+import json
 import os
 import logging
 import threading
@@ -78,7 +79,7 @@ def _get_session_factory():
 async def init_rules_table():
     """
     初始化规则表（幂等建表，已存在则跳过）
-    表: rag_rule_answers / rag_rejection_rules / rag_rejection_logs
+    表: rag_rule_answers / rag_rejection_rules / rag_rejection_logs / rag_sensitive_hit_logs
     """
     engine = _get_async_engine()
     async with engine.connect() as conn:
@@ -151,6 +152,23 @@ async def init_rules_table():
                 description VARCHAR(200) DEFAULT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 UNIQUE KEY uk_config_key (config_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """))
+
+        # 敏感词命中日志表（只增不减，支持治理页审计）
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS rag_sensitive_hit_logs (
+                log_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                conversation_id INT DEFAULT NULL,
+                rule_id INT DEFAULT NULL,
+                rule_pattern VARCHAR(200) DEFAULT NULL,
+                user_question VARCHAR(500) NOT NULL,
+                hit_words_json JSON NULL,
+                action VARCHAR(20) NOT NULL DEFAULT 'blocked',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_created_at (created_at),
+                INDEX idx_conversation_id (conversation_id),
+                INDEX idx_rule_id (rule_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """))
 
@@ -375,6 +393,53 @@ async def delete_sensitive_word(word_id: int) -> bool:
         )
         await session.commit()
         return result.rowcount > 0
+
+
+# ===== 敏感词命中日志 =====
+
+async def add_sensitive_hit_log(
+    user_question: str,
+    hit_words: List[str],
+    conversation_id: int = None,
+    rule_id: int = None,
+    rule_pattern: str = None,
+    action: str = "blocked",
+) -> int:
+    """记录敏感词命中日志（不阻断主流程）"""
+    factory = _get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("""
+                INSERT INTO rag_sensitive_hit_logs
+                  (conversation_id, rule_id, rule_pattern, user_question, hit_words_json, action)
+                VALUES
+                  (:cid, :rid, :rp, :uq, :hits, :act)
+            """),
+            {
+                "cid": conversation_id,
+                "rid": rule_id,
+                "rp": rule_pattern,
+                "uq": user_question[:500],
+                "hits": json.dumps(hit_words, ensure_ascii=False),
+                "act": action,
+            }
+        )
+        await session.commit()
+        return result.lastrowid
+
+
+async def get_sensitive_hit_logs(limit: int = 100, offset: int = 0) -> Tuple[List[dict], int]:
+    """查询敏感词命中日志（分页）"""
+    factory = _get_session_factory()
+    async with factory() as session:
+        total_result = await session.execute(text("SELECT COUNT(*) FROM rag_sensitive_hit_logs"))
+        total = total_result.scalar()
+        rows_result = await session.execute(
+            text("SELECT * FROM rag_sensitive_hit_logs ORDER BY created_at DESC LIMIT :lim OFFSET :off"),
+            {"lim": limit, "off": offset}
+        )
+        rows = rows_result.fetchall()
+        return [dict(row._mapping) for row in rows], total
 
 
 # ===== 模型配置 CRUD =====

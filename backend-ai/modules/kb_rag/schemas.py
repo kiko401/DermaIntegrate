@@ -114,7 +114,7 @@ class ChatResponse(BaseModel):
     """知识库问答响应，包含答案、来源引用、风险高亮与 Agent 执行轨迹。"""
     trace_id: str
     message_id: str
-    route: Literal["knowledge_query", "patient_context_query", "tool_call", "general_chat", "agent_workflow"]
+    route: Literal["knowledge_query", "patient_context_query", "tool_call", "general_chat", "agent_workflow", "rule_answer"]
     answer: str
     sources: List[SourceObject] = []
     confidence: float
