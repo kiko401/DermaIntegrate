@@ -24,6 +24,11 @@ if not DATABASE_URL:
         "Rules store will be unavailable until configured."
     )
 
+def is_db_configured() -> bool:
+    """检查数据库是否已配置（可写入）。"""
+    return bool(DATABASE_URL.strip())
+
+
 # 异步引擎（pool_pre_ping 防 MySQL 8h 空闲断连）
 _async_engine = None
 _async_session_factory = None

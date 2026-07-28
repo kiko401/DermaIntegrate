@@ -397,6 +397,10 @@ class RAGKnowledgeBase:
 
 # ============ 独立的初始化函数 ============
 
+# 模块级 KB 实例缓存，避免重复加载 Embedding 模型
+_kb_instance: Optional[RAGKnowledgeBase] = None
+
+
 def init_knowledge_base(docs_dir: str = None, recreate: bool = False) -> Dict:
     """
     独立的知识库初始化函数。
@@ -408,8 +412,14 @@ def init_knowledge_base(docs_dir: str = None, recreate: bool = False) -> Dict:
     Returns:
         初始化结果统计
     """
-    kb = RAGKnowledgeBase(docs_dir=docs_dir)
-    return kb.init_from_documents(docs_dir=docs_dir, recreate=recreate)
+    global _kb_instance
+    if recreate:
+        # 强制重建时，清除缓存重新初始化
+        _kb_instance = RAGKnowledgeBase(docs_dir=docs_dir)
+    elif _kb_instance is None:
+        # 首次调用或被清除后，重建缓存
+        _kb_instance = RAGKnowledgeBase(docs_dir=docs_dir)
+    return _kb_instance.init_from_documents(docs_dir=docs_dir, recreate=recreate)
 
 
 def check_knowledge_base_status() -> Dict:
@@ -419,7 +429,7 @@ def check_knowledge_base_status() -> Dict:
     Returns:
         状态信息
     """
-    kb = RAGKnowledgeBase()
+    kb = _kb_instance if _kb_instance is not None else RAGKnowledgeBase()
     is_init = kb.check_initialized()
 
     status = {

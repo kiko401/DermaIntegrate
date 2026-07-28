@@ -96,6 +96,12 @@ async def openai_completions_endpoint(
         x_kb_ids: Optional[str] = Header(None, alias='X-KB-IDS'),
 ):
     """OpenAI 风格兼容问答入口，响应体依然为自定义 ChatResponse。"""
+    # RBAC 强制检查：doctor_id 必须由调用方传入，确保知识库检索时权限过滤生效
+    if req.doctor_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="doctor_id is required for RBAC authorization"
+        )
     internal_req = _build_internal_request(req, x_kb_ids)
 
     if internal_req.options.get('stream'):
