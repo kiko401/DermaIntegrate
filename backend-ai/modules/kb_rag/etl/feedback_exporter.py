@@ -29,7 +29,11 @@ async def export_to_jsonl(conversation_data: List[Dict]) -> str:
             # 可附带元数据用于微调过滤
             "metadata": {
                 "conversation_id": conv.get("conversation_id"),
-                "feedback": conv.get("feedback", "positive")  # 假设应用域已过滤出正面反馈
+                "feedback": conv.get("feedback", ""),
+                "route": conv.get("route", ""),
+                "confidence": conv.get("confidence", None),
+                "kb_ids": conv.get("kb_ids", []),
+                "created_at": conv.get("created_at", ""),
             }
         }
         jsonl_lines.append(json.dumps(entry, ensure_ascii=False))
