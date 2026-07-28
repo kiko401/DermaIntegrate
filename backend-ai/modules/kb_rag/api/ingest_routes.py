@@ -181,7 +181,7 @@ async def delete_document_index_endpoint(req: DeleteIndexRequest):
     try:
         if req.delete_all:
             # 先 count 再 delete，保证返回值有意义
-            async def _count_and_delete():
+            def _count_and_delete():
                 client = get_qdrant_client()
                 count_result = client.count(
                     collection_name=COLLECTION_NAME,
@@ -203,14 +203,13 @@ async def delete_document_index_endpoint(req: DeleteIndexRequest):
             deleted_count = await asyncio.to_thread(_count_and_delete)
             return {"status": "deleted", "deleted_chunk_count": deleted_count}
         elif req.doc_id is not None:
-            from qdrant_client.http import models
             conditions = [models.FieldCondition(key="doc_id", match=models.MatchValue(value=req.doc_id))]
             if req.doc_version_id is not None:
                 conditions.append(
                     models.FieldCondition(key="doc_version_id", match=models.MatchValue(value=req.doc_version_id))
                 )
             # 先 count 再 delete，保证返回值有意义
-            async def _count_and_delete():
+            def _count_and_delete():
                 client = get_qdrant_client()
                 count_result = client.count(
                     collection_name=COLLECTION_NAME,

@@ -14,9 +14,9 @@ MAX_TRACE_COUNT = 100
 _RUN_TRACES: OrderedDict[str, AgentRunTraceObject] = OrderedDict()
 
 
-async def execute_tool(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_tool(tool_name: str, args: Dict[str, Any], doctor_id: Optional[int] = None) -> Dict[str, Any]:
     """路由并执行工具调用，包含超时控制"""
-    logger.info(f"Executing tool {tool_name} with args: {args}")
+    logger.info(f"Executing tool {tool_name} with args: {args}, doctor_id={doctor_id}")
 
     try:
         if tool_name == "pandas_analyzer":
@@ -31,7 +31,10 @@ async def execute_tool(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             kb_ids = args.get("kb_ids", [])
             top_k = args.get("top_k", 5)
             similarity_threshold = args.get("similarity_threshold", 0.35)
-            chunks, is_blocked = await kb_lookup(query, kb_ids, top_k=top_k, threshold=similarity_threshold)
+            chunks, is_blocked = await kb_lookup(
+                query, kb_ids, top_k=top_k, threshold=similarity_threshold,
+                doctor_id=doctor_id  # 传入 doctor_id，保持 RBAC 权限过滤
+            )
             return {"status": "completed", "result": {"chunks": chunks, "is_blocked": is_blocked}}
 
         elif tool_name == "clinical_context_summarizer":

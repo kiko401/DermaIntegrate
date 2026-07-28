@@ -62,7 +62,7 @@ async def run_agent_endpoint(req: AgentRunRequest, background_tasks: BackgroundT
         )
 
         # M-11: BackgroundTasks 确保任务在 FastAPI 生命周期内完成，异常可被记录
-        background_tasks.add_task(run_agent_workflow, chat_req, run_id)
+        background_tasks.add_task(run_agent_workflow, chat_req)
 
         return {
             "run_id": run_id,

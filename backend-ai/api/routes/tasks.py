@@ -85,6 +85,7 @@ async def upload_data(
 
     task_id = str(uuid.uuid4())
     image_uid: Optional[str] = None
+    image_parsing_failed = False
 
     if file:
         image_uid = f"img_{uuid.uuid4().hex[:16]}"
@@ -99,7 +100,6 @@ async def upload_data(
             f.write(content)
 
         is_dicom = file.content_type == "application/dicom" or ext == ".dcm"
-        image_parsing_failed = False
 
         if is_dicom:
             try:
@@ -129,15 +129,24 @@ async def upload_data(
             static_path = os.path.join(settings.STATIC_DIR, "images", static_filename)
             shutil.copy(raw_path, static_path)
 
-            with Image.open(raw_path) as img:
-                img_width, img_height = img.size
-            image = ImageDB(
-                image_uid=image_uid, task_id=task_id, format=ext.lstrip(".").upper(),
-                url=f"/ai-static/images/{static_filename}", status="ready",
-                width=img_width, height=img_height,
-                created_at=datetime.now(timezone.utc)
-            )
-            db.add(image)
+            try:
+                with Image.open(raw_path) as img:
+                    img_width, img_height = img.size
+                image = ImageDB(
+                    image_uid=image_uid, task_id=task_id, format=ext.lstrip(".").upper(),
+                    url=f"/ai-static/images/{static_filename}", status="ready",
+                    width=img_width, height=img_height,
+                    created_at=datetime.now(timezone.utc)
+                )
+                db.add(image)
+            except Exception:
+                image = ImageDB(
+                    image_uid=image_uid, task_id=task_id, format=ext.lstrip(".").upper(),
+                    status="failed", error_message="invalid image file",
+                    created_at=datetime.now(timezone.utc)
+                )
+                db.add(image)
+                image_parsing_failed = True
 
     task = TaskDB(
         task_id=task_id, image_uid=image_uid,

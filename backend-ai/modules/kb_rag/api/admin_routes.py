@@ -10,8 +10,8 @@ GET                   /admin/rejection-logs - 拒绝日志（分页）
 GET/POST/PUT/DELETE  /admin/sensitive-words - 敏感词 CRUD
 GET/PUT               /admin/model-configs  - 模型配置查询/更新
 """
-import logging
 import json
+import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -29,6 +29,7 @@ from ..rules.store import (
     get_sensitive_hit_logs,
     get_sensitive_words, add_sensitive_word, update_sensitive_word, delete_sensitive_word,
     get_model_configs, upsert_model_config,
+    is_db_configured,
 )
 from ..rules.matcher import invalidate_cache
 from ..generation.guardrails import invalidate_sensitive_word_cache
@@ -81,6 +82,8 @@ async def list_rule_answers(include_disabled: bool = Query(False)):
 @router.post("/admin/rules", status_code=201, response_model=RuleAnswerCreateResponse)
 async def create_rule_answer(req: RuleAnswerRequest):
     """新增规则回答"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置（DATABASE_URL 环境变量未设置），无法写入规则数据")
     try:
         rule_id = await add_rule_answer(
             match_type=req.match_type.value,
@@ -99,6 +102,8 @@ async def create_rule_answer(req: RuleAnswerRequest):
 @router.put("/admin/rules/{rule_id}", response_model=RuleAnswerUpdateResponse)
 async def update_rule_answer_endpoint(rule_id: int, req: RuleAnswerRequest):
     """更新规则回答"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法更新规则")
     try:
         updated = await update_rule_answer(
             rule_id=rule_id,
@@ -122,6 +127,8 @@ async def update_rule_answer_endpoint(rule_id: int, req: RuleAnswerRequest):
 @router.delete("/admin/rules/{rule_id}", response_model=RuleAnswerDeleteResponse)
 async def delete_rule_answer_endpoint(rule_id: int):
     """删除规则回答"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法删除规则")
     try:
         deleted = await delete_rule_answer(rule_id)
         if not deleted:
@@ -176,6 +183,8 @@ async def list_rejection_rules(include_disabled: bool = Query(False)):
 @router.post("/admin/rejections", status_code=201, response_model=RejectionRuleCreateResponse)
 async def create_rejection_rule(req: RejectionRuleRequest):
     """新增拒绝规则"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法新增拒绝规则")
     try:
         rule_id = await add_rejection_rule(
             match_type=req.match_type.value,
@@ -194,6 +203,8 @@ async def create_rejection_rule(req: RejectionRuleRequest):
 @router.put("/admin/rejections/{rule_id}", response_model=RejectionRuleUpdateResponse)
 async def update_rejection_rule_endpoint(rule_id: int, req: RejectionRuleRequest):
     """更新拒绝规则"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法更新拒绝规则")
     try:
         updated = await update_rejection_rule(
             rule_id=rule_id,
@@ -217,6 +228,8 @@ async def update_rejection_rule_endpoint(rule_id: int, req: RejectionRuleRequest
 @router.delete("/admin/rejections/{rule_id}", response_model=RejectionRuleDeleteResponse)
 async def delete_rejection_rule_endpoint(rule_id: int):
     """删除拒绝规则"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法删除拒绝规则")
     try:
         deleted = await delete_rejection_rule(rule_id)
         if not deleted:
@@ -360,6 +373,8 @@ async def list_sensitive_words(include_disabled: bool = Query(False)):
 @router.post("/admin/sensitive-words", status_code=201, response_model=SensitiveWordCreateResponse)
 async def create_sensitive_word(req: SensitiveWordRequest):
     """新增敏感词"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法新增敏感词")
     try:
         word_id = await add_sensitive_word(word=req.word, enabled=req.enabled)
         invalidate_sensitive_word_cache()
@@ -372,6 +387,8 @@ async def create_sensitive_word(req: SensitiveWordRequest):
 @router.put("/admin/sensitive-words/{word_id}", response_model=SensitiveWordUpdateResponse)
 async def update_sensitive_word_endpoint(word_id: int, req: SensitiveWordRequest):
     """更新敏感词"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法更新敏感词")
     try:
         updated = await update_sensitive_word(word_id=word_id, word=req.word, enabled=req.enabled)
         if not updated:
@@ -388,6 +405,8 @@ async def update_sensitive_word_endpoint(word_id: int, req: SensitiveWordRequest
 @router.delete("/admin/sensitive-words/{word_id}", response_model=SensitiveWordDeleteResponse)
 async def delete_sensitive_word_endpoint(word_id: int):
     """删除敏感词"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法删除敏感词")
     try:
         deleted = await delete_sensitive_word(word_id)
         if not deleted:
@@ -426,6 +445,8 @@ async def list_model_configs():
 @router.put("/admin/model-configs/{config_key}", response_model=dict)
 async def update_model_config(config_key: str, req: ModelConfigRequest):
     """更新模型配置（以 config_key 为唯一键，不存在则插入）"""
+    if not is_db_configured():
+        raise HTTPException(status_code=503, detail="数据库未配置，无法更新模型配置")
     try:
         await upsert_model_config(config_key=config_key, config_value=req.config_value)
         invalidate_model_config_cache()

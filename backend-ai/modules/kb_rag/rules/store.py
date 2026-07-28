@@ -25,6 +25,11 @@ if not DATABASE_URL:
         "Rules store will be unavailable until configured."
     )
 
+def is_db_configured() -> bool:
+    """检查数据库是否已配置（可写入）。"""
+    return bool(DATABASE_URL.strip())
+
+
 # 异步引擎（pool_pre_ping 防 MySQL 8h 空闲断连）
 _async_engine = None
 _async_session_factory = None
@@ -79,7 +84,7 @@ def _get_session_factory():
 async def init_rules_table():
     """
     初始化规则表（幂等建表，已存在则跳过）
-    表: rag_rule_answers / rag_rejection_rules / rag_rejection_logs / rag_sensitive_hit_logs
+    表: rag_rule_answers / rag_rejection_rules / rag_rejection_logs
     """
     engine = _get_async_engine()
     async with engine.connect() as conn:
@@ -395,6 +400,49 @@ async def delete_sensitive_word(word_id: int) -> bool:
         return result.rowcount > 0
 
 
+# ===== 模型配置 CRUD =====
+
+async def get_model_configs() -> List[dict]:
+    """获取所有模型配置"""
+    factory = _get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT config_id, config_key, config_value, description, updated_at FROM rag_model_configs")
+        )
+        rows = result.fetchall()
+        return [dict(row._mapping) for row in rows]
+
+
+async def get_model_config(config_key: str) -> Optional[dict]:
+    """获取单个模型配置"""
+    factory = _get_session_factory()
+    async with factory() as session:
+        row_result = await session.execute(
+            text("SELECT config_id, config_key, config_value, description, updated_at FROM rag_model_configs WHERE config_key=:ck"),
+            {"ck": config_key}
+        )
+        row = row_result.fetchone()
+        return dict(row._mapping) if row else None
+
+
+async def upsert_model_config(config_key: str, config_value: str, description: str = None) -> bool:
+    """更新或插入模型配置（以 config_key 为唯一键）"""
+    factory = _get_session_factory()
+    async with factory() as session:
+        existing = await session.execute(
+            text("SELECT config_id FROM rag_model_configs WHERE config_key=:ck"),
+            {"ck": config_key}
+        )
+        if existing.fetchone():
+            sql = "UPDATE rag_model_configs SET config_value=:cv, description=:desc WHERE config_key=:ck"
+            await session.execute(text(sql), {"cv": config_value, "desc": description, "ck": config_key})
+        else:
+            sql = "INSERT INTO rag_model_configs (config_key, config_value, description) VALUES (:ck, :cv, :desc)"
+            await session.execute(text(sql), {"ck": config_key, "cv": config_value, "desc": description})
+        await session.commit()
+        return True
+
+
 # ===== 敏感词命中日志 =====
 
 async def add_sensitive_hit_log(
@@ -440,46 +488,3 @@ async def get_sensitive_hit_logs(limit: int = 100, offset: int = 0) -> Tuple[Lis
         )
         rows = rows_result.fetchall()
         return [dict(row._mapping) for row in rows], total
-
-
-# ===== 模型配置 CRUD =====
-
-async def get_model_configs() -> List[dict]:
-    """获取所有模型配置"""
-    factory = _get_session_factory()
-    async with factory() as session:
-        result = await session.execute(
-            text("SELECT config_id, config_key, config_value, description, updated_at FROM rag_model_configs")
-        )
-        rows = result.fetchall()
-        return [dict(row._mapping) for row in rows]
-
-
-async def get_model_config(config_key: str) -> Optional[dict]:
-    """获取单个模型配置"""
-    factory = _get_session_factory()
-    async with factory() as session:
-        row_result = await session.execute(
-            text("SELECT config_id, config_key, config_value, description, updated_at FROM rag_model_configs WHERE config_key=:ck"),
-            {"ck": config_key}
-        )
-        row = row_result.fetchone()
-        return dict(row._mapping) if row else None
-
-
-async def upsert_model_config(config_key: str, config_value: str, description: str = None) -> bool:
-    """更新或插入模型配置（以 config_key 为唯一键）"""
-    factory = _get_session_factory()
-    async with factory() as session:
-        existing = await session.execute(
-            text("SELECT config_id FROM rag_model_configs WHERE config_key=:ck"),
-            {"ck": config_key}
-        )
-        if existing.fetchone():
-            sql = "UPDATE rag_model_configs SET config_value=:cv, description=:desc WHERE config_key=:ck"
-            await session.execute(text(sql), {"cv": config_value, "desc": description, "ck": config_key})
-        else:
-            sql = "INSERT INTO rag_model_configs (config_key, config_value, description) VALUES (:ck, :cv, :desc)"
-            await session.execute(text(sql), {"ck": config_key, "cv": config_value, "desc": description})
-        await session.commit()
-        return True

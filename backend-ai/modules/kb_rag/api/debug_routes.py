@@ -89,6 +89,9 @@ class RetrievedChunk(BaseModel):
 class DocVersionsRequest(BaseModel):
     doc_id: int
     doc_version_ids: Optional[List[int]] = None  # 空则返回所有版本
+    offset: int = Field(0, ge=0, description="版本分页偏移")
+    limit: int = Field(50, ge=1, le=200, description="最多返回版本数")
+    max_chunks_per_version: int = Field(100, ge=1, le=500, description="每个版本最多返回 chunk 数")
 
 
 class DocVersionChunk(BaseModel):
@@ -105,6 +108,9 @@ class DocVersionItem(BaseModel):
 
 class DocVersionsResponse(BaseModel):
     doc_id: int
+    total_versions: int
+    returned_versions: int
+    total_chunks: int
     versions: List[DocVersionItem]
 
 
@@ -116,6 +122,8 @@ async def doc_versions_endpoint(req: DocVersionsRequest):
     - 按 doc_version_id 分组返回每个版本的所有 chunk
     - 空 doc_version_ids 时返回该 doc_id 下所有版本
     - 返回的 text 为原始 chunk 内容，不含向量
+    - 分页参数控制版本数量，每个版本内最多 max_chunks_per_version 个 chunk
+    - 全程流式处理，不一次性加载全部 point 到内存
     """
     try:
         client = get_qdrant_client()
@@ -134,9 +142,11 @@ async def doc_versions_endpoint(req: DocVersionsRequest):
 
         kb_filter = models.Filter(must=must_conditions)
 
-        # 扫描所有匹配的 point
-        all_points = []
+        # 流式分组：边扫描边构建 version_map，不一次性加载全部
+        version_map: Dict[int, List[DocVersionChunk]] = {}
+        total_chunks = 0
         offset = None
+
         while True:
             points, next_offset = client.scroll(
                 collection_name=COLLECTION_NAME,
@@ -146,55 +156,75 @@ async def doc_versions_endpoint(req: DocVersionsRequest):
                 with_payload=True,
                 with_vectors=False,
             )
-            all_points.extend(points)
+            if not points:
+                break
+
+            for pt in points:
+                payload = pt.payload or {}
+                doc_version_id = payload.get("doc_version_id", 0)
+                chunk_id = payload.get("chunk_id", "")
+
+                # 解析 chunk_index: 格式 {doc_id}_{doc_version_id}_{chunk_index}，chunk_index 补零至三位
+                chunk_index = 0
+                parts = chunk_id.split("_")
+                if len(parts) >= 3:
+                    try:
+                        chunk_index = int(parts[-1])
+                    except ValueError:
+                        chunk_index = 0
+
+                if doc_version_id not in version_map:
+                    version_map[doc_version_id] = []
+
+                # 每个版本最多 max_chunks_per_version，超过则跳过（保持内存稳定）
+                if len(version_map[doc_version_id]) >= req.max_chunks_per_version:
+                    total_chunks += 1
+                    continue
+
+                version_map[doc_version_id].append(DocVersionChunk(
+                    chunk_index=chunk_index,
+                    chunk_id=chunk_id,
+                    text=payload.get("text", ""),
+                ))
+                total_chunks += 1
+
             if next_offset is None:
                 break
             offset = next_offset
 
-        if not all_points:
-            return DocVersionsResponse(doc_id=req.doc_id, versions=[])
-
-        # 按 doc_version_id 分组
-        version_map: Dict[int, List[DocVersionChunk]] = {}
-        for pt in all_points:
-            payload = pt.payload or {}
-            doc_version_id = payload.get("doc_version_id", 0)
-            chunk_id = payload.get("chunk_id", "")
-
-            # 解析 chunk_index: 格式 {doc_id}_{doc_version_id}_{chunk_index}，chunk_index 补零至三位
-            chunk_index = 0
-            parts = chunk_id.split("_")
-            if len(parts) >= 3:
-                try:
-                    chunk_index = int(parts[-1])
-                except ValueError:
-                    chunk_index = 0
-
-            chunk_item = DocVersionChunk(
-                chunk_index=chunk_index,
-                chunk_id=chunk_id,
-                text=payload.get("text", ""),
+        if not version_map:
+            return DocVersionsResponse(
+                doc_id=req.doc_id,
+                total_versions=0,
+                returned_versions=0,
+                total_chunks=0,
+                versions=[]
             )
-
-            if doc_version_id not in version_map:
-                version_map[doc_version_id] = []
-            version_map[doc_version_id].append(chunk_item)
 
         # 每组内按 chunk_index 排序
         for vid in version_map:
             version_map[vid].sort(key=lambda c: c.chunk_index)
 
-        # 构建响应
+        sorted_versions = sorted(version_map.items())
+        total_versions = len(sorted_versions)
+        paginated_versions = sorted_versions[req.offset:req.offset + req.limit]
+
         versions = [
             DocVersionItem(
                 doc_version_id=vid,
                 chunk_count=len(chunks),
                 chunks=chunks,
             )
-            for vid, chunks in sorted(version_map.items())
+            for vid, chunks in paginated_versions
         ]
 
-        return DocVersionsResponse(doc_id=req.doc_id, versions=versions)
+        return DocVersionsResponse(
+            doc_id=req.doc_id,
+            total_versions=total_versions,
+            returned_versions=len(versions),
+            total_chunks=total_chunks,
+            versions=versions,
+        )
 
     except Exception as e:
         logger.error(f"Doc versions query failed: {e}", exc_info=True)
@@ -306,24 +336,31 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
 
     - 支持多关键词（空格分隔，按 AND 逻辑匹配）
     - 返回每个命中文档的 BM25 分数和关键词命中列表
+    - 使用真实 IDF 加权，避免简化评分的排序失真
+    - 分批 scroll 并维护有序 top 结果，防止大知识库 OOM
     """
     try:
         from ..utils import tokenize as _shared_tokenize
-        from ..ingest.vector_store import COLLECTION_NAME
+        from ..retrieval.retriever import _get_global_idf
+        from collections import Counter
 
         # 1. 解析关键词（对查询短语也进行分词，实现 token 级别匹配）
         query_phrases = req.query.strip().split()
         if not query_phrases:
             raise ValueError("查询词不能为空")
-        # 将每个查询短语分词，展平为 token 列表
-        query_tokens: set[str] = set()
+        query_tokens: list[str] = []
         for phrase in query_phrases:
             for tok in _shared_tokenize(phrase):
-                query_tokens.add(tok)
+                if tok not in query_tokens:
+                    query_tokens.append(tok)
         if not query_tokens:
             raise ValueError("查询词不能为空")
 
-        # 2. 查询 Qdrant 获取所有候选 chunk（按 kb_id + doc_id 过滤）
+        # 获取全局 IDF（来自已持久化的 bm25_idf.json）
+        idf_map = _get_global_idf()
+        avg_doc_len = 200.0  # 默认平均文档长度（字符级估算）
+
+        # 2. 分批 scroll Qdrant，维护有序 top_k 结果（防止 OOM）
         client = get_qdrant_client()
         must_conditions = [
             models.FieldCondition(key="kb_id", match=models.MatchAny(any=req.kb_ids))
@@ -334,8 +371,9 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
             )
         kb_filter = models.Filter(must=must_conditions)
 
-        all_points = []
+        top_results: list[dict] = []
         offset = None
+
         while True:
             points, next_offset = client.scroll(
                 collection_name=COLLECTION_NAME,
@@ -345,60 +383,78 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
                 with_payload=True,
                 with_vectors=False,
             )
-            all_points.extend(points)
+            if not points:
+                break
+
+            for pt in points:
+                payload = pt.payload or {}
+                text = payload.get("text", "")
+                if not text:
+                    continue
+
+                doc_tokens = _shared_tokenize(text)
+                doc_token_set = set(doc_tokens)
+                doc_len = len(doc_tokens)
+
+                # 命中关键词：查询 token 与文档 token 的交集
+                hit_tokens = [tok for tok in query_tokens if tok in doc_token_set]
+                if not hit_tokens:
+                    continue
+
+                # 真实 BM25 评分：Σ IDF(t) * (tf * (k1+1)) / (tf + k1 * (1 - b + b * doc_len/avg_doc_len))
+                BM25_K1 = 1.5
+                BM25_B = 0.75
+                doc_tf = Counter(doc_tokens)
+                bm25_score = 0.0
+                for tok in hit_tokens:
+                    tf = doc_tf.get(tok, 0)
+                    idf = idf_map.get(tok, 1.0)  # 未知词默认 IDF=1.0
+                    bm25_score += idf * (tf * (BM25_K1 + 1)) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * doc_len / avg_doc_len))
+
+                # 解析 chunk_index
+                chunk_id = payload.get("chunk_id", "")
+                chunk_index = 0
+                parts = chunk_id.split("_")
+                if len(parts) >= 3:
+                    try:
+                        chunk_index = int(parts[-1])
+                    except ValueError:
+                        chunk_index = 0
+
+                entry = {
+                    "doc_id": payload.get("doc_id", 0),
+                    "doc_version_id": payload.get("doc_version_id", 0),
+                    "chunk_id": chunk_id,
+                    "chunk_index": chunk_index,
+                    "text_snippet": text[:200],
+                    "bm25_score": round(bm25_score, 4),
+                    "keyword_matches": hit_tokens,
+                }
+
+                # 插入有序列表（保持降序）
+                inserted = False
+                for i, existing in enumerate(top_results):
+                    if bm25_score > existing["bm25_score"]:
+                        top_results.insert(i, entry)
+                        inserted = True
+                        break
+                if not inserted:
+                    top_results.append(entry)
+
+                # 超过候选上限则截断，防止内存膨胀
+                max_candidates = req.top_k * 3
+                if len(top_results) > max_candidates:
+                    top_results = top_results[:max_candidates]
+
             if next_offset is None:
                 break
             offset = next_offset
 
-        if not all_points:
-            return KeywordSearchResponse(query=req.query, total_hits=0, results=[])
-
-        # 3. 对每个 chunk 计算 BM25 分数（基于 token 命中）
-        scored = []
-        for pt in all_points:
-            payload = pt.payload or {}
-            text = payload.get("text", "")
-            if not text:
-                continue
-
-            doc_tokens = set(_shared_tokenize(text))
-
-            # 命中关键词：查询 token 与文档 token 的交集
-            hit_keywords = [tok for tok in query_tokens if tok in doc_tokens]
-            if not hit_keywords:
-                continue
-
-            # BM25 简化评分：命中词数 * log(文档总数/匹配文档数)
-            hit_count = len(hit_keywords)
-            bm25_score = hit_count * 1.0  # 简化模式（忽略 IDF 以减少计算量）
-
-            # 解析 chunk_id 获取 chunk_index
-            chunk_id = payload.get("chunk_id", "")
-            chunk_index = 0
-            parts = chunk_id.split("_")
-            if len(parts) >= 3:
-                try:
-                    chunk_index = int(parts[-1])
-                except ValueError:
-                    chunk_index = 0
-
-            scored.append({
-                "doc_id": payload.get("doc_id", 0),
-                "doc_version_id": payload.get("doc_version_id", 0),
-                "chunk_id": chunk_id,
-                "chunk_index": chunk_index,
-                "text_snippet": text[:200],
-                "bm25_score": bm25_score,
-                "keyword_matches": hit_keywords,
-            })
-
-        # 4. 按 BM25 分数降序，取 top_k
-        scored.sort(key=lambda x: x["bm25_score"], reverse=True)
-        top_results = scored[:req.top_k]
+        final_top = top_results[:req.top_k]
 
         return KeywordSearchResponse(
             query=req.query,
-            total_hits=len(scored),
+            total_hits=len(top_results),
             results=[
                 KeywordSearchResult(
                     doc_id=r["doc_id"],
@@ -409,7 +465,7 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
                     bm25_score=r["bm25_score"],
                     keyword_matches=r["keyword_matches"],
                 )
-                for r in top_results
+                for r in final_top
             ],
         )
 

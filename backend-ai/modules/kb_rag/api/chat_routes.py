@@ -13,7 +13,12 @@ router = APIRouter()
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest):
-    """非流式问答接口"""
+    """
+    非流式问答接口（仅供调试/服务间调用使用）。
+
+    生产环境建议统一使用流式接口 GET /stream/，
+    前端可对 SSE 响应进行缓冲后一次性展示，体验等同于非流式。
+    """
     try:
         response = await run_rag_workflow(req)
         return response
