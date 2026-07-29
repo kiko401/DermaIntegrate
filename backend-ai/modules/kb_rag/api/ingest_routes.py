@@ -5,6 +5,8 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Ba
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
+
+from shared.config import EMBEDDING_MODEL
 from ..schemas import IngestCallback, ReindexTextRequest
 from ..ingest.vector_store import init_qdrant_collection, delete_kb_index, delete_document_index, get_qdrant_client, COLLECTION_NAME
 from qdrant_client.http import models
@@ -75,7 +77,7 @@ async def ingest_document_endpoint(
         background_tasks: BackgroundTasks = None,
         chunk_size: int = Form(800),
         chunk_overlap: int = Form(120),
-        embedding_model: str = Form("BAAI/bge-small-zh-v1.5"),
+        embedding_model: str = Form(EMBEDDING_MODEL),
 ):
     """
     文档入库主接口。
@@ -114,7 +116,7 @@ async def reindex_document_endpoint(
         background_tasks: BackgroundTasks = None,
         chunk_size: int = Form(800),
         chunk_overlap: int = Form(120),
-        embedding_model: str = Form("BAAI/bge-small-zh-v1.5"),
+        embedding_model: str = Form(EMBEDDING_MODEL),
 ):
     """
     文档重索引：先删除旧 chunk，再执行重新入库。

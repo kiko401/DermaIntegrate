@@ -64,7 +64,7 @@ def mask_phi(text: str) -> str:
 
 def tokenize(text: str) -> list:
     """
-    中文/英文混合分词器（供检索、BM25、Rerank 共用）。
+    中文/英文混合分词器（供检索和 Rerank 共用）。
 
     - 中文：基于 jieba 词组分词（精确模式）
     - 英文：按空格/符号切分，转小写

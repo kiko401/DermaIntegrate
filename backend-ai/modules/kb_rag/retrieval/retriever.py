@@ -100,7 +100,6 @@ def _log_retrieval_event(
     max_dense_norm: float,
     max_rerank_score: float,
     dense_count: int,
-    bm25_count: int,
     rerank_mode: str,
     entity_boost_count: int,
     extra: Optional[Dict] = None,
@@ -120,20 +119,12 @@ def _log_retrieval_event(
         "max_dense_norm": round(max_dense_norm, 4),
         "max_rerank_score": round(max_rerank_score, 4),
         "dense_candidates": dense_count,
-        "bm25_candidates": bm25_count,
         "rerank_mode": rerank_mode,
         "entity_boost_chunks": entity_boost_count,
     }
     if extra:
         event.update(extra)
     logger.info(json.dumps(event, ensure_ascii=False))
-
-
-# ===== BM25 IDF（已废弃，保留接口兼容）=====
-
-def _get_global_idf() -> Dict[str, float]:
-    """获取全局 IDF 表。BM25 已在纯 Dense 架构下废弃，始终返回空字典。"""
-    return {}
 
 
 # ===== 访问控制过滤 =====
@@ -358,7 +349,6 @@ async def retrieve(
             max_dense_norm=max_dense_norm,
             max_rerank_score=max_rerank_score,
             dense_count=len(dense_scores),
-            bm25_count=0,
             rerank_mode=rerank_mode,
             entity_boost_count=entity_boost_count,
             extra={
@@ -388,7 +378,7 @@ async def retrieve(
             doctor_id=doctor_id, use_hybrid=False, use_rerank=use_rerank,
             latency_ms=total_latency, chunks_returned=0,
             blocked=True, max_dense_norm=0.0, max_rerank_score=0.0,
-            dense_count=0, bm25_count=0, rerank_mode="error",
+            dense_count=0, rerank_mode="error",
             entity_boost_count=0,
             extra={"error": str(e)},
         )

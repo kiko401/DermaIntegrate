@@ -1,6 +1,8 @@
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional, Dict, Any, Literal
 
+from shared.config import EMBEDDING_MODEL
+
 
 class PatientContextObject(BaseModel):
     """患者上下文对象，用于向知识库问答传递患者概要信息。"""
@@ -231,7 +233,7 @@ class ReindexTextRequest(BaseModel):
     text: str
     chunk_size: int = 800
     chunk_overlap: int = 120
-    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_model: str = EMBEDDING_MODEL
 
 
 class CloneDocumentMapping(BaseModel):
@@ -252,5 +254,4 @@ class VectorOptimizeRequest(BaseModel):
     """向量优化请求，对指定 kb_id 执行清理优化操作。"""
     kb_id: int
     remove_duplicates: bool = False
-    rebuild_bm25_idf: bool = False
     compact_collection: bool = False

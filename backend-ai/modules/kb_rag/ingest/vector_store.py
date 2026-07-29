@@ -16,7 +16,6 @@ def _chunk_id_to_point_id(chunk_id: str) -> int:
 
 COLLECTION_NAME = "rag_documents"
 DENSE_VECTOR_NAME = "dense"    # Dense embedding 向量名
-SPARSE_VECTOR_NAME = None      # 已废弃，纯 Dense 架构不再使用；保留兼容旧模块 rag/knowledge_base.py
 
 # ========== Qdrant 客户端单例 ==========
 
@@ -288,7 +287,6 @@ async def clone_kb_index_async(
 async def vector_optimize_async(
     kb_id: int,
     remove_duplicates: bool = False,
-    rebuild_bm25_idf: bool = False,
     compact_collection: bool = False,
 ) -> dict:
     """
@@ -297,7 +295,6 @@ async def vector_optimize_async(
     Args:
         kb_id: 知识库 ID
         remove_duplicates: 是否删除 text 完全重复的 chunk（保留 doc_version_id 最新）
-        rebuild_bm25_idf: 是否重新计算 BM25 IDF 并持久化
         compact_collection: 是否触发 Qdrant 后台索引整理
 
     Returns:
@@ -305,14 +302,13 @@ async def vector_optimize_async(
     """
     return await asyncio.to_thread(
         _vector_optimize_impl,
-        kb_id, remove_duplicates, rebuild_bm25_idf, compact_collection
+        kb_id, remove_duplicates, compact_collection
     )
 
 
 def _vector_optimize_impl(
     kb_id: int,
     remove_duplicates: bool = False,
-    rebuild_bm25_idf: bool = False,
     compact_collection: bool = False,
 ) -> dict:
     """向量优化同步实现"""
@@ -376,13 +372,7 @@ def _vector_optimize_impl(
     else:
         duplicate_chunks = 0
 
-    # ---- 3. 重建 BM25 IDF ----
-    # BM25 已在纯 Dense 架构下废弃，该参数保留但无实际效果
-    idf_terms_updated = 0
-    if rebuild_bm25_idf:
-        logger.info("rebuild_bm25_idf is deprecated in pure Dense architecture, skipping.")
-
-    # ---- 4. 触发 Qdrant 索引整理 ----
+    # ---- 3. 触发 Qdrant 索引整理 ----
     optimizer_applied = False
     if compact_collection:
         try:
@@ -403,6 +393,5 @@ def _vector_optimize_impl(
         "total_chunks": total_chunks,
         "duplicate_chunks": duplicate_chunks,
         "removed_duplicates": removed_duplicates,
-        "idf_terms_updated": idf_terms_updated,
         "optimizer_applied": optimizer_applied,
     }

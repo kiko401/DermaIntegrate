@@ -6,7 +6,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status, Query
 from fastapi.responses import StreamingResponse
 
-from shared.config import APP_CONVERSATION_CONNECT_TIMEOUT, APP_CONVERSATION_READ_TIMEOUT
+from shared.config import APP_CONVERSATION_CONNECT_TIMEOUT, APP_CONVERSATION_READ_TIMEOUT, APP_BASE_URL, X_INTERNAL_SECRET
 from ..schemas import ETLJobStatus, ETLRunRequest, FeedbackExportRequest, ETLClinicalRequest
 from ..etl.etl_service import (
     extract_and_ingest,
@@ -84,8 +84,8 @@ async def clinical_etl_endpoint(req: ETLClinicalRequest):
     应用域传入脱敏后的患者上下文和病例文本，AI 域完成：
     1. 文本构建（患者概要 + 病例详情）
     2. 清洗切分
-    3. Dense + BM25 混合向量生成
-    4. Qdrant 双重索引写入
+    3. Dense 向量生成
+    4. Qdrant 索引入库
 
     PHI 脱敏须在调用前由应用域完成，本接口仅做二次检测（发现 PHI 关键词时告警不阻断）。
     """
@@ -152,11 +152,8 @@ async def _fetch_conversation_data_from_app_domain(req: FeedbackExportRequest) -
     从应用域拉取对话记录数据。
     需要应用域提供 /api/rag/conversations 接口。
     """
-    import os
-    from datetime import datetime
-
-    app_base_url = os.getenv("APP_BASE_URL")
-    secret = os.getenv("X_INTERNAL_SECRET")
+    app_base_url = APP_BASE_URL
+    secret = X_INTERNAL_SECRET
 
     if not app_base_url or not secret:
         logger.warning("APP_BASE_URL or X_INTERNAL_SECRET not configured, cannot fetch conversation data")

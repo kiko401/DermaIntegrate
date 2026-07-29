@@ -1,10 +1,11 @@
-import os
 import httpx
 import logging
 import asyncio
 from shared.config import (
     CALLBACK_CONNECT_TIMEOUT, CALLBACK_READ_TIMEOUT,
     CALLBACK_WRITE_TIMEOUT, CALLBACK_POOL_TIMEOUT,
+    APP_BASE_URL, X_INTERNAL_SECRET,
+    MAX_CALLBACK_RETRIES, CALLBACK_RETRY_DELAY,
 )
 from ..schemas import IngestCallback
 
@@ -17,14 +18,12 @@ CALLBACK_TIMEOUT = httpx.Timeout(
     write=CALLBACK_WRITE_TIMEOUT,
     pool=CALLBACK_POOL_TIMEOUT,
 )
-MAX_CALLBACK_RETRIES = 3
-CALLBACK_RETRY_DELAY = 1.0  # 秒
 
 
 async def send_task_callback(task_id: int, task_code: str, chunk_count: int, error_message: str = None):
     """通过 httpx 向主应用发送任务状态回调，最多重试 3 次"""
-    base_url = os.getenv("APP_BASE_URL")
-    secret = os.getenv("X_INTERNAL_SECRET")
+    base_url = APP_BASE_URL
+    secret = X_INTERNAL_SECRET
 
     if not base_url or not secret:
         logger.error("APP_BASE_URL or X_INTERNAL_SECRET is not configured. Callback will fail.")

@@ -526,7 +526,6 @@ class VectorOptimizeResponse(BaseModel):
     total_chunks: int
     duplicate_chunks: int
     removed_duplicates: int
-    idf_terms_updated: int
     optimizer_applied: bool
 
 
@@ -537,14 +536,12 @@ async def vector_optimize_endpoint(req: VectorOptimizeRequest):
 
     操作选项（均为幂等操作）：
     - remove_duplicates: 扫描并删除 text 完全重复的 chunk，保留 doc_version_id 最新的一个
-    - rebuild_bm25_idf: 对该 kb_id 下所有 chunk 重新计算 BM25 IDF 并持久化
     - compact_collection: 触发 Qdrant 后台索引整理（vacuum/优化器）
     """
     try:
         result = await vector_optimize_async(
             kb_id=req.kb_id,
             remove_duplicates=req.remove_duplicates,
-            rebuild_bm25_idf=req.rebuild_bm25_idf,
             compact_collection=req.compact_collection,
         )
         return VectorOptimizeResponse(**result)

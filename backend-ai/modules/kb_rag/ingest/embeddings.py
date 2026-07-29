@@ -1,10 +1,12 @@
-import os
 import logging
 from typing import List
+
+from shared.config import EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
 _embedder_instance = None
+
 
 def get_embedder():
     """单例模式加载 HuggingFace Embedding 模型"""
@@ -12,9 +14,9 @@ def get_embedder():
     if _embedder_instance is None:
         try:
             from sentence_transformers import SentenceTransformer
-            model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
-            logger.info(f"Loading Embedding model: {model_name}")
-            _embedder_instance = SentenceTransformer(model_name)
+
+            logger.info(f"Loading Embedding model: {EMBEDDING_MODEL}")
+            _embedder_instance = SentenceTransformer(EMBEDDING_MODEL)
             logger.info("Embedding model loaded successfully.")
         except Exception as e:
             logger.error(f"Failed to load Embedding model: {e}", exc_info=True)

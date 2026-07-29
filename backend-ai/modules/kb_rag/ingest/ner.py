@@ -19,11 +19,11 @@
   PROCEDURE 手术/操作（淋巴结清扫、分子靶向治疗）
   BIOMARKER 生物标志物（PD-L1、MSI-H）
 """
-import os
 import re
 import logging
 from typing import List, Dict, Tuple, Optional, Set
-from functools import lru_cache
+
+from shared.config import NER_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -326,12 +326,11 @@ def _get_ner_model():
 
     try:
         from transformers import pipeline, AutoModelForTokenClassification, AutoTokenizer
-        model_name = os.getenv("NER_MODEL", "bert-base-chinese")
-        logger.info(f"Loading NER model: {model_name}")
+        logger.info(f"Loading NER model: {NER_MODEL}")
         _ner_model = pipeline(
             "ner",
-            model=AutoModelForTokenClassification.from_pretrained(model_name),
-            tokenizer=AutoTokenizer.from_pretrained(model_name),
+            model=AutoModelForTokenClassification.from_pretrained(NER_MODEL),
+            tokenizer=AutoTokenizer.from_pretrained(NER_MODEL),
             aggregation_strategy="simple",
         )
         logger.info(f"NER model loaded successfully.")
@@ -529,21 +528,6 @@ def extract_medical_entities(text: str) -> List[Dict]:
     entities.sort(key=lambda x: x["start"])
 
     return entities
-
-
-def extract_entity_names(text: str) -> List[str]:
-    """仅返回实体名称列表（简化接口，供检索boost用）"""
-    entities = extract_medical_entities(text)
-    return [e["name"] for e in entities]
-
-
-@lru_cache(maxsize=1000)
-def _cached_extract(text: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
-    """带缓存的实体抽取（lru_cache 需要 hashable 参数）"""
-    entities = extract_medical_entities(text)
-    names = tuple(sorted(set(e["name"] for e in entities)))
-    types = tuple(sorted(set(e["type"] for e in entities)))
-    return names, types
 
 
 def get_entity_signature(text: str) -> Dict[str, List[str]]:

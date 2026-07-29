@@ -24,22 +24,17 @@ from qdrant_client.http import models
 
 from modules.kb_rag.ingest.embeddings import get_embedder
 from modules.kb_rag.ingest.vector_store import DENSE_VECTOR_NAME
-from shared.constants import DISEASE_REGISTRY
+from shared.constants import DISEASE_REGISTRY, VALID_TAGS
 
 logger = logging.getLogger(__name__)
-
-# 有效 tags 白名单
-VALID_TAGS = {"MEL", "BCC", "SCC", "NEV", "ACK", "SEK", "T1", "T2", "T3", "T4", "高危", "肢端", "黏膜", "通用"}
 
 # 文档目录
 DEFAULT_DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
 # KB-RAG 使用的 collection 名称（与 modules/kb_rag/ingest/vector_store.py 保持一致）
 # 注意：legacy rag/ 与 KB-RAG 使用相同的 collection 名 "rag_documents"，
-# 但分属不同的 Qdrant 实例或命名空间。rag/knowledge_base.py 通过
-# qdrant_client 直接连接传统 RAG Qdrant 服务（端口 6333），而
-# modules/kb_rag/ 通过 qdrant_client 连接 KB-RAG 专属 Qdrant 实例（端口 6334）。
-# 两者在物理上隔离，不会产生数据混淆。
+# 但分属不同的 Qdrant 实例或命名空间。两者共用 QDRANT_PORT 配置（默认 6333），
+# 通过不同的 collection 名称实现逻辑隔离。
 COLLECTION_NAME = "rag_documents"
 
 
@@ -230,29 +225,6 @@ class RAGKnowledgeBase:
             return result.points_count > 0
         except Exception:
             return False
-
-    def init_from_parsed_data(self, texts: list, payloads: list):
-        """向量化并构建知识库索引（兼容旧接口）。"""
-        if not texts:
-            logger.warning("No texts provided for initialization.")
-            return
-
-        logger.info(f"Embedding {len(texts)} text fragments and building index...")
-
-        self._ensure_collection_exists()
-
-        vectors = self.embedder.encode(texts, show_progress_bar=False).tolist()
-
-        points = []
-        for idx in range(len(texts)):
-            point_dict = {
-                "id": idx,
-                "vector": {DENSE_VECTOR_NAME: vectors[idx]},
-                "payload": {"text": texts[idx], **payloads[idx]}
-            }
-            points.append(models.PointStruct(**point_dict))
-        self.client.upsert(collection_name=self.collection_name, points=points)
-        logger.info("RAG Knowledge Base built successfully!")
 
     def _extract_filter_tags(self, clinical_result: dict, pathology_result: dict) -> list:
         """

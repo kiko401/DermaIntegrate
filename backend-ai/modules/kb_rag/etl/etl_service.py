@@ -12,7 +12,7 @@ from shared.config import (
     MAX_ETL_JOBS as _MAX_ETL_JOBS,
 )
 from ..ingest.parsers import extract_text_with_metadata
-from ..ingest.splitters import split_text
+from ..ingest.splitters import split_text, _get_chunk_position, _split_table_blocks
 from ..ingest.embeddings import generate_embeddings
 from ..ingest.vector_store import upsert_vectors_async
 from ..ingest.ner import extract_medical_entities, get_entity_signature
@@ -24,69 +24,9 @@ logger = logging.getLogger(__name__)
 _ETL_JOBS: Dict[str, ETLJobStatus] = {}
 
 
-def _get_chunk_position(chunk: Dict) -> str:
-    if chunk.get("is_first_chunk"):
-        return "first"
-    if chunk.get("is_last_chunk"):
-        return "last"
-    return "middle"
-
-
 def _derive_doc_title(filename: str) -> str:
     """从文件名推导文档标题（去掉常见扩展名）"""
     return re.sub(r"\.(pdf|docx?|xlsx?|csv|txt|md)$", "", filename, flags=re.IGNORECASE)
-
-
-def _split_table_blocks(blocks: List[Dict], doc_id: int, doc_version_id: int) -> List[Dict]:
-    """表格文件切分：100行一组"""
-    if not blocks:
-        return []
-
-    TABLE_ROWS_PER_CHUNK = 100
-    chunks = []
-    chunk_index = 0
-
-    table_blocks = [b for b in blocks if b.get("is_table")]
-    non_table_blocks = [b for b in blocks if not b.get("is_table")]
-
-    for nt in non_table_blocks:
-        text = nt["text"].strip()
-        if not text:
-            continue
-        chunk_id = f"{doc_id}_{doc_version_id}_{str(chunk_index).zfill(3)}"
-        chunks.append({
-            "chunk_id": chunk_id, "chunk_index": chunk_index, "text": text,
-            "section_title": nt.get("section_title", ""),
-            "is_first_chunk": chunk_index == 0, "is_last_chunk": False,
-            "is_heading": nt.get("is_heading", False),
-        })
-        chunk_index += 1
-
-    for tb in table_blocks:
-        tm = tb.get("table_meta") or {}
-        row_count = tm.get("row_count", 0)
-        lines = tb["text"].split("\n")
-        group_count = max(1, (row_count + TABLE_ROWS_PER_CHUNK - 1) // TABLE_ROWS_PER_CHUNK)
-
-        for gi in range(group_count):
-            start_i = gi * TABLE_ROWS_PER_CHUNK
-            end_i = min(start_i + TABLE_ROWS_PER_CHUNK, len(lines))
-            group_text = "\n".join(lines[start_i:end_i])
-            chunk_id = f"{doc_id}_{doc_version_id}_{str(chunk_index).zfill(3)}"
-            chunks.append({
-                "chunk_id": chunk_id, "chunk_index": chunk_index, "text": group_text,
-                "section_title": tb.get("section_title", ""),
-                "is_first_chunk": False, "is_last_chunk": (gi == group_count - 1),
-                "is_heading": False, "is_table": True,
-                "table_meta": {**tm, "chunk_row_start": start_i, "chunk_row_end": end_i,
-                                "chunk_index": gi, "total_chunks": group_count},
-            })
-            chunk_index += 1
-
-    if chunks:
-        chunks[-1]["is_last_chunk"] = True
-    logger.info(f"Table split: {len(chunks)} chunks for doc_id={doc_id}")
-    return chunks
 
 
 def _prune_etl_jobs():

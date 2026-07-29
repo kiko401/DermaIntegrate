@@ -6,7 +6,7 @@
 
 分类：
 - 外部运维参数：超时、端口、保留策略等（从环境变量读取）
-- 算法常数：RRF_K、BM25参数等（硬编码，仅做注释说明）
+- 算法常数（硬编码，仅供内部参考）
 """
 import os
 
@@ -18,6 +18,19 @@ LLM_READ_TIMEOUT = float(os.getenv("LLM_READ_TIMEOUT", "30.0"))        # 读取�
 LLM_WRITE_TIMEOUT = float(os.getenv("LLM_WRITE_TIMEOUT", "10.0"))     # 写入超时(秒)
 LLM_POOL_TIMEOUT = float(os.getenv("LLM_POOL_TIMEOUT", "30.0"))      # 连接池超时(秒)
 
+# ============================================================
+# ============================================================
+# NER 模型配置
+# ============================================================
+NER_MODEL = os.getenv("NER_MODEL", "bert-base-chinese")
+
+# Embedding 模型配置
+# ============================================================
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
+RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-large")
+
+# ============================================================
 # rewrite/重写服务超时（较短，适合轻量LLM调用）
 REWRITE_CONNECT_TIMEOUT = float(os.getenv("REWRITE_CONNECT_TIMEOUT", "3.0"))
 REWRITE_READ_TIMEOUT = float(os.getenv("REWRITE_READ_TIMEOUT", "10.0"))
@@ -59,6 +72,10 @@ QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 ETL_CONNECT_TIMEOUT = float(os.getenv("ETL_CONNECT_TIMEOUT", "10.0"))
 ETL_READ_TIMEOUT = float(os.getenv("ETL_READ_TIMEOUT", "60.0"))
 
+# 应用域基础地址与认证密钥
+APP_BASE_URL = os.getenv("APP_BASE_URL", "")
+X_INTERNAL_SECRET = os.getenv("X_INTERNAL_SECRET", "")
+
 # 应用域对话拉取超时
 APP_CONVERSATION_CONNECT_TIMEOUT = float(os.getenv("APP_CONVERSATION_CONNECT_TIMEOUT", "5.0"))
 APP_CONVERSATION_READ_TIMEOUT = float(os.getenv("APP_CONVERSATION_READ_TIMEOUT", "30.0"))
@@ -68,6 +85,8 @@ CALLBACK_CONNECT_TIMEOUT = float(os.getenv("CALLBACK_CONNECT_TIMEOUT", "5.0"))
 CALLBACK_READ_TIMEOUT = float(os.getenv("CALLBACK_READ_TIMEOUT", "15.0"))
 CALLBACK_WRITE_TIMEOUT = float(os.getenv("CALLBACK_WRITE_TIMEOUT", "10.0"))
 CALLBACK_POOL_TIMEOUT = float(os.getenv("CALLBACK_POOL_TIMEOUT", "15.0"))
+MAX_CALLBACK_RETRIES = int(os.getenv("MAX_CALLBACK_RETRIES", "3"))
+CALLBACK_RETRY_DELAY = float(os.getenv("CALLBACK_RETRY_DELAY", "1.0"))  # 重试间隔(秒)
 
 # ============================================================
 # 检索质量参数
@@ -81,5 +100,3 @@ RAG_SCORE_THRESHOLD = float(os.getenv("RAG_SCORE_THRESHOLD", "0.3"))
 # ============================================================
 # 算法常数（不推荐外部修改，仅供内部参考）
 # ============================================================
-# BM25 参数已统一到 shared/constants.py（BM25_K1=1.5, BM25_B=0.75, AVG_DOC_LEN=200）
-# MAX_LLM_RETRIES = 2          # LLM 调用最大重试次数

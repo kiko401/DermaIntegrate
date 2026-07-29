@@ -621,37 +621,3 @@ async def run_agent_workflow(req: ChatRequest) -> ChatResponse:
             "failed",
             str(e)
         )
-
-
-# ============ 辅助函数 ============
-
-async def run_agent_workflow_simple(
-    question: str,
-    kb_ids: List[int],
-    history: List[Dict[str, str]] = None,
-    patient_context: Any = None,
-    options: Dict[str, Any] = None
-) -> ChatResponse:
-    """
-    简化的入口函数，直接传入参数运行工作流
-
-    Args:
-        question: 用户问题
-        kb_ids: 知识库ID列表
-        history: 历史对话
-        patient_context: 患者上下文对象
-        options: 配置选项
-
-    Returns:
-        ChatResponse: 完整的响应对象
-    """
-    req = ChatRequest(
-        conversation_id=0,
-        question=question,
-        history=history or [],
-        kb_ids=kb_ids,
-        patient_context=patient_context,
-        options=options or {}
-    )
-
-    return await run_agent_workflow(req)

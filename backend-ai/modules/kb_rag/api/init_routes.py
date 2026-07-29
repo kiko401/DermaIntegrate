@@ -17,20 +17,6 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 模块级缓存：避免每次请求重新加载 Embedding 模型
-_cached_embedder = None
-
-
-def _get_cached_embedder():
-    """获取缓存的 embedder，单例模式避免重复加载模型"""
-    global _cached_embedder
-    if _cached_embedder is None:
-        from rag.knowledge_base import RAGKnowledgeBase
-        # 只在首次请求时初始化，后续复用
-        _cached_embedder = RAGKnowledgeBase()
-        logger.info("Embedder loaded and cached at module level")
-    return _cached_embedder
-
 
 class InitFromDocsRequest(BaseModel):
     """从文档初始化请求"""
