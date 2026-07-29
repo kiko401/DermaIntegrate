@@ -12,12 +12,11 @@ SSE 流式 RAG 工作流
 4. rule_match         -> 规则回答匹配
 5. intent_route       -> 意图识别与路由
 6. rewrite            -> 查询改写
-7. query_type_classify -> 查询类型分类（guideline vs case）
-8. retrieval          -> 知识库检索
-9. tool_decision      -> 工具调用决策
-10. answer_builder    -> 答案生成
-11. risk_highlight     -> 风险高亮提取
-12. response_finalize  -> 响应封装
+7. retrieval          -> 知识库检索
+8. tool_decision      -> 工具调用决策
+9. answer_builder     -> 答案生成
+10. risk_highlight    -> 风险高亮提取
+11. response_finalize -> 响应封装
 """
 
 import json
@@ -45,7 +44,6 @@ NODE_PROGRESS: Dict[str, tuple[int, str, str]] = {
     "rule_match":         (20, "正在进行规则匹配",            "规则匹配完成"),
     "intent_route":       (28, "正在进行意图识别与路由",      "意图识别完成"),
     "rewrite":            (35, "正在进行查询改写",             "查询改写完成"),
-    "query_type_classify":(42, "正在进行查询类型分类",        "查询类型分类完成"),
     "retrieval":          (60, "正在检索知识库",              "检索完成"),
     "tool_decision":      (60, "正在进行工具决策",            "工具决策完成"),
     "answer_builder":     (78, "正在生成回答",               "回答生成完成"),

@@ -13,13 +13,9 @@ def _chunk_id_to_point_id(chunk_id: str) -> int:
     """将 chunk_id 映射为确定性点 ID（SHA256 前8字节转大端整数）"""
     return int.from_bytes(hashlib.sha256(chunk_id.encode()).digest()[:8], byteorder="big")
 
-# 惰性迁移标志：collection 存在但无 sparse_vectors 时标记，upsert 前触发迁移
-_needs_lazy_migration = False
-
 
 COLLECTION_NAME = "rag_documents"
 DENSE_VECTOR_NAME = "dense"    # Dense embedding 向量名
-SPARSE_VECTOR_NAME = "bm25"    # BM25 sparse 向量名
 
 # ========== Qdrant 客户端单例 ==========
 
@@ -37,27 +33,23 @@ def get_qdrant_client() -> QdrantClient:
 # ========== 同步版本（向后兼容） ==========
 
 def init_qdrant_collection():
-    """启动时初始化 Qdrant 集合（hybrid vectors 格式）"""
+    """启动时初始化 Qdrant 集合（pure Dense 向量格式）"""
     client = get_qdrant_client()
     collections = client.get_collections().collections
 
     if not any(c.name == COLLECTION_NAME for c in collections):
-        # 创建带有 named vectors 的 hybrid collection
-        _create_hybrid_collection(client)
+        _create_dense_collection(client)
     else:
-        # 已有 collection 时，检查是否需要迁移到 hybrid 格式
+        # 已有 collection 时，检查是否配置了 named vectors
         try:
             coll_info = client.get_collection(COLLECTION_NAME)
             vectors_cfg = coll_info.config.params.vectors
-            # 检查是否配置了 named vectors（而非无名向量）
             has_named_vectors = isinstance(vectors_cfg, dict) and DENSE_VECTOR_NAME in vectors_cfg
-            has_sparse_vectors = coll_info.config.params.sparse_vectors is not None
-            if not has_named_vectors or not has_sparse_vectors:
-                logger.info(f"Collection needs migration to hybrid format (named_vectors={has_named_vectors}, sparse_vectors={has_sparse_vectors}).")
-                # 直接触发迁移，不使用惰性迁移
-                _migrate_to_hybrid(client)
+            if not has_named_vectors:
+                logger.info(f"Collection needs migration to named dense format.")
+                _create_dense_collection(client)
             else:
-                logger.info(f"Collection already has hybrid vector config (named_vectors + sparse_vectors).")
+                logger.info(f"Collection already has dense vector config.")
         except Exception as e:
             logger.warning(f"Failed to check collection config: {e}")
         # 补充 doctor_id 索引（幂等）
@@ -67,10 +59,8 @@ def init_qdrant_collection():
             pass  # 索引已存在不报错
 
 
-def _create_hybrid_collection(client):
-    """创建带有 dense + sparse 混合向量配置的 collection"""
-    # 使用 named vectors 配置，支持 dense 和 sparse (bm25) 两种向量
-    # legacy rag/knowledge_base.py 继续使用无名向量（Qdrant 兼容处理）
+def _create_dense_collection(client):
+    """创建纯 Dense 向量配置的 collection"""
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config={
@@ -79,138 +69,20 @@ def _create_hybrid_collection(client):
                 "distance": models.Distance.COSINE,
             }
         },
-        sparse_vectors_config={
-            SPARSE_VECTOR_NAME: models.SparseVectorParams(
-                index=models.SparseIndexParams(
-                    on_disk=False,
-                )
-            )
-        },
     )
     client.create_payload_index(COLLECTION_NAME, "kb_id", models.PayloadSchemaType.INTEGER)
     client.create_payload_index(COLLECTION_NAME, "doc_id", models.PayloadSchemaType.INTEGER)
     client.create_payload_index(COLLECTION_NAME, "chunk_id", models.PayloadSchemaType.KEYWORD)
     client.create_payload_index(COLLECTION_NAME, "doctor_id", models.PayloadSchemaType.INTEGER)
-    logger.info(f"Qdrant collection '{COLLECTION_NAME}' created with named hybrid vectors (dense + bm25 sparse).")
-
-
-def _migrate_to_hybrid(client):
-    """
-    将 legacy collection（无名 dense 向量，无 sparse）迁移到混合向量格式。
-
-    迁移步骤：
-    1. 读取所有已有 points（带原始向量）
-    2. 删除旧 collection
-    3. 用 hybrid 配置重建
-    4. 用 fit 后的 BM25 模型重新生成 sparse vectors 并 upsert 所有 points
-    """
-    from .bm25 import fit_bm25_on_collection, generate_sparse_vectors_batch
-
-    # 1. 读取所有 points（带向量）
-    all_points = []
-    offset = None
-    while True:
-        pts, next_offset = client.scroll(
-            collection_name=COLLECTION_NAME,
-            limit=500,
-            offset=offset,
-            with_vectors=True,
-            with_payload=True,
-        )
-        all_points.extend(pts)
-        if next_offset is None:
-            break
-        offset = next_offset
-
-    if not all_points:
-        logger.info("No points to migrate, creating hybrid collection from scratch.")
-        _create_hybrid_collection(client)
-        return
-
-    logger.info(f"Migrating {len(all_points)} points to hybrid vectors...")
-
-    # 2. 收集所有文本用于 BM25 拟合
-    texts = []
-    for pt in all_points:
-        text = pt.payload.get("text", "") if pt.payload else ""
-        texts.append(text)
-
-    # 3. 在所有文本上拟合 BM25（词表 + IDF）
-    fit_bm25_on_collection(COLLECTION_NAME, texts)
-
-    # 4. 删除旧 collection（如果已不存在则跳过，幂等）
-    try:
-        client.delete_collection(COLLECTION_NAME)
-        logger.info(f"Deleted legacy collection '{COLLECTION_NAME}' for migration.")
-    except Exception as e:
-        if "not exist" in str(e).lower():
-            logger.info(f"Collection '{COLLECTION_NAME}' already deleted, skipping.")
-        else:
-            raise
-
-    # 5. 用 hybrid 配置重建
-    try:
-        _create_hybrid_collection(client)
-    except Exception as e:
-        if "already exists" in str(e).lower():
-            logger.warning(f"Collection '{COLLECTION_NAME}' already exists (created by RAGKnowledgeBase). Will recreate with hybrid config...")
-            # 强制重建：删了再创
-            try:
-                client.delete_collection(COLLECTION_NAME)
-            except:
-                pass
-            _create_hybrid_collection(client)
-        else:
-            raise
-
-    # 6. 重新 upsert 所有 points（含原有 dense + 新生成的 sparse，均存为无名向量）
-    from qdrant_client.http.models import SparseVector as QdrantSparseVector
-    new_points = []
-    sparse_vectors_list = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
-
-    for i, pt in enumerate(all_points):
-        payload = dict(pt.payload or {}) if pt.payload else {}
-
-        # 原有 dense 向量：legacy 格式下是普通列表（无名向量）
-        existing_vec = pt.vector
-        if isinstance(existing_vec, (list, tuple)):
-            dense_vec = list(existing_vec)
-        elif isinstance(existing_vec, dict) and DENSE_VECTOR_NAME in existing_vec:
-            dense_vec = existing_vec[DENSE_VECTOR_NAME]
-        else:
-            logger.warning(f"Point {pt.id} has no usable dense vector, skipping.")
-            continue
-
-        # 使用 named vectors 格式（dense + sparse）
-        sparse_indices, sparse_values = sparse_vectors_list[i] if i < len(sparse_vectors_list) else ([], [])
-        point_vec: Dict[str, Any] = {DENSE_VECTOR_NAME: dense_vec}
-        if sparse_indices:
-            point_vec[SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=sparse_indices, values=sparse_values)
-
-        new_points.append(models.PointStruct(
-            id=pt.id,
-            vector=point_vec,
-            payload=payload,
-        ))
-
-
-    if new_points:
-        client.upsert(collection_name=COLLECTION_NAME, points=new_points)
-        logger.info(f"Migration complete: upserted {len(new_points)} hybrid points.")
+    logger.info(f"Qdrant collection '{COLLECTION_NAME}' created with pure Dense vectors.")
 
 
 def upsert_vectors(
     vectors: List[List[float]],
     payloads: List[Dict[str, Any]],
-    sparse_vectors: Optional[List[Tuple[List[int], List[float]]]] = None
 ):
-    """写入混合向量（dense + 可选 sparse BM25）。同步版本。"""
-    _upsert_vectors_impl(vectors, payloads, sparse_vectors)
-
-
-def upsert_vectors_dense_only(vectors: List[List[float]], payloads: List[Dict[str, Any]]):
-    """仅写入 dense 向量（向后兼容）"""
-    _upsert_vectors_impl(vectors, payloads, None)
+    """写入 Dense 向量。同步版本。"""
+    _upsert_vectors_impl(vectors, payloads)
 
 
 def delete_document_index(doc_id: int):
@@ -233,35 +105,20 @@ def clone_kb_index(source_kb_id: int, target_kb_id: int) -> dict:
 def _upsert_vectors_impl(
     vectors: List[List[float]],
     payloads: List[Dict[str, Any]],
-    sparse_vectors: Optional[List[Tuple[List[int], List[float]]]] = None
 ):
-    """写入混合向量内部实现（使用 named vectors）"""
-    # 惰性迁移：如果启动时检测到 collection 无 sparse_vectors，在此触发一次性迁移
-    global _needs_lazy_migration
-    if _needs_lazy_migration:
-        logger.info("Lazy migration triggered: upgrading legacy collection to hybrid...")
-        _migrate_to_hybrid(get_qdrant_client())
-        _needs_lazy_migration = False
+    """写入 Dense 向量内部实现"""
     client = get_qdrant_client()
     points = []
 
-    for i, (v, p) in enumerate(zip(vectors, payloads)):
-        # 使用 named vectors 格式（dense + 可选 sparse）
-        # Qdrant sparse vector 存储在专门的 sparse_vectors 字段中
-        from qdrant_client.http.models import SparseVector as QdrantSparseVector
+    for v, p in zip(vectors, payloads):
         point_dict: Dict[str, Any] = {
             "id": _chunk_id_to_point_id(p["chunk_id"]),
-            "vector": {DENSE_VECTOR_NAME: v},  # Named dense vector
+            "vector": {DENSE_VECTOR_NAME: v},
             "payload": p,
         }
-        if sparse_vectors and i < len(sparse_vectors):
-            indices, values = sparse_vectors[i]
-            if indices:
-                point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
-
         points.append(models.PointStruct(**point_dict))
     client.upsert(collection_name=COLLECTION_NAME, points=points)
-    logger.info(f"Upserted {len(points)} hybrid vectors to Qdrant (dense+sparse={sparse_vectors is not None}).")
+    logger.info(f"Upserted {len(points)} dense vectors to Qdrant.")
 
 
 def _delete_document_index_impl(doc_id: int):
@@ -342,7 +199,6 @@ def _clone_kb_index_impl(
         logger.info(f"Clone KB index: source kb_id={source_kb_id} has no points.")
         return {"cloned_chunk_count": 0, "cloned_doc_ids": []}
 
-    from qdrant_client.http.models import SparseVector as QdrantSparseVector
     target_points = []
     cloned_doc_ids = set()
 
@@ -364,7 +220,7 @@ def _clone_kb_index_impl(
         new_chunk_id = payload.get("chunk_id", "")
         point_id = _chunk_id_to_point_id(new_chunk_id)
 
-        # 提取 dense 向量（无名 plain list，与 rag/knowledge_base.py 兼容）
+        # 提取 dense 向量（支持无名 plain list 或 named vector）
         existing_vec = pt.vector if pt.vector else []
         if isinstance(existing_vec, (list, tuple)):
             dense_vec = list(existing_vec)
@@ -373,21 +229,7 @@ def _clone_kb_index_impl(
         else:
             dense_vec = list(existing_vec) if existing_vec else []
 
-        # 带上原有 sparse（如果有）一起存入 payload（供后续 in-memory BM25 重打分使用）
-        sparse_indices = payload.get("bm25_indices", [])
-        sparse_values = payload.get("bm25_values", [])
-        if not sparse_indices and isinstance(existing_vec, dict) and SPARSE_VECTOR_NAME in existing_vec:
-            # 兼容旧迁移格式：从 named vector 里取 sparse
-            sparse_vec_data = existing_vec[SPARSE_VECTOR_NAME]
-            if hasattr(sparse_vec_data, "indices") and hasattr(sparse_vec_data, "values"):
-                sparse_indices = list(sparse_vec_data.indices)
-                sparse_values = list(sparse_vec_data.values)
-
-        # 构建命名向量（dense + 可选 sparse）
-        from qdrant_client.http.models import SparseVector as QdrantSparseVector
         named_vector: Dict[str, Any] = {DENSE_VECTOR_NAME: dense_vec}
-        if sparse_indices:
-            named_vector[SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=sparse_indices, values=sparse_values)
 
         target_points.append(models.PointStruct(
             id=point_id,
@@ -416,15 +258,9 @@ async def init_qdrant_collection_async():
 async def upsert_vectors_async(
     vectors: List[List[float]],
     payloads: List[Dict[str, Any]],
-    sparse_vectors: Optional[List[Tuple[List[int], List[float]]]] = None
 ):
-    """写入混合向量（dense + 可选 sparse BM25）。Async 版本。"""
-    await asyncio.to_thread(_upsert_vectors_impl, vectors, payloads, sparse_vectors)
-
-
-async def upsert_vectors_dense_only_async(vectors: List[List[float]], payloads: List[Dict[str, Any]]):
-    """仅写入 dense 向量。Async 版本。"""
-    await asyncio.to_thread(_upsert_vectors_impl, vectors, payloads, None)
+    """写入 Dense 向量。Async 版本。"""
+    await asyncio.to_thread(_upsert_vectors_impl, vectors, payloads)
 
 
 async def delete_document_index_async(doc_id: int):
@@ -540,42 +376,10 @@ def _vector_optimize_impl(
         duplicate_chunks = 0
 
     # ---- 3. 重建 BM25 IDF ----
+    # BM25 已在纯 Dense 架构下废弃，该参数保留但无实际效果
     idf_terms_updated = 0
-    if rebuild_bm25_idf and total_chunks > 0:
-        # 重新收集所有 chunk 文本
-        texts_for_idf = [
-            pt.payload.get("text", "") for pt in all_points if pt.payload
-        ]
-        from ..retrieval.retriever import _compute_idf_from_chunks
-        new_idf = _compute_idf_from_chunks(texts_for_idf)
-
-        # 合并到现有 IDF（增量更新，不丢失其他 kb_id 的 IDF）
-        import json
-        idf_path = os.path.join(os.path.dirname(__file__), "assets", "bm25_idf.json")
-        existing_idf = {}
-        if os.path.exists(idf_path):
-            try:
-                with open(idf_path, "r", encoding="utf-8") as f:
-                    existing_idf = json.load(f)
-            except Exception:
-                pass
-
-        # 合并：new_idf 覆盖旧值
-        existing_idf.update(new_idf)
-        idf_terms_updated = len(new_idf)
-
-        try:
-            os.makedirs(os.path.dirname(idf_path), exist_ok=True)
-            with open(idf_path, "w", encoding="utf-8") as f:
-                json.dump(existing_idf, f, ensure_ascii=False)
-            logger.info(f"Rebuilt BM25 IDF: {idf_terms_updated} terms updated, saved to {idf_path}")
-
-            # 刷新全局缓存
-            from ..retrieval.retriever import _BM25_IDF_CACHE
-            _BM25_IDF_CACHE.clear()
-            _BM25_IDF_CACHE.update(existing_idf)
-        except Exception as e:
-            logger.warning(f"Failed to persist BM25 IDF: {e}")
+    if rebuild_bm25_idf:
+        logger.info("rebuild_bm25_idf is deprecated in pure Dense architecture, skipping.")
 
     # ---- 4. 触发 Qdrant 索引整理 ----
     optimizer_applied = False
