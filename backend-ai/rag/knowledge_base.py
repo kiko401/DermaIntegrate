@@ -75,12 +75,10 @@ class RAGKnowledgeBase:
                         "distance": models.Distance.COSINE,
                     }
                 },
-                sparse_vectors_config={
-                    SPARSE_VECTOR_NAME: models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False),
-                    )
-                },
             )
+            if SPARSE_VECTOR_NAME:
+                self.client.create_payload_index(self.collection_name, "sparse_vector", models.PayloadSchemaType.FLOAT)
+            logger.info(f"Collection '{self.collection_name}' created with pure Dense vectors (sparse deprecated).")
             # 创建 payload 索引
             self.client.create_payload_index(self.collection_name, "kb_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "doc_id", models.PayloadSchemaType.INTEGER)
@@ -222,7 +220,7 @@ class RAGKnowledgeBase:
                 "vector": {DENSE_VECTOR_NAME: vectors[i]},
                 "payload": payloads[i]
             }
-            if indices:
+            if indices and SPARSE_VECTOR_NAME:
                 point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
             points.append(models.PointStruct(**point_dict))
 
@@ -271,7 +269,7 @@ class RAGKnowledgeBase:
                 "vector": {DENSE_VECTOR_NAME: vectors[idx]},
                 "payload": {"text": texts[idx], **payloads[idx]}
             }
-            if indices:
+            if indices and SPARSE_VECTOR_NAME:
                 point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
             points.append(models.PointStruct(**point_dict))
         self.client.upsert(collection_name=self.collection_name, points=points)

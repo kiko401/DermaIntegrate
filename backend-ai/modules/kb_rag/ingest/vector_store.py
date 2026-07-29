@@ -16,6 +16,7 @@ def _chunk_id_to_point_id(chunk_id: str) -> int:
 
 COLLECTION_NAME = "rag_documents"
 DENSE_VECTOR_NAME = "dense"    # Dense embedding 向量名
+SPARSE_VECTOR_NAME = None      # 已废弃，纯 Dense 架构不再使用；保留兼容旧模块 rag/knowledge_base.py
 
 # ========== Qdrant 客户端单例 ==========
 
