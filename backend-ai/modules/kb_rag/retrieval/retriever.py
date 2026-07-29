@@ -353,16 +353,6 @@ def _build_rbac_filter(
             )
         )
 
-        # 科室过滤：只看不限科室 或 本科室的文档
-        dept_id = get_doctor_department(doctor_id)
-        if dept_id is not None:
-            must_conditions.append(
-                models.FieldCondition(
-                    key="department_id",
-                    match=models.MatchAny(any=[dept_id, None])
-                )
-            )
-
     return models.Filter(must=must_conditions)
 
 
