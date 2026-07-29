@@ -93,12 +93,13 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
 
     try:
         # 使用 astream_events 获取真实实时节点完成事件
+        # LangGraph 1.2.x 使用 on_chain_start / on_chain_stream / on_chain_end
         async for event in app_workflow.astream_events(initial_state, config={"recursion_limit": 50}):
             event_type = event.get("event")
             event_name = event.get("name", "")
 
             # 0. 节点开始事件 -> 发送 thinking 提示（让用户知道接下来要做什么）
-            if event_type == "on_node_start":
+            if event_type == "on_chain_start":
                 node_name = event_name
                 if node_name in NODE_PROGRESS:
                     _, start_msg, _ = NODE_PROGRESS[node_name]
@@ -108,8 +109,19 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
                     })
 
             # 1. 节点结束事件 -> 发送进度和追踪事件
-            if event_type == "on_node_end":
+            elif event_type == "on_chain_end":
                 node_name = event_name
+                # 忽略顶层 LangGraph 链结束事件（它包含整个工作流输出）
+                if node_name == "LangGraph":
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict):
+                        resp_dict = output.get("response")
+                        if resp_dict is None:
+                            resp_dict = output
+                    elif output is not None:
+                        resp_dict = output
+                    continue
+
                 if node_name in NODE_PROGRESS and node_name not in seen_nodes:
                     seen_nodes.add(node_name)
                     progress_pct, start_msg, end_msg = NODE_PROGRESS[node_name]
@@ -143,16 +155,7 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
                         "status": "completed",
                     })
 
-            # 2. 工作流结束事件 -> 提取最终响应
-            elif event_type == "on_chain_end":
-                output = event.get("data", {}).get("output", {})
-                if isinstance(output, dict):
-                    resp_dict = output.get("response")
-                    if resp_dict is None:
-                        # fallback: 使用整个 output
-                        resp_dict = output
-                elif output is not None:
-                    resp_dict = output
+                # 所有普通节点的 on_chain_end 已在上面的 on_chain_end 分支处理完，无需额外逻辑
 
         # 3. 发送最终 result 事件
         if resp_dict is not None:

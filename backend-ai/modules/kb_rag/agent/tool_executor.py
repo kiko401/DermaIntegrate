@@ -21,7 +21,7 @@ async def execute_tool(tool_name: str, args: Dict[str, Any], doctor_id: Optional
     try:
         if tool_name == "pandas_analyzer":
             result = await asyncio.wait_for(
-                pandas_analyze(args.get("dataset_ref", ""), args.get("query", "")),
+                asyncio.to_thread(pandas_analyze, args.get("dataset_ref", ""), args.get("query", "")),
                 timeout=30
             )
             return {"status": "completed", "result": result}

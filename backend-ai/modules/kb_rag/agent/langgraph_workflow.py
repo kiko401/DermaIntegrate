@@ -112,7 +112,7 @@ async def phi_guard(state: AgentState) -> AgentState:
     """
     节点2: PHI 二次守护
     检测患者敏感信息是否泄露到问题中（如患者姓名、住院号等）
-    注：根据双域职责约束，PHI脱敏应在应用域完成，此处为二次兜底检测
+    检测到 PHI -> 阻断流程，返回脱敏警告响应（不将 PHI 送入后续 LLM 推理）
     """
     req = state["req"]
 
@@ -121,9 +121,22 @@ async def phi_guard(state: AgentState) -> AgentState:
 
     if input_phi or ctx_phi:
         state["phi_detected"] = True
+        state["is_blocked"] = True
         logger.warning(
             f"PHI guard detected potential PHI leak. "
             f"Input PHI: {input_phi}, Context PHI: {ctx_phi}"
+        )
+        # 构建阻断响应，告知用户检测到敏感信息
+        state["response"] = build_response(
+            req,
+            "⚠️ 检测到输入中可能包含患者敏感信息（姓名、住院号等），"
+            "为保护患者隐私，系统已对该部分进行了脱敏处理。"
+            "如需完整分析，建议在去除患者身份信息后再行提问。",
+            [],
+            "general_chat",
+            0.0,
+            "blocked",
+            "PHI detected and masked"
         )
 
     return state
@@ -549,7 +562,15 @@ workflow.set_entry_point("policy_check")
 
 # 定义边（条件分支）
 workflow.add_edge("policy_check", "phi_guard")
-workflow.add_edge("phi_guard", "rejection_check")
+# phi_guard 检测到 PHI 时阻断，否则继续 rejection_check
+workflow.add_conditional_edges(
+    "phi_guard",
+    lambda state: "response_finalize" if state.get("is_blocked") else "rejection_check",
+    {
+        "response_finalize": "response_finalize",
+        "rejection_check": "rejection_check",
+    }
+)
 workflow.add_edge("rejection_check", "rule_match")
 workflow.add_edge("rule_match", "intent_route")
 workflow.add_edge("intent_route", "rewrite")

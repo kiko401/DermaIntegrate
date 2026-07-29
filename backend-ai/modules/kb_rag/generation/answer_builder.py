@@ -127,7 +127,9 @@ def build_response(
         safe_answer = _truncate_answer(safe_answer, max_length, max_paragraphs)
 
     # 如果传入了预提取的风险高亮则使用，否则自动提取
-    final_risk_highlights = risk_highlights if risk_highlights is not None else extract_risk_highlights(safe_answer)
+    # 注意：pre-extracted highlights 基于原始 answer，safe_answer 已完成脱敏和截断，
+    # 需要基于最终文本重新提取，以保证 start/end 位置与 safe_answer 对齐
+    final_risk_highlights = extract_risk_highlights(safe_answer)
 
     sources = build_citations(chunks) if chunks else []
 

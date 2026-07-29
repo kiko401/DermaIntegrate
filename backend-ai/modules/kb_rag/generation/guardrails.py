@@ -176,6 +176,7 @@ def mask_output(text: str) -> str:
             matches.append((start_idx, end_idx))
     elif cache.words_regex is not None:
         for m in cache.words_regex.finditer(text):
+            # m.end() 是 exclusive（Python regex 语义），与 AC 自动机的 inclusive end 对齐
             matches.append((m.start(), m.end() - 1))
 
     if not matches:

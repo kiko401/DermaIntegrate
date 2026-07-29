@@ -131,13 +131,14 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
     1. 结构化 JSON 解析（前端表单或数据库导入）
     2. 自由文本 LLM 提取（医生自然语言输入）
 
+    优先级：JSON 解析结果为基础，clinical_text 补充 JSON 中为 null 的字段。
     包含校验-反馈-重试机制，防止LLM语义漂移导致输出不合规。
     """
-    # 通道1：结构化JSON解析
+    # 通道1：结构化JSON解析（作为基础结果）
+    mapped_data = copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
     if clinical_json_str:
         try:
             data = json.loads(clinical_json_str) if isinstance(clinical_json_str, str) else clinical_json_str
-            mapped_data = copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
 
             pi = data.get("patient_info", {})
             mapped_data["patient_info"]["age"] = pi.get("age")
@@ -172,61 +173,115 @@ def parse_clinical_data(clinical_json_str: str = None, clinical_text: str = None
             mapped_data["lesion_symptoms"]["grew"] = _is_truthy(ls.get("grew"))
 
             logger.info("Successfully parsed and mapped structured clinical_json.")
-            return mapped_data
         except Exception as e:
-            logger.error(f"Failed to parse clinical_json: {e}. Falling back to empty schema.")
-            return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
+            logger.error(f"Failed to parse clinical_json: {e}. Using empty schema as base.")
 
-    # 通道2：自由文本LLM提取
-    if clinical_text:
-        client = OpenAI(
-            api_key=settings.INTEGRATION_API_KEY,
-            base_url=settings.INTEGRATION_BASE_URL
-        )
+    # 通道2：自由文本LLM提取，补充 JSON 中为 null 的字段
+    if not clinical_text:
+        return mapped_data
 
-        _prompt_tpl = (
-            Path(__file__).parent.parent / "prompts" / "clinical_parse.txt"
-        ).read_text(encoding="utf-8")
-        base_prompt = _prompt_tpl.format(
-            SCHEMA=json.dumps(EMPTY_CLINICAL_SCHEMA, ensure_ascii=False),
-            CLINICAL_TEXT=clinical_text
-        )
-        feedback_msg = ""
+    client = OpenAI(
+        api_key=settings.INTEGRATION_API_KEY,
+        base_url=settings.INTEGRATION_BASE_URL
+    )
 
-        for attempt in range(MAX_LLM_RETRIES):
-            try:
-                current_prompt = base_prompt
-                if feedback_msg:
-                    current_prompt += f"\n\n【重要纠正】：你上一次的输出违反了规则，错误原因为：'{feedback_msg}'。请务必修正并重新输出！"
+    _prompt_tpl = (
+        Path(__file__).parent.parent / "prompts" / "clinical_parse.txt"
+    ).read_text(encoding="utf-8")
 
-                response = client.chat.completions.create(
-                    model=settings.INTEGRATION_MODEL,
-                    messages=[{"role": "user", "content": current_prompt}],
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
-                    timeout=LLM_READ_TIMEOUT
-                )
+    # 把已解析的 JSON 中非 null 的值注入 prompt，减少 LLM 幻觉
+    known_info = _build_known_context(mapped_data)
+    base_prompt = _prompt_tpl.format(
+        SCHEMA=json.dumps(EMPTY_CLINICAL_SCHEMA, ensure_ascii=False),
+        CLINICAL_TEXT=clinical_text
+    )
+    if known_info:
+        base_prompt += f"\n\n【已知信息（来自结构化JSON，提取时保持这些值不变）】：\n{known_info}"
 
-                result_str = response.choices[0].message.content
-                cleaned_str = _clean_llm_json_response(result_str)
-                parsed_data = json.loads(cleaned_str)
+    feedback_msg = ""
 
-                validation_error = _validate_clinical_data(parsed_data)
-                if not validation_error:
-                    if parsed_data.get("lesion_clinical", {}).get("region"):
-                        raw_region = parsed_data["lesion_clinical"]["region"]
-                        parsed_data["lesion_clinical"]["region"] = _normalize_region_for_triggers(raw_region)
-                    logger.info(f"Successfully extracted clinical_text using LLM (Attempt {attempt + 1}).")
-                    return parsed_data
+    for attempt in range(MAX_LLM_RETRIES):
+        try:
+            current_prompt = base_prompt
+            if feedback_msg:
+                current_prompt += f"\n\n【重要纠正】：你上一次的输出违反了规则，错误原因为：'{feedback_msg}'。请务必修正并重新输出！"
+
+            response = client.chat.completions.create(
+                model=settings.INTEGRATION_MODEL,
+                messages=[{"role": "user", "content": current_prompt}],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                timeout=LLM_READ_TIMEOUT
+            )
+
+            result_str = response.choices[0].message.content
+            cleaned_str = _clean_llm_json_response(result_str)
+            parsed_data = json.loads(cleaned_str)
+
+            validation_error = _validate_clinical_data(parsed_data)
+            if not validation_error:
+                # 用 LLM 结果补充 mapped_data 中为 null 的字段
+                _merge_clinical_data(mapped_data, parsed_data)
+                if mapped_data["lesion_clinical"]["region"]:
+                    raw_region = mapped_data["lesion_clinical"]["region"]
+                    mapped_data["lesion_clinical"]["region"] = _normalize_region_for_triggers(raw_region)
+                logger.info(f"Successfully extracted and merged clinical_text using LLM (Attempt {attempt + 1}).")
+                return mapped_data
+            else:
+                feedback_msg = validation_error
+                logger.warning(f"Validation failed (Attempt {attempt + 1}): {validation_error}. Retrying...")
+
+        except Exception as e:
+            logger.error(f"LLM clinical extraction API error (Attempt {attempt + 1}): {e}")
+            feedback_msg = f"API调用或解析异常: {str(e)}"
+
+    logger.error(f"Max retries ({MAX_LLM_RETRIES}) reached. Falling back to JSON base.")
+    return mapped_data
+
+
+def _build_known_context(mapped_data: dict) -> str:
+    """构建已知信息描述，供 LLM 感知已解析的字段，避免重复填充或覆盖。"""
+    parts = []
+    pi = mapped_data.get("patient_info", {})
+    if pi.get("age") is not None:
+        parts.append(f"- 患者年龄：{pi['age']}岁")
+    if pi.get("gender") is not None:
+        parts.append(f"- 患者性别：{pi['gender']}")
+    lc = mapped_data.get("lesion_clinical", {})
+    if lc.get("region") is not None:
+        parts.append(f"- 病灶部位：{lc['region']}")
+    if lc.get("diameter_1_mm") is not None:
+        parts.append(f"- 病灶直径1：{lc['diameter_1_mm']}mm")
+    if lc.get("diameter_2_mm") is not None:
+        parts.append(f"- 病灶直径2：{lc['diameter_2_mm']}mm")
+    if lc.get("elevation") is not None:
+        parts.append(f"- 病灶隆起：{'是' if lc['elevation'] else '否'}")
+    ls = mapped_data.get("lesion_symptoms", {})
+    for k, v in ls.items():
+        if v is not None and v is not False:
+            parts.append(f"- 症状{k}：{'有' if v else '否'}")
+    return "\n".join(parts) if parts else ""
+
+
+def _merge_clinical_data(base: dict, overlay: dict) -> None:
+    """将 overlay 中非 null 的字段合并到 base（原地修改）。"""
+    for top_key in base:
+        if top_key not in overlay:
+            continue
+        for sub_key in base[top_key]:
+            overlay_val = overlay[top_key].get(sub_key)
+            if overlay_val is not None and overlay_val != "":
+                # 性别标准化
+                if top_key == "patient_info" and sub_key == "gender":
+                    base[top_key][sub_key] = _map_gender(overlay_val)
+                # 部位标准化
+                elif top_key == "lesion_clinical" and sub_key == "region":
+                    base[top_key][sub_key] = _map_region(overlay_val)
+                # 布尔值标准化
+                elif sub_key in ("smoke", "drink", "pesticide_exposure",
+                                 "skin_cancer_history", "other_cancer_history",
+                                 "elevation", "biopsied",
+                                 "itch", "hurt", "changed", "bleed", "grew"):
+                    base[top_key][sub_key] = _is_truthy(overlay_val)
                 else:
-                    feedback_msg = validation_error
-                    logger.warning(f"Validation failed (Attempt {attempt + 1}): {validation_error}. Retrying...")
-
-            except Exception as e:
-                logger.error(f"LLM clinical extraction API error (Attempt {attempt + 1}): {e}")
-                feedback_msg = f"API调用或解析异常: {str(e)}"
-
-        logger.error(f"Max retries ({MAX_LLM_RETRIES}) reached. Falling back to EMPTY schema.")
-        return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
-
-    return copy.deepcopy(EMPTY_CLINICAL_SCHEMA)
+                    base[top_key][sub_key] = overlay_val
