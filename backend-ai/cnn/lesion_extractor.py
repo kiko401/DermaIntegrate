@@ -24,7 +24,7 @@ class LesionExtractor:
                 sess_options = ort.SessionOptions()
                 sess_options.intra_op_num_threads = 2
                 sess_options.inter_op_num_threads = 1
-                # L-13: 优先使用 CUDA provider（GPU 加速），若不可用则回退到 CPU
+                # 优先使用 CUDA provider（GPU 加速），若不可用则回退到 CPU
                 available_providers = ort.get_available_providers()
                 if 'CUDAExecutionProvider' in available_providers:
                     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']

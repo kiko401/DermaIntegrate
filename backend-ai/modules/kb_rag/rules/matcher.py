@@ -6,11 +6,6 @@ apply_rule_answers: 批量应用规则回答，返回命中的标准答案或Non
 apply_rejection_rules: 批量应用拒绝规则，返回拒绝结果或None
 
 所有 DB 操作均为异步（直接 await store 函数）。
-
-架构改进（M-07修复）：
-- 使用 threading.RLock() 替代 asyncio.Lock()（同步/异步上下文都可用）
-- 缓存封装为类 + 双重检查锁定（避免重复加载）
-- 读操作不加锁，只在写时加锁（性能优化）
 """
 import re
 import logging

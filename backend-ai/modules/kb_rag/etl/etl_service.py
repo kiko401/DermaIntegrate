@@ -1,15 +1,26 @@
-import io
 import logging
+import re
 import asyncio
-import httpx
 from datetime import datetime
 from typing import Dict, Optional, List, Tuple
-from shared.config import ETL_CONNECT_TIMEOUT, ETL_READ_TIMEOUT
+
+import httpx
+
+from shared.config import (
+    ETL_CONNECT_TIMEOUT,
+    ETL_READ_TIMEOUT,
+    MAX_ETL_JOBS as _MAX_ETL_JOBS,
+)
 from ..ingest.parsers import extract_text_with_metadata
 from ..ingest.splitters import split_text
 from ..ingest.embeddings import generate_embeddings
 from ..ingest.vector_store import upsert_vectors_async, COLLECTION_NAME
-from ..ingest.bm25 import fit_bm25_incremental, fit_bm25_on_collection, generate_sparse_vectors_batch, get_collection_doc_count
+from ..ingest.bm25 import (
+    fit_bm25_incremental,
+    fit_bm25_on_collection,
+    generate_sparse_vectors_batch,
+    get_collection_doc_count,
+)
 from ..ingest.ner import extract_medical_entities, get_entity_signature
 from ..schemas import ETLJobStatus
 
@@ -17,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 # 内存级 ETL 任务状态（上限从 shared/config 统一读取）
 _ETL_JOBS: Dict[str, ETLJobStatus] = {}
-from shared.config import MAX_ETL_JOBS as _MAX_ETL_JOBS
 
 
 def _get_chunk_position(chunk: Dict) -> str:
@@ -30,7 +40,6 @@ def _get_chunk_position(chunk: Dict) -> str:
 
 def _derive_doc_title(filename: str) -> str:
     """从文件名推导文档标题（去掉常见扩展名）"""
-    import re
     return re.sub(r"\.(pdf|docx?|xlsx?|csv|txt|md)$", "", filename, flags=re.IGNORECASE)
 
 
@@ -93,7 +102,7 @@ def _prune_etl_jobs():
     # 按 created_at 升序，删除最早的已完成任务
     sorted_jobs = sorted(
         [(k, v) for k, v in _ETL_JOBS.items() if v.created_at],
-        key=lambda x: x[1].created_at or ""
+        key=lambda x: x[1].created_at or "0"
     )
     remove_count = len(_ETL_JOBS) - _MAX_ETL_JOBS
     for k, _ in sorted_jobs[:remove_count]:
@@ -103,14 +112,15 @@ def _prune_etl_jobs():
 
 def _clean_text(text: str) -> str:
     """
-    M-13 增强清洗逻辑：
+    文本增强清洗流程：
     1. 去除多余空格、换行
-    2. regex 替换（可配置敏感模式）
-    3. 去除重复行（如连续重复的标题/分隔符）
-    4. 去除空值占位符（null/none/NA/-- 等）
+    2. 去除空值占位符（null/none/NA/-- 等）
+    3. 去除连续重复行（如多个空行分隔符 ------- / **** 等）
+    4. 去除句末残余特殊字符
+    5. 去除首尾非文字符号（如 #### 标题边框）
+    6. 合并孤立单字符（医学文本中无意义）
+    7. 再次清理多余空格
     """
-    import re
-
     # 1. 去除多余空格、换行
     text = re.sub(r'\s+', ' ', text).strip()
 
@@ -150,7 +160,7 @@ async def _fetch_from_database(
     chunk_field: str,
 ) -> List[Dict]:
     """
-    M-13 数据库源 ETL：从 MySQL/PostgreSQL 等数据库拉取数据。
+    从 MySQL/PostgreSQL 等关系数据库拉取结构化数据并转换为文本。
 
     Args:
         db_type: mysql | postgresql
@@ -242,7 +252,7 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
             logger.error(f"Failed to fetch URL for ETL: {e}")
             raise RuntimeError(f"Failed to fetch source URL: {e}")
 
-        # URL 文件大小限制，默认 50MB（M-12）
+        # URL 文件大小限制，默认 50MB
         MAX_URL_FILE_SIZE = 50 * 1024 * 1024
         if len(content) > MAX_URL_FILE_SIZE:
             raise RuntimeError(f"URL file size {len(content)} exceeds limit {MAX_URL_FILE_SIZE}MB")
@@ -262,7 +272,7 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
             raise RuntimeError(f"Failed to start ETL task: {e}")
 
     elif req.source_type == "database":
-        # M-13: 数据库源 ETL
+        # 数据库源 ETL
         db_config = req.source_config or {}
         db_type = db_config.get("db_type", "mysql")
         table_name = db_config.get("table_name", "")
@@ -479,7 +489,7 @@ def get_etl_jobs_list(status: Optional[str] = None, limit: int = 100) -> List[Di
     # 按 created_at 降序排列
     sorted_jobs = sorted(
         all_jobs,
-        key=lambda x: x.created_at or "",
+        key=lambda x: x.created_at or "0",
         reverse=True
     )
     # 按状态筛选

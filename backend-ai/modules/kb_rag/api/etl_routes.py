@@ -1,8 +1,11 @@
+import logging
 from datetime import datetime
+from typing import Optional, List, Dict
+
+import httpx
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status, Query
 from fastapi.responses import StreamingResponse
-from typing import Optional, List, Dict
-import httpx
+
 from shared.config import APP_CONVERSATION_CONNECT_TIMEOUT, APP_CONVERSATION_READ_TIMEOUT
 from ..schemas import ETLJobStatus, ETLRunRequest, FeedbackExportRequest, ETLClinicalRequest
 from ..etl.etl_service import (
@@ -13,7 +16,6 @@ from ..etl.etl_service import (
     export_feedback_by_filters,
     clinical_etl_and_ingest,
 )
-import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -41,7 +43,7 @@ async def run_etl_file_endpoint(
         chunk_overlap: int = Form(120),
 ):
     """文件上传方式的 ETL 触发（兼容原接口）"""
-    # M-12: 文件大小限制，默认 50MB
+    # 文件大小限制，默认 50MB
     MAX_FILE_SIZE = 50 * 1024 * 1024
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
@@ -151,7 +153,6 @@ async def _fetch_conversation_data_from_app_domain(req: FeedbackExportRequest) -
     需要应用域提供 /api/rag/conversations 接口。
     """
     import os
-    import httpx
     from datetime import datetime
 
     app_base_url = os.getenv("APP_BASE_URL")

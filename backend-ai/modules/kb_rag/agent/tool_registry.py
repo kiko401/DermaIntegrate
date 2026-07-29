@@ -85,7 +85,7 @@ def get_tool_schemas() -> List[Dict[str, Any]]:
     return [tool.model_dump() for tool in TOOL_REGISTRY if tool.enabled]
 
 
-# ===== M-08 快捷提问模板管理 =====
+# ===== 快捷提问模板管理 =====
 
 class QuickQuestionTemplate:
     """快捷提问模板对象"""

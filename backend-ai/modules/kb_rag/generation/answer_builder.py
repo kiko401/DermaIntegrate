@@ -24,7 +24,7 @@ DISCLAIMER = "⚠️ 本回答由 AI 基于知识库生成，仅供参考，不�
 
 def _truncate_answer(answer: str, max_length: int, max_paragraphs: int) -> str:
     """
-    M-06 回答长度截断：
+    回答长度截断：
     - max_length > 0 时按字符数截断（保留完整句子）
     - max_paragraphs > 0 时按段落数截断
     两者可叠加，以先到达的条件为准。
@@ -119,7 +119,7 @@ def build_response(
     """
     safe_answer = mask_output(answer)
 
-    # M-06: 回答长度截断
+    # 回答长度截断
     opts = req.options or {}
     max_length = opts.get("max_length", 0) or 0
     max_paragraphs = opts.get("max_paragraphs", 0) or 0

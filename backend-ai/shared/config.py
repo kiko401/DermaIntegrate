@@ -39,6 +39,7 @@ FILE_RETENTION_DAYS = int(os.getenv("FILE_RETENTION_DAYS", "7"))  # 文件保留
 # SSE 流式推理超时配置
 # ============================================================
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "600"))  # 推理任务超时(秒)，默认10分钟
+SSE_HEARTBEAT_INTERVAL = int(os.getenv("SSE_HEARTBEAT_INTERVAL", "15"))  # SSE心跳间隔(秒)
 
 # ============================================================
 # ETL 资源配置

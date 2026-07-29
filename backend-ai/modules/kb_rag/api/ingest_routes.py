@@ -78,7 +78,7 @@ async def ingest_document_endpoint(
         embedding_model: str = Form("BAAI/bge-small-zh-v1.5"),
 ):
     """
-    文档入库主接口（M-10: 改用 BackgroundTasks 确保任务完成）。
+    文档入库主接口。
 
     进度推送由应用域通过 GET /api/rag/tasks/:taskId/stream 以 SSE 方式完成，
     AI 域不直接对前端 SSE。回调协议见 §5.2.3。
@@ -86,7 +86,7 @@ async def ingest_document_endpoint(
     content = await file.read()
     filename = file.filename
 
-    # M-10: BackgroundTasks 确保任务在后台执行，FastAPI 生命周期内完成
+    # BackgroundTasks 确保任务在后台执行，FastAPI 生命周期内完成
     background_tasks.add_task(
         process_and_ingest_document,
         content,
@@ -126,7 +126,7 @@ async def reindex_document_endpoint(
     content = await file.read()
     filename = file.filename
 
-    # M-10: BackgroundTasks 确保任务在后台执行
+    # BackgroundTasks 确保任务在后台执行
     background_tasks.add_task(
         reindex_document,
         content,
@@ -154,7 +154,7 @@ async def reindex_text_endpoint(
     应用域传入历史版本文本，AI 域先删旧版向量，再入新版向量。
     跳过文件解析，直接切分+向量化+写入。
     """
-    # M-10: BackgroundTasks
+    # BackgroundTasks
     background_tasks.add_task(
         reindex_text,
         text=req.text,

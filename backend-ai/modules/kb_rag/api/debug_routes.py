@@ -290,7 +290,7 @@ async def debug_rewrite_endpoint(req: RewriteDebugRequest):
 @router.post("/debug/split-preview", response_model=SplitPreviewResponse)
 async def split_preview_endpoint(req: SplitPreviewRequest):
     """
-    M-02 拆分结果预览接口：返回切分后的 chunk 内容、长度与边界信息，不入库。
+    拆分结果预览接口：返回切分后的 chunk 内容、长度与边界信息，不入库。
 
     - chunk_size / chunk_overlap 支持 100~4000 / 0~2000 范围
     - 返回每个 chunk 的前 100 字符预览
@@ -331,7 +331,7 @@ async def split_preview_endpoint(req: SplitPreviewRequest):
 @router.post("/debug/keyword-search", response_model=KeywordSearchResponse)
 async def keyword_search_endpoint(req: KeywordSearchRequest):
     """
-    M-02 文档全文关键词搜索：基于 BM25 词频-逆文档频率评分，
+    文档全文关键词搜索：基于 BM25 词频-逆文档频率评分，
     在指定 kb_ids 范围内搜索匹配的 chunk。
 
     - 支持多关键词（空格分隔，按 AND 逻辑匹配）

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from config import settings
-from shared.config import TASK_TIMEOUT_SECONDS
+from shared.config import TASK_TIMEOUT_SECONDS, SSE_HEARTBEAT_INTERVAL
 from models.database import get_db, ImageResource as ImageDB, AITask as TaskDB, AIFeature as FeatureDB, async_session
 from pipeline.runner import run_pipeline_with_cancel
 
@@ -66,9 +66,9 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
         )
         inference_thread.start()
 
-        # M-16: 任务超时保护（从 shared/config 统一读取）
+        # 任务超时保护（从 shared/config 统一读取）
         _task_timeout = TASK_TIMEOUT_SECONDS
-        _heartbeat_interval = 15  # 心跳间隔秒数
+        _heartbeat_interval = SSE_HEARTBEAT_INTERVAL
         last_event_time = asyncio.get_event_loop().time()
 
         try:
@@ -112,7 +112,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                                 task_res = await session.execute(
                                     select(TaskDB).where(TaskDB.task_id == task_id)
                                 )
-                                # M-17: 使用 scalar_one_or_none 避免 task 被删除时抛 NoResultFound
+                                # 使用 scalar_one_or_none 避免 task 被删除时抛 NoResultFound
                                 db_task = task_res.scalar_one_or_none()
                                 if db_task is None:
                                     logger.error(f"Task {task_id} not found when saving results (may have been deleted)")

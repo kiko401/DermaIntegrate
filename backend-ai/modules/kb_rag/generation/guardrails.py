@@ -1,9 +1,5 @@
 """
 安全 guardrails：敏感词过滤、输出脱敏、风险高亮提取
-
-架构改进（M-03修复）：
-- 使用 shared.event_loop.AsyncExecutor 替代 asyncio.new_event_loop()
-- 避免在已有事件循环的线程中创建新循环
 """
 import os
 import re

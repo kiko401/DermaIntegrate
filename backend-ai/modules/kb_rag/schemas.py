@@ -101,7 +101,7 @@ class ChatRequest(BaseModel):
                 "enable_tools": True,
                 "enable_agent": True,
                 "use_rerank": False,
-                # M-06: 回答长度限制
+                # 回答长度限制
                 "max_length": 0,        # 0=不限制，最大字符数
                 "max_paragraphs": 0,   # 0=不限制，最大段落数
             }

@@ -191,7 +191,7 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)) -
     task_id = str(uuid.uuid4())
     image_uid = f"img_{uuid.uuid4().hex[:16]}"
 
-    # H-05: SSRF防护 - URL校验
+    # SSRF防护 - URL校验
     _validate_url(req.image_source)
 
     try:
@@ -238,7 +238,7 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)) -
         db.add(image)
         task_status = "failed"
 
-    # H-04: DicomParseException后不再入队zombie任务
+    # DicomParseException后不再入队zombie任务
     task = TaskDB(
         task_id=task_id, image_uid=image_uid, status=task_status,
         created_at=datetime.now(timezone.utc)

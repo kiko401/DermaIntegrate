@@ -12,8 +12,8 @@ def analyze(dataset_ref: str, query: str) -> Dict[str, Any]:
     Pandas Agent 受控执行逻辑。
 
     接收应用域传来的数据集引用或内容，在内存中构建 DataFrame 并执行分析。
-    L-05: 支持 CSV 字符串、JSON 字符串（或列表）两种格式。
-    L-06: 改为同步函数（原为 async 但无任何 await 点）。
+    支持 CSV 字符串、JSON 字符串（或列表）两种格式。
+    同步函数（无 await 点）。
 
     Args:
         dataset_ref: 数据集内容（CSV 字符串或 JSON 字符串/列表）
@@ -28,7 +28,7 @@ def analyze(dataset_ref: str, query: str) -> Dict[str, Any]:
         return {"error": "传入的数据集为空"}
 
     try:
-        # L-05: 支持 CSV 和 JSON 两种格式
+        # 支持 CSV 和 JSON 两种格式
         dataset_ref_stripped = dataset_ref.strip()
         if dataset_ref_stripped.startswith("["):
             # JSON 数组格式（List[dict]）

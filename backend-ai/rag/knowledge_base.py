@@ -37,7 +37,7 @@ VALID_TAGS = {"MEL", "BCC", "SCC", "NEV", "ACK", "SEK", "T1", "T2", "T3", "T4", 
 DEFAULT_DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
 # KB-RAG 使用的 collection 名称（与 modules/kb_rag/ingest/vector_store.py 保持一致）
-# L-12 注意：legacy rag/ 与 KB-RAG 使用相同的 collection 名 "rag_documents"，
+# 注意：legacy rag/ 与 KB-RAG 使用相同的 collection 名 "rag_documents"，
 # 但分属不同的 Qdrant 实例或命名空间。rag/knowledge_base.py 通过
 # qdrant_client 直接连接传统 RAG Qdrant 服务（端口 6333），而
 # modules/kb_rag/ 通过 qdrant_client 连接 KB-RAG 专属 Qdrant 实例（端口 6334）。

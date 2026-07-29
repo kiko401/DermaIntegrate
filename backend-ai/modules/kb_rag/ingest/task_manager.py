@@ -67,6 +67,6 @@ async def send_task_callback(task_id: int, task_code: str, chunk_count: int, err
         if attempt < MAX_CALLBACK_RETRIES:
             await asyncio.sleep(CALLBACK_RETRY_DELAY)
 
-    # M-15: 回调失败时抛出异常，不再静默忽略
+    # 回调失败时抛出异常，不再静默忽略
     logger.error(f"Callback exhausted all {MAX_CALLBACK_RETRIES} retries for task {task_id}. Last error: {last_error}")
     raise RuntimeError(f"Task callback failed for task_id={task_id} after {MAX_CALLBACK_RETRIES} retries: {last_error}")
