@@ -14,13 +14,7 @@ from shared.config import (
 from ..ingest.parsers import extract_text_with_metadata
 from ..ingest.splitters import split_text
 from ..ingest.embeddings import generate_embeddings
-from ..ingest.vector_store import upsert_vectors_async, COLLECTION_NAME
-from ..ingest.bm25 import (
-    fit_bm25_incremental,
-    fit_bm25_on_collection,
-    generate_sparse_vectors_batch,
-    get_collection_doc_count,
-)
+from ..ingest.vector_store import upsert_vectors_async
 from ..ingest.ner import extract_medical_entities, get_entity_signature
 from ..schemas import ETLJobStatus
 
@@ -344,8 +338,7 @@ async def extract_and_ingest(
         department_id: Optional[int] = None,
 ):
     """
-    ETL 主流程：抽取 -> 清洗 -> 切分 -> NER 实体抽取 -> BM25 增量拟合 ->
-    Dense+Sparse 混合向量生成 -> Qdrant 双重索引写入
+    ETL 主流程：抽取 -> 清洗 -> 切分 -> NER 实体抽取 -> Dense 向量生成 -> Qdrant 写入
 
     Payload 完整元数据与 ingestion.py 保持一致。
     """
@@ -400,22 +393,12 @@ async def extract_and_ingest(
             c["entity_sig"] = get_entity_signature(chunk_text)
             texts.append(chunk_text)
 
-        # ===== 第5步：BM25 增量拟合 + Sparse 向量 =====
-        job.stage = "bm25_fitting"
-        job.progress = 58
-        existing_count = get_collection_doc_count(COLLECTION_NAME)
-        if existing_count == 0:
-            fit_bm25_on_collection(COLLECTION_NAME, texts)
-        else:
-            fit_bm25_incremental(COLLECTION_NAME, texts)
-        sparse_vectors = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
-
-        # ===== 第6步：Dense 向量 =====
+        # ===== 第5步：Dense 向量 =====
         job.stage = "embedding"
         job.progress = 68
         vectors = generate_embeddings(texts)
 
-        # ===== 第7步：构建完整 Payload =====
+        # ===== 第6步：构建完整 Payload =====
         job.stage = "indexing"
         job.progress = 85
         payloads = []
@@ -451,8 +434,8 @@ async def extract_and_ingest(
             payload = {k: v for k, v in payload.items() if v is not None and v != ""}
             payloads.append(payload)
 
-        # ===== 第8步：写入 Qdrant（双重索引）=====
-        await upsert_vectors_async(vectors, payloads, sparse_vectors)
+        # ===== 第7步：写入 Qdrant（纯 Dense 向量）=====
+        await upsert_vectors_async(vectors, payloads)
 
         job.status = "succeeded"
         job.progress = 100
@@ -541,7 +524,7 @@ async def clinical_etl_and_ingest(
 ) -> Tuple[int, str]:
     """
     临床病例 ETL 主流程：文本构建 -> 清洗 -> 切分 -> NER 实体抽取 ->
-    BM25 增量拟合 -> Dense+Sparse 混合向量生成 -> Qdrant 双重索引写入。
+    Dense 向量生成 -> Qdrant 写入。
 
     Payload 完整元数据（与 ingestion.py 保持一致），含：
     - 基础ID（kb_id/doc_id/doc_version_id/chunk_id）
@@ -575,18 +558,10 @@ async def clinical_etl_and_ingest(
         ]
         c["entity_sig"] = get_entity_signature(c["text"])
 
-    # 5. BM25 增量拟合 + Sparse 向量
-    existing_count = get_collection_doc_count(COLLECTION_NAME)
-    if existing_count == 0:
-        fit_bm25_on_collection(COLLECTION_NAME, texts)
-    else:
-        fit_bm25_incremental(COLLECTION_NAME, texts)
-    sparse_vectors = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
-
-    # 6. Dense embedding
+    # 5. Dense embedding
     vectors = generate_embeddings(texts)
 
-    # 7. Payload 构建（含完整元数据与权限隔离字段）
+    # 6. Payload 构建（含完整元数据与权限隔离字段）
     payloads = []
     for c in chunks:
         payload = {
@@ -614,8 +589,8 @@ async def clinical_etl_and_ingest(
         payload = {k: v for k, v in payload.items() if v is not None and v != ""}
         payloads.append(payload)
 
-    # 8. 混合向量写入 Qdrant
-    await upsert_vectors_async(vectors, payloads, sparse_vectors)
+    # 7. 纯 Dense 向量写入 Qdrant
+    await upsert_vectors_async(vectors, payloads)
 
     logger.info(f"Clinical ETL done: kb_id={kb_id}, case_type={case_type}, chunks={len(vectors)}")
     return len(vectors), "succeeded"
