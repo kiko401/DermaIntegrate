@@ -400,6 +400,7 @@ class RAGKnowledgeBase:
                 query_filter=query_filter,
                 limit=top_k,
                 score_threshold=self.score_threshold,
+                using="dense",
                 with_payload=True
             )
         except Exception as e:
@@ -409,6 +410,7 @@ class RAGKnowledgeBase:
                 query=query_vector,
                 limit=top_k,
                 score_threshold=self.score_threshold,
+                using="dense",
                 with_payload=True
             )
 

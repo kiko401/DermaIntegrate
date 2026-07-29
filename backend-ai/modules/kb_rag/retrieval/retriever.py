@@ -35,7 +35,7 @@ from .reranker import rerank
 logger = logging.getLogger(__name__)
 
 # RRF 融合参数
-RRF_K = 60
+RRF_K = 5
 # Entity boost 权重
 ENTITY_BOOST_WEIGHT = 0.15
 # 最大候选集扩展倍数
@@ -352,7 +352,7 @@ async def retrieve(
     kb_ids: List[int],
     top_k: int = 5,
     threshold: float = 0.35,
-    use_hybrid: bool = True,
+    use_hybrid: bool = False,  # BM25混合检索在当前知识库上效果差，暂用纯Dense
     use_rerank: bool = False,
     doctor_id: Optional[int] = None,
 ) -> Tuple[List[Dict], bool]:
@@ -605,11 +605,15 @@ async def retrieve(
             rerank_mode = "none"
 
         # ===== 第8步：低置信度阻断 =====
-        max_norm = max((c.get("dense_norm", 0) for c in final_chunks), default=0)
-        blocked = max_norm < threshold
+        # 使用 RRF 融合分数（final_chunks 的排序依据）判断，而非单独的 dense_norm
+        # RRF 分数量级约 0.01~0.1，原 API threshold=0.35 基于 dense_norm(0~1) 设计
+        # 换算：RRF_threshold ≈ dense_threshold / 100，保证 RRF 在合理范围内通过
+        rrf_threshold = threshold / 100.0
+        max_rrf_score = max((c.get("score", 0) for c in final_chunks), default=0)
+        blocked = max_rrf_score < rrf_threshold
         if blocked:
             logger.warning(
-                f"Retrieval blocked: max_norm={max_norm:.4f} < threshold={threshold} | "
+                f"Retrieval blocked: max_rrf_score={max_rrf_score:.4f} < threshold={threshold} | "
                 f"trace_id={trace_id}"
             )
 
@@ -627,7 +631,7 @@ async def retrieve(
             latency_ms=total_latency,
             chunks_returned=len(final_chunks),
             blocked=blocked,
-            max_dense_norm=max_norm,
+            max_dense_norm=max_rrf_score,
             max_rerank_score=max_rerank_score,
             dense_count=len(dense_scores),
             bm25_count=len(bm25_scores),

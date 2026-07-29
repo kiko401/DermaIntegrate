@@ -20,13 +20,11 @@ REWRITE_TIMEOUT = httpx.Timeout(
 
 async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
     """
-    调用 LLM 进行问题重写与意图分类
+    调用 LLM 进行问题重写与意图分类。
+    始终调用 LLM 进行查询扩展，将短问题扩展为富含医学术语的详细查询，
+    弥补轻量级 embedding 模型对中文医学文本表达能力的不足。
     返回: (rewritten_query, route)
     """
-    # 如果没有历史记录，直接返回原问题，避免不必要的 LLM 调用
-    if not history:
-        return query, "knowledge_query"
-
     from ..config import get_integration_api_key, get_integration_base_url, get_integration_model
     api_key = get_integration_api_key()
     base_url = get_integration_base_url()
@@ -36,24 +34,26 @@ async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
         logger.warning("LLM API not configured. Skipping rewrite.")
         return query, "knowledge_query"
 
-    prompt = f"""
-你是一个医学问答系统的意图路由与查询重写助手。
-请根据用户的历史对话和当前问题，执行以下两个任务：
-1. 判断当前问题的意图路由，必须是以下之一：{", ".join(VALID_ROUTES)}
-   - knowledge_query: 查询医学知识库
-   - patient_context_query: 针对当前患者上下文的提问
-   - tool_call: 需要调用外部工具(如数据分析)
-   - general_chat: 日常问候或闲聊
-   - agent_workflow: 需要复杂多步推理的医学问题
-2. 将当前问题重写为一个独立、清晰、无代词指代的查询语句。
+    history_context = f"历史对话: {json.dumps(history, ensure_ascii=False)}\n" if history else "历史对话: 无\n"
 
-请严格以纯 JSON 格式输出，不要包含 markdown 标记：
-{{"rewritten_query": "重写后的查询", "route": "意图分类"}}
+    prompt = f"""你是一个医学问答系统的意图路由与查询改写助手。
+
+你的任务是：将用户的简短问题扩展为详细的医学检索查询，提升向量检索召回率。
+
+规则：
+1. 意图路由必须是以下之一：{", ".join(VALID_ROUTES)}
+2. 查询改写要求：
+   - 将短查询（如"黑色素瘤治疗"）扩展为完整医学问题（如"黑色素瘤的治疗方案包括哪些 靶向治疗药物 免疫治疗药物 化疗方案"）
+   - 融入相关医学术语（如分期、基因突变、药物名称等）
+   - 去除代词指代，确保查询独立可检索
+   - 如果原查询已足够详细，保持不变
+3. 输出格式为纯 JSON，不要 markdown 标记：
+{{"rewritten_query": "扩展后的查询", "route": "意图分类"}}
 """
 
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": f"历史对话: {json.dumps(history, ensure_ascii=False)}\n当前问题: {query}"}
+        {"role": "user", "content": f"{history_context}当前问题: {query}"}
     ]
 
     try:

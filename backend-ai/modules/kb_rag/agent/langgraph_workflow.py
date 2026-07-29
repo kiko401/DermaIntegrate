@@ -252,33 +252,28 @@ async def intent_route(state: AgentState) -> AgentState:
 @node_handler
 async def rewrite(state: AgentState) -> AgentState:
     """
-    节点6: 查询改写
-    对用户问题进行语义优化，提高检索召回
-    注：已在 intent_route 中完成初步改写，此处可进行额外的查询扩展
+    节点6: 查询改写（第二轮扩展）
+    intent_route 已调用 LLM 完成初步改写，此处仅在多轮对话场景下
+    从历史中额外补充上下文实体，进一步丰富检索query
     """
     req = state["req"]
     route = state["route"]
 
-    # 只有知识问答和患者上下文问答需要改写
     if route not in ["knowledge_query", "patient_context_query"]:
         return state
 
-    # 如果 rewrite 和 intent_route 结果相同，说明无需额外处理
-    # 如果有历史记录，可以进行更多扩展
-    if req.history and state["rewritten_query"] == req.question:
-        # 多轮对话场景：尝试从历史中提取关键实体进行查询扩展
+    # 多轮对话：从历史回答中提取医学实体，补充到检索query中
+    if req.history:
         context_entities = []
-        for hist in req.history[-3:]:  # 取最近3轮
-            # 简单策略：提取历史回答中的名词实体
+        for hist in req.history[-3:]:
             import re
-            entities = re.findall(r'[^，,。\s]{2,4}(?:症|癌|瘤|病|药|治疗)', hist.get("content", ""))
-            context_entities.extend(entities[:3])  # 每轮最多取3个
+            entities = re.findall(r'[^，,。\s]{2,4}(?:症|癌|瘤|病|药|治疗|方案|分期)', hist.get("content", ""))
+            context_entities.extend(entities[:3])
 
         if context_entities:
-            # 将实体融入查询
             unique_entities = list(set(context_entities))[:5]
             state["rewritten_query"] = f"{state['rewritten_query']} {' '.join(unique_entities)}"
-            logger.info(f"Query expanded with entities: {unique_entities}")
+            logger.info(f"Query expanded with history entities: {unique_entities}")
 
     return state
 
