@@ -289,6 +289,9 @@ async def retrieve(
                 "table_meta": c.get("table_meta"),
                 "entities": c.get("entities", []),
                 "entity_sig": c.get("entity_sig", {}),
+                # 访问控制（透传，供检索调用方判断）
+                "access_level": c.get("access_level", "internal"),
+                "department_id": c.get("department_id"),
             })
 
         # ===== 第5步：实体 Boost =====

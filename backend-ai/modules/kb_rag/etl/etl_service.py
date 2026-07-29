@@ -541,8 +541,8 @@ async def clinical_etl_and_ingest(
     # 2. 清洗
     cleaned_text = _clean_text(raw_text)
 
-    # 3. 切分（doc_id 用 0 占位，kb_id 相同即可检索）
-    doc_id = 0
+    # 3. 切分（doc_id 使用 kb_id 以保证不同 kb_id 的 chunk_id 不互相覆盖）
+    doc_id = kb_id
     chunks = split_text(cleaned_text, chunk_size, chunk_overlap, doc_id, doc_version_id)
     if not chunks:
         raise ValueError("clinical ETL: split produced no chunks")
@@ -582,6 +582,7 @@ async def clinical_etl_and_ingest(
             # 访问控制
             "access_level": access_level,
             "department_id": department_id,
+            "doctor_id": doctor_id,
             # NER 实体
             "entities": c.get("entities", []),
             "entity_sig": c.get("entity_sig", {}),
