@@ -68,6 +68,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
 
         # M-16: 任务超时保护（从 shared/config 统一读取）
         _task_timeout = TASK_TIMEOUT_SECONDS
+        _heartbeat_interval = 15  # 心跳间隔秒数
         last_event_time = asyncio.get_event_loop().time()
 
         try:
@@ -78,9 +79,9 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                     break
 
                 try:
-                    # M-16: 带超时的 queue.get()，超时说明推理线程卡住
+                    # 每隔 15 秒检查一次队列，超时则发送心跳
                     event_type, data = await asyncio.wait_for(
-                        queue.get(), timeout=_task_timeout
+                        queue.get(), timeout=_heartbeat_interval
                     )
                     last_event_time = asyncio.get_event_loop().time()
 
@@ -145,12 +146,16 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                         break
 
                 except asyncio.TimeoutError:
-                    # M-16: queue.get() 超时，说明推理线程卡住超过 _task_timeout
+                    # 心跳：15秒无事件则发送心跳保活
+                    yield f"event: heartbeat\ndata: {json.dumps({})}\n\n"
+                    # 同时检查是否超过任务总超时
                     elapsed = asyncio.get_event_loop().time() - last_event_time
-                    logger.error(f"Task {task_id} appears stuck (no events for {elapsed:.0f}s). Forcing cancellation.")
-                    cancel_event.set()
-                    yield f"event: error\ndata: {json.dumps({'error': f'任务执行超时（{_task_timeout}秒），请稍后重试或联系管理员'})}\n\n"
-                    break
+                    if elapsed >= _task_timeout:
+                        logger.error(f"Task {task_id} appears stuck (no events for {elapsed:.0f}s). Forcing cancellation.")
+                        cancel_event.set()
+                        yield f"event: error\ndata: {json.dumps({'error': f'任务执行超时（{_task_timeout}秒），请稍后重试或联系管理员'})}\n\n"
+                        break
+                    continue
 
         except asyncio.CancelledError:
             cancel_event.set()

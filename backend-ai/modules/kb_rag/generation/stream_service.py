@@ -141,6 +141,28 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
                         # 检索完成后立即推送 chunks（让前端可以展示参考来源）
                         if chunks:
                             yield _format_sse("chunks", {"chunks": chunks})
+                    # 工具调用节点特殊处理：提取工具执行状态
+                    elif node_name == "tool_decision":
+                        yield _format_sse("progress", {
+                            "step": node_name,
+                            "progress": progress_pct,
+                            "message": end_msg
+                        })
+                        state_after = event.get("data", {}).get("output", {})
+                        if isinstance(state_after, dict):
+                            tool_call_obj = state_after.get("tool_call_obj")
+                            if tool_call_obj:
+                                # tool_call_obj 可能是 dict 或 Pydantic 模型
+                                if isinstance(tool_call_obj, dict):
+                                    tool_name = tool_call_obj.get("tool_name", "")
+                                    t_status = tool_call_obj.get("status", "")
+                                else:
+                                    tool_name = getattr(tool_call_obj, "tool_name", "")
+                                    t_status = getattr(tool_call_obj, "status", "")
+                                yield _format_sse("tool_call", {
+                                    "tool_name": tool_name,
+                                    "status": t_status,
+                                })
                     else:
                         yield _format_sse("progress", {
                             "step": node_name,

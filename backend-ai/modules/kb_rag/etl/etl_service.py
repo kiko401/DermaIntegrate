@@ -464,6 +464,32 @@ async def get_etl_job_status(job_id: str) -> Optional[Dict]:
     return job.model_dump() if job else None
 
 
+def get_etl_jobs_list(status: Optional[str] = None, limit: int = 100) -> List[Dict]:
+    """
+    查询 ETL 任务列表。
+
+    Args:
+        status: 按状态筛选（pending/running/succeeded/failed），None 则返回全部
+        limit: 返回数量限制
+
+    Returns:
+        符合条件的 ETL 任务列表（dict 形式）
+    """
+    all_jobs = list(_ETL_JOBS.values())
+    # 按 created_at 降序排列
+    sorted_jobs = sorted(
+        all_jobs,
+        key=lambda x: x.created_at or "",
+        reverse=True
+    )
+    # 按状态筛选
+    if status:
+        sorted_jobs = [j for j in sorted_jobs if j.status == status]
+    # 限制数量
+    limited_jobs = sorted_jobs[:limit]
+    return [job.model_dump() for job in limited_jobs]
+
+
 def _build_clinical_text(patient_context: Dict, case_text: str, case_type: str) -> str:
     """
     将脱敏后的患者上下文和病例文本构建为自然语言描述。

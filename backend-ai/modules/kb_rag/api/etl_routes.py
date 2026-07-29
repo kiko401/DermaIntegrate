@@ -1,5 +1,5 @@
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status, Query
 from fastapi.responses import StreamingResponse
 from typing import Optional, List, Dict
 import httpx
@@ -8,6 +8,7 @@ from ..schemas import ETLJobStatus, ETLRunRequest, FeedbackExportRequest, ETLCli
 from ..etl.etl_service import (
     extract_and_ingest,
     get_etl_job_status,
+    get_etl_jobs_list,
     submit_etl_job,
     export_feedback_by_filters,
     clinical_etl_and_ingest,
@@ -52,6 +53,16 @@ async def run_etl_file_endpoint(
     job_id = f"etl_job_{doc_id}_{doc_version_id}"
     job_status = await extract_and_ingest(content, filename, kb_id, doc_id, doc_version_id, job_id, job_name)
     return {"job_id": job_id, "status": job_status.status}
+
+
+@router.get("/etl/jobs")
+async def list_etl_jobs_endpoint(
+        status: Optional[str] = Query(None, description="按状态筛选：pending/running/succeeded/failed"),
+        limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+):
+    """查询 ETL 任务列表"""
+    jobs = get_etl_jobs_list(status=status, limit=limit)
+    return {"jobs": jobs}
 
 
 @router.get("/etl/jobs/{job_id}", response_model=ETLJobStatus)
