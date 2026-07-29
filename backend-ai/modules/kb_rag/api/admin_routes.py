@@ -1,7 +1,7 @@
 """
 规则管理 API
 
-提供规则回答、拒绝策略、敏感词管理、模型配置的增删改查及日志审计接口。
+提供规则回答、拒绝策略、敏感词管理、模型配置及医生权限注册的增删改查及日志审计接口。
 
 接口列表：
 GET/POST/PUT/DELETE  /admin/rules          - 规则回答 CRUD
@@ -9,11 +9,13 @@ GET/POST/PUT/DELETE  /admin/rejections     - 拒绝规则 CRUD
 GET                   /admin/rejection-logs - 拒绝日志（分页）
 GET/POST/PUT/DELETE  /admin/sensitive-words - 敏感词 CRUD
 GET/PUT               /admin/model-configs  - 模型配置查询/更新
+GET/POST/DELETE       /admin/doctors       - 医生权限注册
 """
 import logging
-from typing import Optional
+from typing import Optional, List
+
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..rules.models import (
     RuleAnswerRequest, RejectionRuleRequest,
@@ -34,9 +36,121 @@ from ..generation.guardrails import invalidate_sensitive_word_cache
 from ..config import invalidate_model_config_cache
 from ..schemas import CloneKbIndexRequest, VectorOptimizeRequest
 from ..ingest.vector_store import clone_kb_index_async, vector_optimize_async
+from ..retrieval.retriever import (
+    register_doctor,
+    unregister_doctor,
+    get_all_doctors,
+    get_doctor_role,
+    get_doctor_department,
+    ROLE_HIERARCHY,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ===== 医生权限注册 =====
+
+VALID_ROLES = list(ROLE_HIERARCHY.keys())
+
+
+class DoctorRegisterRequest(BaseModel):
+    """医生注册请求"""
+    doctor_id: int
+    role: str = Field(..., description=f"角色，可选值：{VALID_ROLES}")
+    department_id: Optional[int] = Field(None, description="所属科室 ID")
+
+
+class DoctorInfo(BaseModel):
+    """医生信息"""
+    doctor_id: int
+    role: str
+    department_id: Optional[int] = None
+
+
+class DoctorRegisterResponse(BaseModel):
+    """注册响应"""
+    doctor_id: int
+    role: str
+    department_id: Optional[int]
+    message: str = "注册成功"
+
+
+@router.get("/admin/doctors", response_model=List[DoctorInfo])
+async def list_doctors():
+    """查询所有已注册的医生信息"""
+    doctors = get_all_doctors()
+    return [DoctorInfo(**d) for d in doctors]
+
+
+@router.get("/admin/doctors/{doctor_id}", response_model=DoctorInfo)
+async def get_doctor(doctor_id: int):
+    """查询指定医生的注册信息"""
+    role = get_doctor_role(doctor_id)
+    all_doctors = get_all_doctors()
+    registered_ids = [d["doctor_id"] for d in all_doctors]
+    if doctor_id not in registered_ids:
+        raise HTTPException(status_code=404, detail="该医生未注册")
+    return DoctorInfo(
+        doctor_id=doctor_id,
+        role=role,
+        department_id=get_doctor_department(doctor_id),
+    )
+
+
+@router.post("/admin/doctors", response_model=DoctorRegisterResponse)
+async def register_doctor_endpoint(req: DoctorRegisterRequest):
+    """
+    注册或更新医生角色及科室信息。
+
+    同一个 doctor_id 重复 POST 会覆盖原有数据，实现更新。
+    role 必须为有效值：admin/chief/attending/resident/outsider/default。
+    """
+    if req.role not in VALID_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的 role 值，可选：{VALID_ROLES}"
+        )
+    register_doctor(req.doctor_id, req.role, req.department_id)
+    logger.info(f"医生注册: doctor_id={req.doctor_id}, role={req.role}, department_id={req.department_id}")
+    return DoctorRegisterResponse(
+        doctor_id=req.doctor_id,
+        role=req.role,
+        department_id=req.department_id,
+    )
+
+
+@router.delete("/admin/doctors/{doctor_id}")
+async def unregister_doctor_endpoint(doctor_id: int):
+    """注销医生注册（从缓存中移除）"""
+    unregister_doctor(doctor_id)
+    logger.info(f"医生注销: doctor_id={doctor_id}")
+    return {"doctor_id": doctor_id, "status": "deleted"}
+
+
+@router.post("/admin/doctors/batch")
+async def batch_register_doctors(reqs: List[DoctorRegisterRequest]):
+    """
+    批量注册医生信息。
+
+    应用域服务启动时可用此接口批量推送全量医生数据，
+    避免逐个注册的开销。
+    """
+    results = []
+    errors = []
+    for req in reqs:
+        if req.role not in VALID_ROLES:
+            errors.append({"doctor_id": req.doctor_id, "error": f"无效的 role: {req.role}"})
+            continue
+        register_doctor(req.doctor_id, req.role, req.department_id)
+        results.append({"doctor_id": req.doctor_id, "role": req.role})
+    logger.info(f"批量医生注册: 成功={len(results)}, 失败={len(errors)}")
+    return {
+        "total": len(reqs),
+        "succeeded": len(results),
+        "failed": len(errors),
+        "results": results,
+        "errors": errors,
+    }
 
 
 # ===== 规则回答 =====
@@ -54,7 +168,7 @@ class RuleAnswerDeleteResponse(BaseModel):
     message: str = "规则回答删除成功"
 
 
-@router.get("/admin/rules", response_model=list[RuleAnswerResponse])
+@router.get("/admin/rules", response_model=List[RuleAnswerResponse])
 async def list_rule_answers(include_disabled: bool = Query(False)):
     """获取所有规则回答"""
     try:
@@ -155,7 +269,7 @@ class RejectionRuleDeleteResponse(BaseModel):
     message: str = "拒绝规则删除成功"
 
 
-@router.get("/admin/rejections", response_model=list[RejectionRuleResponse])
+@router.get("/admin/rejections", response_model=List[RejectionRuleResponse])
 async def list_rejection_rules(include_disabled: bool = Query(False)):
     """获取所有拒绝规则"""
     try:
@@ -244,7 +358,7 @@ async def delete_rejection_rule_endpoint(rule_id: int):
 # ===== 拒绝日志 =====
 
 class RejectionLogsResponse(BaseModel):
-    logs: list[RejectionLogResponse]
+    logs: List[RejectionLogResponse]
     total: int
     limit: int
     offset: int
@@ -295,7 +409,7 @@ class SensitiveWordDeleteResponse(BaseModel):
     message: str = "敏感词删除成功"
 
 
-@router.get("/admin/sensitive-words", response_model=list[SensitiveWordResponse])
+@router.get("/admin/sensitive-words", response_model=List[SensitiveWordResponse])
 async def list_sensitive_words(include_disabled: bool = Query(False)):
     """获取敏感词列表"""
     try:
@@ -366,7 +480,7 @@ async def delete_sensitive_word_endpoint(word_id: int):
 
 # ===== 模型配置 =====
 
-@router.get("/admin/model-configs", response_model=list[ModelConfigResponse])
+@router.get("/admin/model-configs", response_model=List[ModelConfigResponse])
 async def list_model_configs():
     """获取所有模型配置"""
     try:
@@ -404,7 +518,7 @@ async def update_model_config(config_key: str, req: ModelConfigRequest):
 
 class CloneKbIndexResponse(BaseModel):
     cloned_chunk_count: int
-    cloned_doc_ids: list[int]
+    cloned_doc_ids: List[int]
 
 
 class VectorOptimizeResponse(BaseModel):

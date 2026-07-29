@@ -75,6 +75,27 @@ def register_doctor(doctor_id: int, role: str, department_id: Optional[int] = No
     _DOCTOR_DEPARTMENT_CACHE[doctor_id] = department_id
 
 
+def unregister_doctor(doctor_id: int) -> bool:
+    """注销医生注册，从缓存中移除"""
+    if doctor_id in _DOCTOR_ROLE_CACHE:
+        del _DOCTOR_ROLE_CACHE[doctor_id]
+    if doctor_id in _DOCTOR_DEPARTMENT_CACHE:
+        del _DOCTOR_DEPARTMENT_CACHE[doctor_id]
+    return True
+
+
+def get_all_doctors() -> List[Dict]:
+    """获取所有已注册的医生信息"""
+    return [
+        {
+            "doctor_id": doctor_id,
+            "role": role,
+            "department_id": _DOCTOR_DEPARTMENT_CACHE.get(doctor_id),
+        }
+        for doctor_id, role in _DOCTOR_ROLE_CACHE.items()
+    ]
+
+
 # ===== 结构化日志 =====
 
 def _make_trace_id(query: str) -> str:
