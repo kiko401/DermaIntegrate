@@ -11,9 +11,11 @@ import logging
 import threading
 from datetime import datetime
 from typing import List, Optional, Tuple
+from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import QueuePool
+
+load_dotenv()  # 加载 .env 环境变量
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,6 @@ def _get_async_engine():
                 url = re.sub(r'^mysql(\+pymysql)?://', 'mysql+aiomysql://', url)
                 _async_engine = create_async_engine(
             url,
-            poolclass=QueuePool,
             pool_size=5,
             max_overflow=5,
             pool_pre_ping=True,
