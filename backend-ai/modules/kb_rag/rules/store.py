@@ -160,6 +160,20 @@ async def init_rules_table():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """))
 
+        # 敏感词命中日志表
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS rag_sensitive_hit_logs (
+                log_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                hit_words JSON NOT NULL,
+                user_question VARCHAR(500) NOT NULL,
+                action VARCHAR(20) NOT NULL DEFAULT 'blocked',
+                conversation_id INT DEFAULT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_created_at (created_at),
+                INDEX idx_conversation_id (conversation_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """))
+
         await conn.commit()
     logger.info("Rules tables initialized.")
 
@@ -381,6 +395,45 @@ async def delete_sensitive_word(word_id: int) -> bool:
         )
         await session.commit()
         return result.rowcount > 0
+
+
+# ===== 敏感词命中日志 =====
+
+async def add_sensitive_hit_log(hit_words: list, user_question: str,
+                                action: str = "blocked", conversation_id: int = None) -> int:
+    """记录敏感词命中日志"""
+    import json as _json
+    factory = _get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("INSERT INTO rag_sensitive_hit_logs (hit_words, user_question, action, conversation_id) VALUES (:hw, :uq, :act, :cid)"),
+            {"hw": _json.dumps(hit_words, ensure_ascii=False), "uq": user_question[:500], "act": action, "cid": conversation_id}
+        )
+        await session.commit()
+        return result.lastrowid
+
+
+async def get_sensitive_hit_logs(limit: int = 100, offset: int = 0) -> Tuple[List[dict], int]:
+    """查询敏感词命中日志（分页）"""
+    import json as _json
+    factory = _get_session_factory()
+    async with factory() as session:
+        total_result = await session.execute(text("SELECT COUNT(*) FROM rag_sensitive_hit_logs"))
+        total = total_result.scalar()
+        rows_result = await session.execute(
+            text("SELECT * FROM rag_sensitive_hit_logs ORDER BY created_at DESC LIMIT :lim OFFSET :off"),
+            {"lim": limit, "off": offset}
+        )
+        rows = rows_result.fetchall()
+        result = []
+        for row in rows:
+            d = dict(row._mapping)
+            try:
+                d["hit_words"] = _json.loads(d["hit_words"]) if isinstance(d["hit_words"], str) else d["hit_words"]
+            except Exception:
+                d["hit_words"] = []
+            result.append(d)
+        return result, total
 
 
 # ===== 模型配置 CRUD =====

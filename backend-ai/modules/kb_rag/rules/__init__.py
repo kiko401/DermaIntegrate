@@ -16,6 +16,7 @@ from .store import (
     add_rejection_rule, update_rejection_rule, delete_rejection_rule,
     add_rejection_log,
     get_sensitive_words, add_sensitive_word, update_sensitive_word, delete_sensitive_word,
+    add_sensitive_hit_log, get_sensitive_hit_logs,
     get_model_configs, get_model_config, upsert_model_config,
 )
 from .matcher import match_rule, apply_rule_answers, apply_rejection_rules
@@ -33,6 +34,7 @@ __all__ = [
     "add_rejection_rule", "update_rejection_rule", "delete_rejection_rule",
     "add_rejection_log",
     "get_sensitive_words", "add_sensitive_word", "update_sensitive_word", "delete_sensitive_word",
+    "add_sensitive_hit_log", "get_sensitive_hit_logs",
     "get_model_configs", "get_model_config", "upsert_model_config",
     # matcher
     "match_rule", "apply_rule_answers", "apply_rejection_rules",

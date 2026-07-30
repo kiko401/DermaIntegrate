@@ -16,6 +16,19 @@ REWRITE_TIMEOUT = httpx.Timeout(
     pool=10.0,
 )
 
+GENERAL_CHAT_PATTERNS = (
+    "你好", "您好", "hello", "hi", "嗨",
+    "谢谢", "感谢", "再见", "拜拜",
+    "你是谁", "你能做什么", "怎么用", "如何使用", "帮助", "help",
+)
+
+
+def _fallback_route(query: str) -> str:
+    normalized = (query or "").strip().lower()
+    if any(token in normalized for token in GENERAL_CHAT_PATTERNS):
+        return "general_chat"
+    return "knowledge_query"
+
 
 async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
     """
@@ -31,7 +44,7 @@ async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
 
     if not api_key or not base_url:
         logger.warning("LLM API not configured. Skipping rewrite.")
-        return query, "knowledge_query"
+        return query, _fallback_route(query)
 
     history_context = f"历史对话: {json.dumps(history, ensure_ascii=False)}\n" if history else "历史对话: 无\n"
 
@@ -77,7 +90,7 @@ async def rewrite_and_classify(query: str, history: list) -> Tuple[str, str]:
 
     except httpx.TimeoutException:
         logger.warning(f"Rewrite timed out after {REWRITE_TIMEOUT.connect}s connect + {REWRITE_TIMEOUT.read}s read. Falling back to default.")
-        return query, "knowledge_query"
+        return query, _fallback_route(query)
     except Exception as e:
         logger.error(f"Rewrite and classify failed: {e}. Falling back to default.")
-        return query, "knowledge_query"
+        return query, _fallback_route(query)

@@ -57,6 +57,7 @@ async def process_and_ingest_document(
     """
     chunk_count = 0
     error_msg = None
+    text = None
 
     async def push_event(event: str, data: dict):
         if progress_queue:
@@ -163,7 +164,12 @@ async def process_and_ingest_document(
         await push_event("error", {"task_id": task_id, "code": "INGEST_FAILED", "message": error_msg})
 
     finally:
-        await send_task_callback(task_id, task_code, chunk_count, error_msg)
+        await send_task_callback(
+            task_id, task_code, chunk_count, error_msg,
+            raw_text=text,
+            cleaned_text=text,
+            chunk_meta={"chunk_size": chunk_size, "chunk_overlap": chunk_overlap} if text else None,
+        )
         if progress_queue:
             await progress_queue.put(None)
 
@@ -271,6 +277,11 @@ async def reindex_text(
         await push_event("error", {"task_id": task_id, "code": "REINDEX_TEXT_FAILED", "message": error_msg})
 
     finally:
-        await send_task_callback(task_id, task_code, chunk_count, error_msg)
+        await send_task_callback(
+            task_id, task_code, chunk_count, error_msg,
+            raw_text=text,
+            cleaned_text=text,
+            chunk_meta={"chunk_size": chunk_size, "chunk_overlap": chunk_overlap},
+        )
         if progress_queue:
             await progress_queue.put(None)

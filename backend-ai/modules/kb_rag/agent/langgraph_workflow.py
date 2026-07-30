@@ -40,7 +40,7 @@ from ..generation.answer_builder import _call_llm
 from ..generation.answer_builder import build_response
 from .tool_executor import execute_tool, init_agent_trace, update_agent_trace, get_agent_run_trace
 from ..rules.matcher import apply_rejection_rules, apply_rule_answers
-from ..rules.store import add_rejection_log
+from ..rules.store import add_rejection_log, add_sensitive_hit_log
 from ..utils import detect_phi, mask_phi
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,15 @@ async def policy_check(state: AgentState) -> AgentState:
             [], "general_chat", 0.0, "blocked", "敏感词拦截"
         )
         state["is_blocked"] = True
+        try:
+            asyncio.create_task(add_sensitive_hit_log(
+                hit_words=hits,
+                user_question=req.question,
+                action="blocked",
+                conversation_id=req.conversation_id,
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to log sensitive hit: {e}")
 
     return state
 
@@ -236,6 +245,14 @@ async def intent_route(state: AgentState) -> AgentState:
 
     # 校验路由类型有效性
     if route not in VALID_ROUTES:
+        route = "knowledge_query"
+
+    # enable_tools=False 时禁止工具调用路由，降级为知识问答
+    if route == "tool_call" and not req.options.get("enable_tools", True):
+        route = "knowledge_query"
+
+    # enable_agent=False 时禁止 agent_workflow 路由，降级为知识问答
+    if route == "agent_workflow" and not req.options.get("enable_agent", False):
         route = "knowledge_query"
 
     # 患者上下文用于增强知识问答，不应覆盖闲聊/规则/工具等既有路由语义

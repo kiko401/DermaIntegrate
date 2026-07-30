@@ -28,6 +28,7 @@ from ..rules.store import (
     get_rejection_rules, add_rejection_rule, update_rejection_rule, delete_rejection_rule,
     get_rejection_logs,
     get_sensitive_words, add_sensitive_word, update_sensitive_word, delete_sensitive_word,
+    add_sensitive_hit_log, get_sensitive_hit_logs,
     get_model_configs, upsert_model_config,
     is_db_configured,
 )
@@ -475,6 +476,29 @@ async def delete_sensitive_word_endpoint(word_id: int):
         raise
     except Exception as e:
         logger.error(f"Failed to delete sensitive word: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== 敏感词命中日志 =====
+
+class SensitiveHitLogsResponse(BaseModel):
+    logs: List[dict]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/admin/sensitive-hit-logs", response_model=SensitiveHitLogsResponse)
+async def list_sensitive_hit_logs(
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+):
+    """查看敏感词命中日志（分页）"""
+    try:
+        logs, total = await get_sensitive_hit_logs(limit=limit, offset=offset)
+        return SensitiveHitLogsResponse(logs=logs, total=total, limit=limit, offset=offset)
+    except Exception as e:
+        logger.error(f"Failed to list sensitive hit logs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

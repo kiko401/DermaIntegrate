@@ -20,7 +20,15 @@ CALLBACK_TIMEOUT = httpx.Timeout(
 )
 
 
-async def send_task_callback(task_id: int, task_code: str, chunk_count: int, error_message: str = None):
+async def send_task_callback(
+    task_id: int,
+    task_code: str,
+    chunk_count: int,
+    error_message: str = None,
+    raw_text: str = None,
+    cleaned_text: str = None,
+    chunk_meta: dict = None,
+):
     """通过 httpx 向主应用发送任务状态回调，最多重试 3 次"""
     base_url = APP_BASE_URL
     secret = X_INTERNAL_SECRET
@@ -37,7 +45,10 @@ async def send_task_callback(task_id: int, task_code: str, chunk_count: int, err
         task_code=task_code,
         status=status,
         chunk_count=chunk_count,
-        error_message=error_message
+        error_message=error_message,
+        raw_text=raw_text,
+        cleaned_text=cleaned_text,
+        chunk_meta=chunk_meta,
     )
 
     headers = {
