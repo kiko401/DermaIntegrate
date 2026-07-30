@@ -39,7 +39,7 @@ const statusLabels = {
 // ── 向量优化面板状态 ─────────────────────────────────────────
 const optimizePanel    = ref(false)
 const optimizeKbId     = ref('')
-const optimizeOpts     = ref({ remove_duplicates: true, rebuild_bm25_idf: false, compact_collection: false })
+const optimizeOpts     = ref({ remove_duplicates: true, compact_collection: false })
 const optimizeLoading  = ref(false)
 const optimizeResult   = ref(null)
 const optimizeError    = ref('')
@@ -176,7 +176,7 @@ function fmtDuration(task) {
 const stageCN = {
   parsing: '解析', splitting: '切分', embedding: '向量化',
   indexing: '写入索引', dense_embedding: '向量化',
-  bm25_fitting: '关键词索引', preparing_payload: '准备写入',
+  preparing_payload: '准备写入',
 }
 function stageLabel(s) { return stageCN[s] || s }
 
@@ -194,7 +194,6 @@ async function runOptimize() {
       body: JSON.stringify({
         kb_id: Number(optimizeKbId.value),
         remove_duplicates:  optimizeOpts.value.remove_duplicates,
-        rebuild_bm25_idf:   optimizeOpts.value.rebuild_bm25_idf,
         compact_collection: optimizeOpts.value.compact_collection,
       }),
     })
@@ -286,7 +285,6 @@ async function runRebuild() {
           <option v-for="kb in kbs" :key="kb.id" :value="String(kb.id)">{{ kb.name }}</option>
         </select>
         <label class="opt-check"><input type="checkbox" v-model="optimizeOpts.remove_duplicates" /> 去重 chunk</label>
-        <label class="opt-check"><input type="checkbox" v-model="optimizeOpts.rebuild_bm25_idf" /> 重建 BM25 IDF</label>
         <label class="opt-check"><input type="checkbox" v-model="optimizeOpts.compact_collection" /> Qdrant 整理</label>
         <button class="btn-primary" :disabled="optimizeLoading" @click="runOptimize">
           {{ optimizeLoading ? '执行中...' : '执行优化' }}
@@ -297,7 +295,6 @@ async function runRebuild() {
         <span>总 chunks：{{ optimizeResult.total_chunks }}</span>
         <span>检测重复：{{ optimizeResult.duplicate_chunks }}</span>
         <span>已删除：{{ optimizeResult.removed_duplicates }}</span>
-        <span>IDF terms 更新：{{ optimizeResult.idf_terms_updated }}</span>
         <span>Qdrant 整理：{{ optimizeResult.optimizer_applied ? '已触发' : '未触发' }}</span>
       </div>
     </div>

@@ -147,10 +147,10 @@ async function upload(doctor, file, body) {
   const fileName = file.originalname;
 
   const [docResult] = await db.query(
-    `INSERT INTO rag_documents (doc_code, kb_id, title, file_name, file_ext, storage_path, source_type, mime_type, status, uploaded_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?)`,
+    `INSERT INTO rag_documents (doc_code, kb_id, title, file_name, file_ext, storage_path, file_size, source_type, mime_type, status, uploaded_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?)`,
     [doc_code, kb_id, fileName, fileName, fileExt,
-     file.path, source_type, file.mimetype || '', doctor.id]
+     file.path, file.size || null, source_type, file.mimetype || '', doctor.id]
   );
   const docId = docResult.insertId;
 
@@ -283,6 +283,7 @@ function _toDocumentObject(row) {
     title: row.title,
     file_name: row.file_name,
     file_ext: row.file_ext,
+    file_size: row.file_size ?? null,
     source_type: row.source_type,
     mime_type: row.mime_type,
     status: row.status,
@@ -384,6 +385,17 @@ async function preview(doctor, docId) {
     version_no: version.version_no,
     embedding_model: version.embedding_model,
   };
+}
+
+async function previewWithHit(doctor, docId, hitChunkId) {
+  const result = await preview(doctor, docId);
+  if (hitChunkId && Array.isArray(result.chunks_preview)) {
+    result.chunks_preview = result.chunks_preview.map((chunk) => ({
+      ...chunk,
+      is_hit: chunk.chunk_id === hitChunkId,
+    }));
+  }
+  return result;
 }
 
 async function update(doctor, docId, body) {
@@ -550,4 +562,4 @@ async function getDownloadInfo(doctor, docId) {
   return { filePath: accessible.doc.storage_path, fileName: accessible.doc.file_name };
 }
 
-module.exports = { upload, list, get, preview, getDownloadInfo, update, remove, removeBatch };
+module.exports = { upload, list, get, preview, previewWithHit, getDownloadInfo, update, remove, removeBatch };

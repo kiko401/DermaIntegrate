@@ -114,6 +114,26 @@ router.get('/conversations/:conversationId', requireAuth, async (req, res) => {
   }
 });
 
+router.patch('/conversations/:conversationId', requireAuth, async (req, res) => {
+  try {
+    const conv = await svc.rename(req.doctor, parseInt(req.params.conversationId, 10), req.body);
+    res.json(conv);
+  } catch (e) {
+    const status = e.status || 500;
+    res.status(status).json({ error: e.code || 'INTERNAL_ERROR', message: e.message });
+  }
+});
+
+router.delete('/conversations/:conversationId', requireAuth, async (req, res) => {
+  try {
+    await svc.remove(req.doctor, parseInt(req.params.conversationId, 10));
+    res.json({ success: true });
+  } catch (e) {
+    const status = e.status || 500;
+    res.status(status).json({ error: e.code || 'INTERNAL_ERROR', message: e.message });
+  }
+});
+
 // Conversation message list API.
 router.get('/conversations/:conversationId/messages', requireAuth, async (req, res) => {
   try {

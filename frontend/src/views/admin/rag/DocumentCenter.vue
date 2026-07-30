@@ -53,6 +53,11 @@ const editTitle = ref('')
 const editSaving = ref(false)
 const editErr = ref('')
 
+const diffOpen = ref(false)
+const diffLoading = ref(false)
+const diffErr = ref('')
+const diffData = ref(null)
+
 const statusLabels = {
   uploaded: '已上传',
   parsing: '解析中',
@@ -548,6 +553,39 @@ function fmtDate(str) {
   if (!str) return '-'
   return new Date(str).toLocaleDateString('zh-CN')
 }
+
+function fmtSize(bytes) {
+  if (bytes == null) return '-'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+async function openDiff(docId, versionId) {
+  diffData.value = null
+  diffErr.value = ''
+  diffLoading.value = true
+  diffOpen.value = true
+  try {
+    const res = await API(`/api/rag/documents/${docId}/versions/${versionId}/diff?against=active`)
+    const data = await res.json()
+    if (!res.ok) {
+      diffErr.value = data.message || data.error || '加载差异失败'
+      return
+    }
+    diffData.value = data
+  } catch (err) {
+    diffErr.value = err.message || '加载差异失败'
+  } finally {
+    diffLoading.value = false
+  }
+}
+
+function closeDiff() {
+  diffOpen.value = false
+  diffData.value = null
+  diffErr.value = ''
+}
 </script>
 
 <template>
@@ -614,6 +652,7 @@ function fmtDate(str) {
               <th>标题</th>
               <th>所属知识库</th>
               <th>格式</th>
+              <th>大小</th>
               <th>Chunks</th>
               <th class="status-col">状态</th>
               <th>上传时间</th>
@@ -630,6 +669,7 @@ function fmtDate(str) {
               <td class="doc-title" :title="doc.title">{{ doc.title }}</td>
               <td>{{ kbName(doc.kb_id) }}</td>
               <td class="ext-cell">{{ doc.file_ext }}</td>
+              <td class="num-cell">{{ fmtSize(doc.file_size) }}</td>
               <td class="num-cell">{{ displayChunkCount(doc) || '-' }}</td>
               <td class="status-cell">
                 <div v-if="taskProgress[doc.id]" class="tp-wrap">
@@ -791,6 +831,11 @@ function fmtDate(str) {
               <button
                 v-if="v.id !== versionsActiveId"
                 class="btn-sm"
+                @click="openDiff(versionsDoc.id, v.id)"
+              >查看差异</button>
+              <button
+                v-if="v.id !== versionsActiveId"
+                class="btn-sm"
                 @click="doRollback(versionsDoc.id, v.id)"
               >回滚到此版本</button>
               <span v-else class="cur-label">当前版本</span>
@@ -822,6 +867,36 @@ function fmtDate(str) {
           {{ editSaving ? '保存中...' : '保存' }}
         </button>
       </div>
+    </div>
+  </div>
+
+  <div v-if="diffOpen" class="modal-backdrop" @click.self="closeDiff">
+    <div class="modal modal-diff">
+      <div class="modal-header">
+        <span class="modal-title">版本差异对比</span>
+        <button class="close-btn" @click="closeDiff">✕</button>
+      </div>
+      <div v-if="diffLoading" class="modal-loading">加载中...</div>
+      <div v-else-if="diffErr" class="notice notice-err" style="margin:16px">{{ diffErr }}</div>
+      <template v-else-if="diffData">
+        <div class="diff-meta">
+          <span>v{{ diffData.base_version_no }} (当前)</span>
+          <span class="diff-arrow">→</span>
+          <span>v{{ diffData.target_version_no }}</span>
+          <span v-if="!diffData.changed" class="diff-same">两版本内容相同</span>
+          <span v-else class="diff-changed">内容有变更</span>
+        </div>
+        <div class="diff-cols">
+          <div class="diff-col">
+            <div class="diff-col-header">v{{ diffData.base_version_no }}（当前版本，前 1000 字）</div>
+            <pre class="diff-text">{{ diffData.base_text_preview || '（无文本）' }}</pre>
+          </div>
+          <div class="diff-col">
+            <div class="diff-col-header">v{{ diffData.target_version_no }}（前 1000 字）</div>
+            <pre class="diff-text">{{ diffData.target_text_preview || '（无文本）' }}</pre>
+          </div>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -1003,6 +1078,17 @@ function fmtDate(str) {
 .ver-badge.failed { background: #fef2f2; color: #dc2626; }
 
 .cur-label { font-size: 11px; color: #64748b; font-style: italic; }
+
+.modal-diff { min-width: 800px; max-width: 1100px; width: 95%; max-height: 85vh; }
+.diff-meta { display: flex; align-items: center; gap: 10px; padding: 10px 20px; font-size: 13px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+.diff-arrow { color: #94a3b8; }
+.diff-same { margin-left: auto; font-size: 12px; color: #16a34a; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 2px 8px; border-radius: 10px; }
+.diff-changed { margin-left: auto; font-size: 12px; color: #d97706; background: #fffbeb; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 10px; }
+.diff-cols { display: flex; gap: 0; flex: 1; overflow: hidden; }
+.diff-col { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #e2e8f0; overflow: hidden; }
+.diff-col:last-child { border-right: none; }
+.diff-col-header { padding: 8px 14px; font-size: 12px; font-weight: 600; color: #475569; background: #f1f5f9; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; }
+.diff-text { margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.6; color: #334155; white-space: pre-wrap; word-break: break-all; font-family: 'Courier New', monospace; overflow-y: auto; flex: 1; }
 
 .btn-primary { padding: 7px 16px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; }
 .btn-primary:hover:not(:disabled) { background: #1d4ed8; }

@@ -112,11 +112,14 @@ router.get('/:docId', async (req, res) => {
   }
 });
 
-// 文档预览
+// 文档预览；传 ?chunk_id= 时命中块标记 is_hit
 router.get('/:docId/preview', async (req, res) => {
   try {
-    const preview = await svc.preview(req.doctor, req.params.docId);
-    res.json(preview);
+    const { chunk_id } = req.query;
+    const result = chunk_id
+      ? await svc.previewWithHit(req.doctor, req.params.docId, chunk_id)
+      : await svc.preview(req.doctor, req.params.docId);
+    res.json(result);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.code || e.message, message: e.message });
   }
@@ -127,6 +130,21 @@ router.get('/:docId/download', async (req, res) => {
   try {
     const { filePath, fileName } = await svc.getDownloadInfo(req.doctor, req.params.docId);
     res.download(filePath, fileName);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.code || e.message, message: e.message });
+  }
+});
+
+// 版本文本差异对比，?against=active|prev|{versionId}
+router.get('/:docId/versions/:versionId/diff', async (req, res) => {
+  try {
+    const result = await versionSvc.diffVersions(
+      req.doctor,
+      req.params.docId,
+      req.params.versionId,
+      req.query.against
+    );
+    res.json(result);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.code || e.message, message: e.message });
   }

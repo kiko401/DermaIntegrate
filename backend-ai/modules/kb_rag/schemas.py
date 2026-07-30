@@ -81,7 +81,7 @@ class ChatRequest(BaseModel):
         if not self.question or not self.question.strip():
             raise ValueError("question must not be empty")
         if not self.kb_ids:
-            raise ValueError("kb_ids is required")
+            self.kb_ids = [0]  # 默认读系统内置知识库
         self.history = self.history[-10:]
         if self.options is None:
             self.options = {

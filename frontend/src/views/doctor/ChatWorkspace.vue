@@ -38,7 +38,6 @@ const loading = ref(false)
 const kbLoading = ref(false)
 const msgContainer = ref(null)
 const quickTemplates = ref([])
-const kbRequiredHint = ref(false)
 const kbSelectOpen = ref(false)
 const kbSearchText = ref('')
 
@@ -256,12 +255,6 @@ async function deleteConversation(conv) {
 async function sendMessage() {
   const question = inputText.value.trim()
   if (!question || loading.value) return
-  if (!selectedKbIds.value.length) {
-    kbRequiredHint.value = true
-    kbDrawerOpen.value = true
-    return
-  }
-  kbRequiredHint.value = false
   if (!activeConvId.value) await newConversation()
 
   messages.value.push({ role: 'user', content_markdown: question, created_at: new Date().toISOString() })
@@ -393,7 +386,6 @@ function toggleKb(id) {
   if (i >= 0) selectedKbIds.value.splice(i, 1)
   else selectedKbIds.value.push(id)
   if (selectedKbIds.value.length) {
-    kbRequiredHint.value = false
     kbDrawerOpen.value = false
   }
   if (!manageSelectedKbId.value) manageSelectedKbId.value = id
@@ -722,7 +714,6 @@ function formatDate(value) {
             <div v-if="!filteredKnowledgeBases.length" class="kb-option-empty">未找到知识库</div>
           </div>
         </div>
-        <div v-if="kbRequiredHint" class="error-tip">请先选择至少一个知识库再提问。</div>
       </div>
 
       <div class="conversation-panel">
