@@ -131,4 +131,11 @@ router.get('/admin/phi-audit-logs', requireAdmin, async (req, res) => {
   }
 });
 
+// ── 医生 RBAC 管理 ─────────────────────────────────────────────────────────
+router.get('/admin/doctors',                  requireAdmin, fwd('GET',    '/rag/admin/doctors'));
+router.get('/admin/doctors/:doctorId',        requireAdmin, fwd('GET',    p => `/rag/admin/doctors/${p.doctorId}`));
+router.post('/admin/doctors/batch',           requireAdmin, fwd('POST',   '/rag/admin/doctors/batch'));
+router.post('/admin/doctors',                 requireAdmin, fwd('POST',   '/rag/admin/doctors'));
+router.delete('/admin/doctors/:doctorId',     requireAdmin, fwd('DELETE', p => `/rag/admin/doctors/${p.doctorId}`));
+
 module.exports = router;

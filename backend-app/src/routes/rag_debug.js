@@ -17,11 +17,8 @@ function forwardToAI(aiPath) {
   };
 }
 
-router.post('/debug/retrieval',          forwardToAI('/rag/debug/retrieval'));
-router.post('/debug/rewrite',            forwardToAI('/rag/debug/rewrite'));
-router.post('/debug/split-preview',      forwardToAI('/rag/debug/split-preview'));
-router.post('/debug/keyword-search',     forwardToAI('/rag/debug/keyword-search'));
-router.post('/debug/doc-versions',       forwardToAI('/rag/debug/doc-versions'));
-router.post('/admin/vector-optimize',    forwardToAI('/rag/admin/vector-optimize'));
+router.post('/debug/retrieval',       forwardToAI('/rag/debug/retrieval'));
+router.post('/debug/rewrite',         forwardToAI('/rag/debug/rewrite'));
+router.post('/admin/vector-optimize', forwardToAI('/rag/admin/vector-optimize'));
 
 module.exports = router;
