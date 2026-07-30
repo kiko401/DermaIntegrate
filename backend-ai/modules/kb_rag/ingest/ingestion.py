@@ -2,7 +2,7 @@
 文档入库主流程
 
 功能：
-- 解析 -> 切分 -> NER实体抽取 -> BM25增量拟合 -> Dense+Sparse向量化
+- 解析 -> 切分 -> NER实体抽取 -> Dense向量化
 - 完整payload元数据（来源/结构/权限/实体）-> 写入Qdrant -> 回调应用域
 
 Payload 元数据（完整版）：
@@ -15,11 +15,12 @@ Payload 元数据（完整版）：
 import asyncio
 import logging
 from typing import List, Dict, Optional
+
+from shared.config import EMBEDDING_MODEL
 from .parsers import extract_text_with_metadata
-from .splitters import split_text
+from .splitters import split_text, _get_chunk_position, _split_table_blocks
 from .embeddings import generate_embeddings
 from .vector_store import upsert_vectors_async, delete_document_index_async
-from .bm25 import fit_bm25_on_collection, fit_bm25_incremental, get_collection_doc_count
 from .vector_store import COLLECTION_NAME
 from .ner import extract_medical_entities, get_entity_signature
 from .task_manager import send_task_callback
@@ -37,7 +38,7 @@ async def process_and_ingest_document(
         doc_version_id: int,
         chunk_size: int,
         chunk_overlap: int,
-        embedding_model: str = "BAAI/bge-small-zh-v1.5",
+        embedding_model: str = EMBEDDING_MODEL,
         progress_queue: Optional[asyncio.Queue] = None,
         # 访问控制参数（新增）
         access_level: str = "internal",
@@ -50,10 +51,9 @@ async def process_and_ingest_document(
     1. 解析(带元数据)
     2. 语义切分
     3. NER实体抽取（医学词典 + 模型）
-    4. BM25增量拟合（已有文档则增量，新库则全量）
-    5. Dense向量生成
-    6. 写入Qdrant
-    7. 回调应用域
+    4. Dense向量生成
+    5. 写入Qdrant
+    6. 回调应用域
     """
     chunk_count = 0
     error_msg = None
@@ -108,31 +108,14 @@ async def process_and_ingest_document(
         texts = [c["text"] for c in chunks]
         logger.info(f"Processing {len(texts)} chunks for doc_id={doc_id}, NER done.")
 
-        # ===== 第4步：BM25增量/全量拟合 =====
+        # ===== 第4步：Dense向量 =====
         await push_event("progress",
-                         {"task_id": task_id, "stage": "bm25_fitting", "progress": 50, "message": "正在拟合BM25模型"})
-        existing_doc_count = get_collection_doc_count(COLLECTION_NAME)
-        if existing_doc_count == 0:
-            # 首个文档，全量拟合
-            await asyncio.to_thread(fit_bm25_on_collection, COLLECTION_NAME, texts)
-            logger.info(f"BM25 full fit (first document): {len(texts)} chunks")
-        else:
-            # 已有文档，增量更新
-            await asyncio.to_thread(fit_bm25_incremental, COLLECTION_NAME, texts)
-            logger.info(f"BM25 incremental fit: +{len(texts)} chunks")
-
-        # 生成sparse向量
-        from .bm25 import generate_sparse_vectors_batch
-        sparse_vectors = await asyncio.to_thread(generate_sparse_vectors_batch, texts, COLLECTION_NAME)
-
-        # ===== 第5步：Dense向量 =====
-        await push_event("progress",
-                         {"task_id": task_id, "stage": "dense_embedding", "progress": 65, "message": "正在生成Dense向量"})
+                         {"task_id": task_id, "stage": "dense_embedding", "progress": 70, "message": "正在生成Dense向量"})
         vectors = await asyncio.to_thread(generate_embeddings, texts)
 
-        # ===== 第6步：构建Payload =====
+        # ===== 第5步：构建Payload =====
         await push_event("progress",
-                         {"task_id": task_id, "stage": "preparing_payload", "progress": 80, "message": "正在准备索引数据"})
+                         {"task_id": task_id, "stage": "preparing_payload", "progress": 85, "message": "正在准备索引数据"})
         payloads = []
         for c in chunks:
             payload: Dict = {
@@ -166,10 +149,10 @@ async def process_and_ingest_document(
             payload = {k: v for k, v in payload.items() if v is not None and v != ""}
             payloads.append(payload)
 
-        # ===== 第7步：写入Qdrant =====
+        # ===== 第6步：写入Qdrant =====
         await push_event("progress",
                          {"task_id": task_id, "stage": "indexing", "progress": 95, "message": "正在写入向量数据库"})
-        await upsert_vectors_async(vectors, payloads, sparse_vectors)
+        await upsert_vectors_async(vectors, payloads)
         chunk_count = len(vectors)
 
         await push_event("done", {"task_id": task_id, "status": "succeeded", "chunk_count": chunk_count})
@@ -185,71 +168,11 @@ async def process_and_ingest_document(
             await progress_queue.put(None)
 
 
-def _get_chunk_position(chunk: Dict) -> str:
-    if chunk.get("is_first_chunk"):
-        return "first"
-    if chunk.get("is_last_chunk"):
-        return "last"
-    return "middle"
-
-
-def _split_table_blocks(blocks: List[Dict], doc_id: int, doc_version_id: int) -> List[Dict]:
-    """表格文件切分：100行一组"""
-    if not blocks:
-        return []
-
-    TABLE_ROWS_PER_CHUNK = 100
-    chunks = []
-    chunk_index = 0
-
-    table_blocks = [b for b in blocks if b.get("is_table")]
-    non_table_blocks = [b for b in blocks if not b.get("is_table")]
-
-    for nt in non_table_blocks:
-        text = nt["text"].strip()
-        if not text:
-            continue
-        chunk_id = f"{doc_id}_{doc_version_id}_{str(chunk_index).zfill(3)}"
-        chunks.append({
-            "chunk_id": chunk_id, "chunk_index": chunk_index, "text": text,
-            "section_title": nt.get("section_title", ""),
-            "is_first_chunk": chunk_index == 0, "is_last_chunk": False,
-            "is_heading": nt.get("is_heading", False),
-        })
-        chunk_index += 1
-
-    for tb in table_blocks:
-        tm = tb.get("table_meta") or {}
-        row_count = tm.get("row_count", 0)
-        lines = tb["text"].split("\n")
-        group_count = max(1, (row_count + TABLE_ROWS_PER_CHUNK - 1) // TABLE_ROWS_PER_CHUNK)
-
-        for gi in range(group_count):
-            start_i = gi * TABLE_ROWS_PER_CHUNK
-            end_i = min(start_i + TABLE_ROWS_PER_CHUNK, len(lines))
-            group_text = "\n".join(lines[start_i:end_i])
-            chunk_id = f"{doc_id}_{doc_version_id}_{str(chunk_index).zfill(3)}"
-            chunks.append({
-                "chunk_id": chunk_id, "chunk_index": chunk_index, "text": group_text,
-                "section_title": tb.get("section_title", ""),
-                "is_first_chunk": False, "is_last_chunk": (gi == group_count - 1),
-                "is_heading": False, "is_table": True,
-                "table_meta": {**tm, "chunk_row_start": start_i, "chunk_row_end": end_i,
-                                "chunk_index": gi, "total_chunks": group_count},
-            })
-            chunk_index += 1
-
-    if chunks:
-        chunks[-1]["is_last_chunk"] = True
-    logger.info(f"Table split: {len(chunks)} chunks for doc_id={doc_id}")
-    return chunks
-
-
 async def reindex_document(
         content: bytes, filename: str, task_id: int, task_code: str,
         kb_id: int, doc_id: int, doc_version_id: int,
         chunk_size: int, chunk_overlap: int,
-        embedding_model: str = "BAAI/bge-small-zh-v1.5",
+        embedding_model: str = EMBEDDING_MODEL,
         progress_queue: Optional[asyncio.Queue] = None,
         access_level: str = "internal",
         department_id: Optional[int] = None,
@@ -272,7 +195,7 @@ async def reindex_text(
         text: str, task_id: int, task_code: str,
         kb_id: int, doc_id: int, doc_version_id: int,
         chunk_size: int, chunk_overlap: int,
-        embedding_model: str = "BAAI/bge-small-zh-v1.5",
+        embedding_model: str = EMBEDDING_MODEL,
         progress_queue: Optional[asyncio.Queue] = None,
         access_level: str = "internal",
         department_id: Optional[int] = None,
@@ -306,26 +229,14 @@ async def reindex_text(
 
         texts = [c["text"] for c in chunks]
 
-        # BM25增量
-        await push_event("progress",
-                         {"task_id": task_id, "stage": "bm25_fitting", "progress": 50, "message": "正在拟合BM25模型"})
-        existing_doc_count = get_collection_doc_count(COLLECTION_NAME)
-        if existing_doc_count == 0:
-            await asyncio.to_thread(fit_bm25_on_collection, COLLECTION_NAME, texts)
-        else:
-            await asyncio.to_thread(fit_bm25_incremental, COLLECTION_NAME, texts)
-
-        from .bm25 import generate_sparse_vectors_batch
-        sparse_vectors = await asyncio.to_thread(generate_sparse_vectors_batch, texts, COLLECTION_NAME)
-
         # Dense
         await push_event("progress",
-                         {"task_id": task_id, "stage": "dense_embedding", "progress": 60, "message": "正在生成Dense向量"})
+                         {"task_id": task_id, "stage": "dense_embedding", "progress": 70, "message": "正在生成Dense向量"})
         vectors = await asyncio.to_thread(generate_embeddings, texts)
 
         # Payload
         await push_event("progress",
-                         {"task_id": task_id, "stage": "preparing_payload", "progress": 80, "message": "正在准备索引数据"})
+                         {"task_id": task_id, "stage": "preparing_payload", "progress": 85, "message": "正在准备索引数据"})
         payloads = []
         for c in chunks:
             payload: Dict = {
@@ -349,7 +260,7 @@ async def reindex_text(
         # 写入
         await push_event("progress",
                          {"task_id": task_id, "stage": "indexing", "progress": 95, "message": "正在写入向量数据库"})
-        await upsert_vectors_async(vectors, payloads, sparse_vectors)
+        await upsert_vectors_async(vectors, payloads)
         chunk_count = len(vectors)
 
         await push_event("done", {"task_id": task_id, "status": "succeeded", "chunk_count": chunk_count})

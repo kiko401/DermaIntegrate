@@ -1,18 +1,21 @@
+import logging
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status
-from fastapi.responses import StreamingResponse
 from typing import Optional, List, Dict
+
 import httpx
-from shared.config import APP_CONVERSATION_CONNECT_TIMEOUT, APP_CONVERSATION_READ_TIMEOUT
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status, Query
+from fastapi.responses import StreamingResponse
+
+from shared.config import APP_CONVERSATION_CONNECT_TIMEOUT, APP_CONVERSATION_READ_TIMEOUT, APP_BASE_URL, X_INTERNAL_SECRET
 from ..schemas import ETLJobStatus, ETLRunRequest, FeedbackExportRequest, ETLClinicalRequest
 from ..etl.etl_service import (
     extract_and_ingest,
     get_etl_job_status,
+    get_etl_jobs_list,
     submit_etl_job,
     export_feedback_by_filters,
     clinical_etl_and_ingest,
 )
-import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,7 +43,7 @@ async def run_etl_file_endpoint(
         chunk_overlap: int = Form(120),
 ):
     """文件上传方式的 ETL 触发（兼容原接口）"""
-    # M-12: 文件大小限制，默认 50MB
+    # 文件大小限制，默认 50MB
     MAX_FILE_SIZE = 50 * 1024 * 1024
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
@@ -52,6 +55,16 @@ async def run_etl_file_endpoint(
     job_id = f"etl_job_{doc_id}_{doc_version_id}"
     job_status = await extract_and_ingest(content, filename, kb_id, doc_id, doc_version_id, job_id, job_name)
     return {"job_id": job_id, "status": job_status.status}
+
+
+@router.get("/etl/jobs")
+async def list_etl_jobs_endpoint(
+        status: Optional[str] = Query(None, description="按状态筛选：pending/running/succeeded/failed"),
+        limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+):
+    """查询 ETL 任务列表"""
+    jobs = get_etl_jobs_list(status=status, limit=limit)
+    return {"jobs": jobs}
 
 
 @router.get("/etl/jobs/{job_id}", response_model=ETLJobStatus)
@@ -71,8 +84,8 @@ async def clinical_etl_endpoint(req: ETLClinicalRequest):
     应用域传入脱敏后的患者上下文和病例文本，AI 域完成：
     1. 文本构建（患者概要 + 病例详情）
     2. 清洗切分
-    3. Dense + BM25 混合向量生成
-    4. Qdrant 双重索引写入
+    3. Dense 向量生成
+    4. Qdrant 索引入库
 
     PHI 脱敏须在调用前由应用域完成，本接口仅做二次检测（发现 PHI 关键词时告警不阻断）。
     """
@@ -139,12 +152,8 @@ async def _fetch_conversation_data_from_app_domain(req: FeedbackExportRequest) -
     从应用域拉取对话记录数据。
     需要应用域提供 /api/rag/conversations 接口。
     """
-    import os
-    import httpx
-    from datetime import datetime
-
-    app_base_url = os.getenv("APP_BASE_URL")
-    secret = os.getenv("X_INTERNAL_SECRET")
+    app_base_url = APP_BASE_URL
+    secret = X_INTERNAL_SECRET
 
     if not app_base_url or not secret:
         logger.warning("APP_BASE_URL or X_INTERNAL_SECRET not configured, cannot fetch conversation data")

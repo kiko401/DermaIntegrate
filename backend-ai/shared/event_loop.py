@@ -7,7 +7,7 @@
 - AsyncExecutor: 专用线程事件循环执行器
 - run_in_executor: 装饰器，将异步函数包装为同步调用
 
-架构设计（M-02/M-03 修复）：
+设计要点：
 1. 在独立线程中运行事件循环
 2. 同步代码通过 queue 将协程提交给该线程执行
 3. 避免在已有事件循环的线程中创建新循环
@@ -231,7 +231,7 @@ def shutdown_executor():
     """
     主动关闭执行器。
 
-    L-04: 补充 atexit 机制，提供显式关闭接口。
+    补充 atexit 机制，提供显式关闭接口。
     建议在 FastAPI lifespan shutdown 阶段调用此函数，确保所有待处理任务完成。
     """
     global _executor

@@ -1,9 +1,5 @@
 """
 安全 guardrails：敏感词过滤、输出脱敏、风险高亮提取
-
-架构改进（M-03修复）：
-- 使用 shared.event_loop.AsyncExecutor 替代 asyncio.new_event_loop()
-- 避免在已有事件循环的线程中创建新循环
 """
 import os
 import re
@@ -176,6 +172,7 @@ def mask_output(text: str) -> str:
             matches.append((start_idx, end_idx))
     elif cache.words_regex is not None:
         for m in cache.words_regex.finditer(text):
+            # m.end() 是 exclusive（Python regex 语义），与 AC 自动机的 inclusive end 对齐
             matches.append((m.start(), m.end() - 1))
 
     if not matches:

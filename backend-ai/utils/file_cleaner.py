@@ -35,7 +35,7 @@ _CLEANUP_LOCK_FILE = os.path.join(settings.UPLOAD_DIR, ".cleanup.lock")
 
 def cleanup_old_files():
     """
-    清理超过保留期的旧文件（L-09: 文件锁防止多 worker 竞争）
+    清理超过保留期的旧文件（文件锁防止多 worker 竞争）
 
     遍历上传目录和静态资源目录，删除所有修改时间超过 RETENTION_DAYS 的文件。
     目录不存在或删除失败不影响其他文件继续清理。

@@ -3,24 +3,21 @@
 
 支持两种模式：
 1. Cross-Encoder 重排（优先）：使用 BAAI/bge-reranker-large 对 query-chunk 对做语义相关性打分
-2. 规则加权（兜底）：dense_norm * 0.6 + bm25_norm * 0.3 + keyword_hit_ratio * 0.1
+2. 规则加权（兜底）：dense_norm * 0.6 + keyword_hit_ratio * 0.1
 
 Cross-Encoder 不可用时（未安装/模型加载失败）自动降级到规则加权。
 """
 import logging
 import copy
-import os
 from typing import List, Dict, Tuple, Optional
+
+from shared.config import RERANK_MODEL
 
 logger = logging.getLogger(__name__)
 
 # 规则加权权重（Cross-Encoder 不可用时的兜底方案）
 RERANK_WEIGHT_DENSE = 0.6
-RERANK_WEIGHT_BM25 = 0.3
 RERANK_WEIGHT_KEYWORD = 0.1
-
-# Cross-Encoder 模型名称
-RERANK_MODEL_NAME = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-large")
 
 # Cross-Encoder 实例（延迟加载）
 _reranker = None
@@ -38,8 +35,8 @@ def _get_reranker():
 
     try:
         from sentence_transformers import CrossEncoder
-        logger.info(f"Loading Cross-Encoder model: {RERANK_MODEL_NAME}")
-        _reranker = CrossEncoder(RERANK_MODEL_NAME, max_length=512)
+        logger.info(f"Loading Cross-Encoder model: {RERANK_MODEL}")
+        _reranker = CrossEncoder(RERANK_MODEL, max_length=512)
         logger.info(f"Cross-Encoder model loaded successfully.")
         return _reranker
     except Exception as e:
@@ -96,23 +93,18 @@ def _rule_based_rerank(query: str, chunks: List[Dict], top_k: int) -> List[Dict]
     """
     规则加权重排（兜底方案）。
 
-    rerank_score = dense_norm * 0.6 + bm25_norm * 0.3 + keyword_hit_ratio * 0.1
+    rerank_score = dense_norm * 0.6 + keyword_hit_ratio * 0.1
     """
     if not chunks:
         return []
 
     query_tokens = set(_tokenize_for_rerank(query))
-    max_bm25 = max((c.get("bm25_score", 0.0) for c in chunks), default=1.0)
-    if max_bm25 <= 0:
-        max_bm25 = 1.0
 
     scored_chunks = []
     for c in chunks:
         chunk_copy = copy.deepcopy(c)
 
         dense_norm = chunk_copy.get("dense_norm", 0.0)
-        bm25_raw = chunk_copy.get("bm25_score", 0.0)
-        bm25_norm = bm25_raw / max_bm25
 
         text_tokens = set(_tokenize_for_rerank(chunk_copy.get("text", "")))
         keyword_hits = len(query_tokens & text_tokens)
@@ -121,7 +113,6 @@ def _rule_based_rerank(query: str, chunks: List[Dict], top_k: int) -> List[Dict]
 
         rerank_score = (
             RERANK_WEIGHT_DENSE * dense_norm
-            + RERANK_WEIGHT_BM25 * bm25_norm
             + RERANK_WEIGHT_KEYWORD * keyword_hit_ratio
         )
 
@@ -148,7 +139,7 @@ def rerank(query: str, chunks: List[Dict], top_k: int = 5) -> List[Dict]:
 
     Args:
         query: 用户原始问题
-        chunks: RRF 融合后的 chunk 列表，每个须含 dense_norm、bm25_score、text 字段
+        chunks: RRF 融合后的 chunk 列表，每个须含 dense_norm、text 字段
         top_k: 返回的重排结果数量
 
     Returns:

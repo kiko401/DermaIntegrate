@@ -290,15 +290,6 @@ def _parse_txt_with_metadata(content: bytes) -> List[Dict[str, Any]]:
 
 # ===== 统一解析入口 =====
 
-def extract_text_from_file(content: bytes, filename: str) -> str:
-    """
-    传统接口：仅返回合并后的纯文本（向后兼容）。
-    内部调用新的带元数据解析器。
-    """
-    result = extract_text_with_metadata(content, filename)
-    return result["text"]
-
-
 def extract_text_with_metadata(content: bytes, filename: str) -> Dict[str, Any]:
     """
     带元数据的解析入口。

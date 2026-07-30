@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ===== M-08 快捷提问模板 CRUD =====
+# ===== 快捷提问模板 CRUD =====
 
 class QuickTemplateCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=50)
@@ -37,7 +37,7 @@ async def list_tools_endpoint():
 @router.post("/tools/run")
 async def run_tool_endpoint(req: ToolRunRequest):
     """执行指定工具"""
-    # H-06: RCE防护 - 执行前校验工具名在注册表中
+    # RCE防护 - 执行前校验工具名在注册表中
     schemas = get_tool_schemas()
     registered_names = {t["name"] for t in schemas}
     if req.tool_name not in registered_names:

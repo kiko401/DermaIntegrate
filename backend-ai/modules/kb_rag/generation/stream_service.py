@@ -12,12 +12,11 @@ SSE 流式 RAG 工作流
 4. rule_match         -> 规则回答匹配
 5. intent_route       -> 意图识别与路由
 6. rewrite            -> 查询改写
-7. query_type_classify -> 查询类型分类（guideline vs case）
-8. retrieval          -> 知识库检索
-9. tool_decision      -> 工具调用决策
-10. answer_builder    -> 答案生成
-11. risk_highlight     -> 风险高亮提取
-12. response_finalize  -> 响应封装
+7. retrieval          -> 知识库检索
+8. tool_decision      -> 工具调用决策
+9. answer_builder     -> 答案生成
+10. risk_highlight    -> 风险高亮提取
+11. response_finalize -> 响应封装
 """
 
 import json
@@ -45,7 +44,6 @@ NODE_PROGRESS: Dict[str, tuple[int, str, str]] = {
     "rule_match":         (20, "正在进行规则匹配",            "规则匹配完成"),
     "intent_route":       (28, "正在进行意图识别与路由",      "意图识别完成"),
     "rewrite":            (35, "正在进行查询改写",             "查询改写完成"),
-    "query_type_classify":(42, "正在进行查询类型分类",        "查询类型分类完成"),
     "retrieval":          (60, "正在检索知识库",              "检索完成"),
     "tool_decision":      (60, "正在进行工具决策",            "工具决策完成"),
     "answer_builder":     (78, "正在生成回答",               "回答生成完成"),
@@ -93,12 +91,13 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
 
     try:
         # 使用 astream_events 获取真实实时节点完成事件
+        # LangGraph 1.2.x 使用 on_chain_start / on_chain_stream / on_chain_end
         async for event in app_workflow.astream_events(initial_state, config={"recursion_limit": 50}):
             event_type = event.get("event")
             event_name = event.get("name", "")
 
             # 0. 节点开始事件 -> 发送 thinking 提示（让用户知道接下来要做什么）
-            if event_type == "on_node_start":
+            if event_type == "on_chain_start":
                 node_name = event_name
                 if node_name in NODE_PROGRESS:
                     _, start_msg, _ = NODE_PROGRESS[node_name]
@@ -108,8 +107,19 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
                     })
 
             # 1. 节点结束事件 -> 发送进度和追踪事件
-            if event_type == "on_node_end":
+            elif event_type == "on_chain_end":
                 node_name = event_name
+                # 忽略顶层 LangGraph 链结束事件（它包含整个工作流输出）
+                if node_name == "LangGraph":
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict):
+                        resp_dict = output.get("response")
+                        if resp_dict is None:
+                            resp_dict = output
+                    elif output is not None:
+                        resp_dict = output
+                    continue
+
                 if node_name in NODE_PROGRESS and node_name not in seen_nodes:
                     seen_nodes.add(node_name)
                     progress_pct, start_msg, end_msg = NODE_PROGRESS[node_name]
@@ -129,6 +139,28 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
                         # 检索完成后立即推送 chunks（让前端可以展示参考来源）
                         if chunks:
                             yield _format_sse("chunks", {"chunks": chunks})
+                    # 工具调用节点特殊处理：提取工具执行状态
+                    elif node_name == "tool_decision":
+                        yield _format_sse("progress", {
+                            "step": node_name,
+                            "progress": progress_pct,
+                            "message": end_msg
+                        })
+                        state_after = event.get("data", {}).get("output", {})
+                        if isinstance(state_after, dict):
+                            tool_call_obj = state_after.get("tool_call_obj")
+                            if tool_call_obj:
+                                # tool_call_obj 可能是 dict 或 Pydantic 模型
+                                if isinstance(tool_call_obj, dict):
+                                    tool_name = tool_call_obj.get("tool_name", "")
+                                    t_status = tool_call_obj.get("status", "")
+                                else:
+                                    tool_name = getattr(tool_call_obj, "tool_name", "")
+                                    t_status = getattr(tool_call_obj, "status", "")
+                                yield _format_sse("tool_call", {
+                                    "tool_name": tool_name,
+                                    "status": t_status,
+                                })
                     else:
                         yield _format_sse("progress", {
                             "step": node_name,
@@ -143,16 +175,7 @@ async def stream_rag_workflow(req: ChatRequest) -> AsyncGenerator[str, None]:
                         "status": "completed",
                     })
 
-            # 2. 工作流结束事件 -> 提取最终响应
-            elif event_type == "on_chain_end":
-                output = event.get("data", {}).get("output", {})
-                if isinstance(output, dict):
-                    resp_dict = output.get("response")
-                    if resp_dict is None:
-                        # fallback: 使用整个 output
-                        resp_dict = output
-                elif output is not None:
-                    resp_dict = output
+                # 所有普通节点的 on_chain_end 已在上面的 on_chain_end 分支处理完，无需额外逻辑
 
         # 3. 发送最终 result 事件
         if resp_dict is not None:

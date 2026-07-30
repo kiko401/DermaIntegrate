@@ -81,13 +81,6 @@ async def lifespan(app: FastAPI):
                 logger.info("KB-RAG embedding model loaded.")
             except Exception as e:
                 logger.warning(f"KB-RAG embedding model load skipped (non-fatal): {e}")
-            # BM25 全量拟合（从 Qdrant 加载所有 chunk，保证 sparse search 词表完整）
-            try:
-                from modules.kb_rag.retrieval.retriever import fit_bm25_on_qdrant_chunks
-                await asyncio.to_thread(fit_bm25_on_qdrant_chunks)
-                logger.info("KB-RAG BM25 vectorizer fitted on all chunks.")
-            except Exception as e:
-                logger.warning(f"KB-RAG BM25 fitting skipped (non-fatal): {e}")
         except Exception as e:
             logger.error(f"KB-RAG init failed: {e}")
 

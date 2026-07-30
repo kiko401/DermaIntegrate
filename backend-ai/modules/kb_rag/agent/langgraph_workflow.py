@@ -1,16 +1,18 @@
 """
 LangGraph 智能体工作流 - 完整业务实现
 
-工作流设计（基于需求文档 UC-RAG-24 / M12）：
+工作流节点（10节点）：
 1. policy_check    -> 输入安全检查（敏感词过滤）
 2. phi_guard       -> PHI 二次守护（检测患者敏感信息泄露风险）
-3. intent_route    -> 意图识别与路由分类
-4. rewrite         -> 查询改写与纠错
-5. retrieval       -> 知识库向量检索
-6. tool_decision   -> 工具调用决策与执行
-7. answer_builder  -> LLM 答案生成
-8. risk_highlight  -> 风险高亮提取（药名、剂量、禁忌等）
-9. response_finalize -> 响应封装与元数据注入
+3. rejection_check -> 拒绝规则检查
+4. rule_match      -> 规则回答匹配
+5. intent_route    -> 意图识别与路由（knowledge_query / general_chat / tool_call）
+6. rewrite         -> 查询改写与纠错
+7. retrieval       -> 知识库向量检索
+8. tool_decision   -> 工具调用决策与执行
+9. answer_builder  -> LLM 答案生成
+10. risk_highlight -> 风险高亮提取（药名、剂量、禁忌等）
+11. response_finalize -> 响应封装与元数据注入
 
 路由类型（route）：
 - knowledge_query      : 知识库问答
@@ -32,13 +34,13 @@ from ..schemas import (
     RiskHighlightObject, PatientContextObject
 )
 from ..generation.guardrails import check_input, extract_risk_highlights
-from ..retrieval.rewrite_service import rewrite_and_classify, classify_query_type
+from ..retrieval.rewrite_service import rewrite_and_classify
 from ..retrieval.retriever import retrieve
 from ..generation.answer_builder import _call_llm
 from ..generation.answer_builder import build_response
 from .tool_executor import execute_tool, init_agent_trace, update_agent_trace, get_agent_run_trace
 from ..rules.matcher import apply_rejection_rules, apply_rule_answers
-from ..rules.store import add_rejection_log, add_sensitive_hit_log
+from ..rules.store import add_rejection_log
 from ..utils import detect_phi, mask_phi
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,6 @@ class AgentState(TypedDict):
     run_id: str
     rewritten_query: str
     route: str
-    query_type: str              # 查指南(guideline)还是查病例(case)，由 classify_query_type 确定
     chunks: list
     is_blocked: bool
     phi_detected: bool
@@ -98,15 +99,6 @@ async def policy_check(state: AgentState) -> AgentState:
 
     if not is_safe:
         logger.warning(f"Policy check blocked input: {hits}")
-        try:
-            asyncio.create_task(add_sensitive_hit_log(
-                user_question=req.question,
-                hit_words=hits,
-                conversation_id=req.conversation_id if req.conversation_id else None,
-                action="blocked",
-            ))
-        except Exception as e:
-            logger.warning(f"Failed to log sensitive hit: {e}")
         state["response"] = build_response(
             req, f"输入包含违规词汇: {', '.join(hits)}",
             [], "general_chat", 0.0, "blocked", "敏感词拦截"
@@ -121,7 +113,7 @@ async def phi_guard(state: AgentState) -> AgentState:
     """
     节点2: PHI 二次守护
     检测患者敏感信息是否泄露到问题中（如患者姓名、住院号等）
-    注：根据双域职责约束，PHI脱敏应在应用域完成，此处为二次兜底检测
+    检测到 PHI -> 阻断流程，返回脱敏警告响应（不将 PHI 送入后续 LLM 推理）
     """
     req = state["req"]
 
@@ -130,9 +122,22 @@ async def phi_guard(state: AgentState) -> AgentState:
 
     if input_phi or ctx_phi:
         state["phi_detected"] = True
+        state["is_blocked"] = True
         logger.warning(
             f"PHI guard detected potential PHI leak. "
             f"Input PHI: {input_phi}, Context PHI: {ctx_phi}"
+        )
+        # 构建阻断响应，告知用户检测到敏感信息
+        state["response"] = build_response(
+            req,
+            "⚠️ 检测到输入中可能包含患者敏感信息（姓名、住院号等），"
+            "为保护患者隐私，系统已对该部分进行了脱敏处理。"
+            "如需完整分析，建议在去除患者身份信息后再行提问。",
+            [],
+            "general_chat",
+            0.0,
+            "blocked",
+            "PHI detected and masked"
         )
 
     return state
@@ -248,68 +253,28 @@ async def intent_route(state: AgentState) -> AgentState:
 @node_handler
 async def rewrite(state: AgentState) -> AgentState:
     """
-    节点6: 查询改写
-    对用户问题进行语义优化，提高检索召回
-    注：已在 intent_route 中完成初步改写，此处可进行额外的查询扩展
+    节点6: 查询改写（第二轮扩展）
+    intent_route 已调用 LLM 完成初步改写，此处仅在多轮对话场景下
+    从历史中额外补充上下文实体，进一步丰富检索query
     """
     req = state["req"]
     route = state["route"]
 
-    # 只有知识问答和患者上下文问答需要改写
     if route not in ["knowledge_query", "patient_context_query"]:
         return state
 
-    # 如果 rewrite 和 intent_route 结果相同，说明无需额外处理
-    # 如果有历史记录，可以进行更多扩展
-    if req.history and state["rewritten_query"] == req.question:
-        # 多轮对话场景：尝试从历史中提取关键实体进行查询扩展
+    # 多轮对话：从历史回答中提取医学实体，补充到检索query中
+    if req.history:
         context_entities = []
-        for hist in req.history[-3:]:  # 取最近3轮
-            # 简单策略：提取历史回答中的名词实体
+        for hist in req.history[-3:]:
             import re
-            entities = re.findall(r'[^，,。\s]{2,4}(?:症|癌|瘤|病|药|治疗)', hist.get("content", ""))
-            context_entities.extend(entities[:3])  # 每轮最多取3个
+            entities = re.findall(r'[^，,。\s]{2,4}(?:症|癌|瘤|病|药|治疗|方案|分期)', hist.get("content", ""))
+            context_entities.extend(entities[:3])
 
         if context_entities:
-            # 将实体融入查询
             unique_entities = list(set(context_entities))[:5]
             state["rewritten_query"] = f"{state['rewritten_query']} {' '.join(unique_entities)}"
-            logger.info(f"Query expanded with entities: {unique_entities}")
-
-    return state
-
-
-@node_handler
-async def query_type_classify(state: AgentState) -> AgentState:
-    """
-    节点7（新增）: 查询类型分类
-    在检索之前，判断本次查询是"查指南"还是"查病例"。
-
-    - guideline: 查通用医学指南/规范（NCCN/AJCC/药品说明书等）
-    - case: 查本院脱敏临床病例
-    - general: 无法明确归类，按通用医学知识处理
-
-    query_type 会影响 retrieval 节点的 kb_ids 行为：
-    - guideline: 使用请求中传入的 kb_ids（通常为指南库）
-    - case: 自动将 kb_ids 切换为病例库（通常配置在 options.case_kb_ids）
-    """
-    route = state["route"]
-
-    # 只有知识问答类路由需要分类
-    if route in ["general_chat", "tool_call"]:
-        state["query_type"] = "general"
-        return state
-
-    req = state["req"]
-
-    # 调用 LLM 进行第二层分类
-    query_type = await classify_query_type(
-        query=state["rewritten_query"],
-        patient_context=req.patient_context,
-        history=req.history,
-    )
-    state["query_type"] = query_type
-    logger.info(f"Query type classified: query_type={query_type}, route={route}")
+            logger.info(f"Query expanded with history entities: {unique_entities}")
 
     return state
 
@@ -319,13 +284,9 @@ async def retrieval(state: AgentState) -> AgentState:
     """
     节点8: 知识库检索
     基于改写后的问题检索知识库，获取相关 chunks。
-    根据 query_type 决定查哪个知识库：
-    - guideline: 使用原始 kb_ids（指南库）
-    - case: 自动切换到 options.case_kb_ids（病例库）；若未配置则使用原始 kb_ids
     """
     req = state["req"]
     route = state["route"]
-    query_type = state.get("query_type", "general")
 
     # 只有知识问答类路由需要检索
     if route in ["general_chat", "tool_call"]:
@@ -336,30 +297,10 @@ async def retrieval(state: AgentState) -> AgentState:
     threshold = req.options.get("similarity_threshold", 0.35)
     use_rerank = req.options.get("use_rerank", False)
 
-    # 确定本次检索使用的 kb_ids
-    # - guideline: 直接使用请求中的 kb_ids
-    # - case: 优先使用 options.case_kb_ids（专门的病例库 ID）
-    # - general: 直接使用 kb_ids
-    if query_type == "case":
-        case_kb_ids = req.options.get("case_kb_ids", [])
-        if case_kb_ids:
-            kb_ids_to_search = case_kb_ids
-            logger.info(f"Query type=case: switching to case_kb_ids={kb_ids_to_search}")
-        else:
-            # 未配置专门的病例库 ID 时，fallback 到原始 kb_ids 并给出警告
-            kb_ids_to_search = req.kb_ids
-            logger.warning(
-                f"Query type=case but case_kb_ids not configured in options. "
-                f"Falling back to req.kb_ids={kb_ids_to_search}. "
-                f"Consider configuring options.case_kb_ids for proper case isolation."
-            )
-    else:
-        kb_ids_to_search = req.kb_ids
-
     # 执行检索（含医生权限隔离）
     chunks, is_blocked = await retrieve(
         state["rewritten_query"],
-        kb_ids_to_search,
+        req.kb_ids,
         top_k,
         threshold,
         use_rerank=use_rerank,
@@ -539,14 +480,13 @@ async def response_finalize(state: AgentState) -> AgentState:
 
 workflow = StateGraph(AgentState)
 
-# 添加节点（12节点，新增 query_type_classify）
+# 添加节点（11节点）
 workflow.add_node("policy_check", policy_check)
 workflow.add_node("phi_guard", phi_guard)
 workflow.add_node("rejection_check", rejection_check)
 workflow.add_node("rule_match", rule_match)
 workflow.add_node("intent_route", intent_route)
 workflow.add_node("rewrite", rewrite)
-workflow.add_node("query_type_classify", query_type_classify)  # 新增节点
 workflow.add_node("retrieval", retrieval)
 workflow.add_node("tool_decision", tool_decision)
 workflow.add_node("answer_builder", answer_builder)
@@ -558,35 +498,31 @@ workflow.set_entry_point("policy_check")
 
 # 定义边（条件分支）
 workflow.add_edge("policy_check", "phi_guard")
-workflow.add_edge("phi_guard", "rejection_check")
+# phi_guard 检测到 PHI 时阻断，否则继续 rejection_check
+workflow.add_conditional_edges(
+    "phi_guard",
+    lambda state: "response_finalize" if state.get("is_blocked") else "rejection_check",
+    {
+        "response_finalize": "response_finalize",
+        "rejection_check": "rejection_check",
+    }
+)
 workflow.add_edge("rejection_check", "rule_match")
 workflow.add_edge("rule_match", "intent_route")
 workflow.add_edge("intent_route", "rewrite")
 
 # rewrite 之后根据路由分支（is_blocked 优先，确保规则命中等阻断场景直接到达终点）
-# knowledge_query / patient_context_query / agent_workflow 走 query_type_classify 做第二层分类
 workflow.add_conditional_edges(
     "rewrite",
     lambda state: "blocked" if state.get("is_blocked") else state["route"],
     {
         "blocked": "response_finalize",  # 被阻断直接结束
-        "knowledge_query": "query_type_classify",
-        "patient_context_query": "query_type_classify",
+        "knowledge_query": "retrieval",
+        "patient_context_query": "retrieval",
         "tool_call": "tool_decision",
         "general_chat": "answer_builder",
-        "agent_workflow": "query_type_classify",  # agent_workflow 也先做查询类型分类
-        "rule_answer": "response_finalize",  # 规则命中的直接走响应封装（is_blocked=True，response已构建）
-    }
-)
-
-# query_type_classify 之后，知识类路由进入 retrieval；general 跳过检索
-workflow.add_conditional_edges(
-    "query_type_classify",
-    lambda state: state.get("query_type", "general"),
-    {
-        "general": "answer_builder",     # 无法归类，不检索直接 LLM 回答
-        "guideline": "retrieval",        # 查指南，进入检索
-        "case": "retrieval",            # 查病例，进入检索（kb_ids 会在 retrieval 中切换）
+        "agent_workflow": "retrieval",
+        "rule_answer": "response_finalize",  # 规则命中的直接走响应封装
     }
 )
 
@@ -620,19 +556,17 @@ workflow.add_edge("response_finalize", END)
 app_workflow = workflow.compile()
 
 
-async def run_agent_workflow(req: ChatRequest, run_id: str | None = None) -> ChatResponse:
+async def run_agent_workflow(req: ChatRequest) -> ChatResponse:
     """
     运行智能体工作流
 
     Args:
         req: ChatRequest 请求对象
-        run_id: 外部传入的 run_id；若不传则内部生成
 
     Returns:
         ChatResponse: 完整的响应对象
     """
-    if not run_id:
-        run_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
     init_agent_trace(run_id)
 
     # 初始化状态
@@ -687,37 +621,3 @@ async def run_agent_workflow(req: ChatRequest, run_id: str | None = None) -> Cha
             "failed",
             str(e)
         )
-
-
-# ============ 辅助函数 ============
-
-async def run_agent_workflow_simple(
-    question: str,
-    kb_ids: List[int],
-    history: List[Dict[str, str]] = None,
-    patient_context: Any = None,
-    options: Dict[str, Any] = None
-) -> ChatResponse:
-    """
-    简化的入口函数，直接传入参数运行工作流
-
-    Args:
-        question: 用户问题
-        kb_ids: 知识库ID列表
-        history: 历史对话
-        patient_context: 患者上下文对象
-        options: 配置选项
-
-    Returns:
-        ChatResponse: 完整的响应对象
-    """
-    req = ChatRequest(
-        conversation_id=0,
-        question=question,
-        history=history or [],
-        kb_ids=kb_ids,
-        patient_context=patient_context,
-        options=options or {}
-    )
-
-    return await run_agent_workflow(req)

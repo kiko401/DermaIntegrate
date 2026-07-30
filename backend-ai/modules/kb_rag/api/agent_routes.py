@@ -10,7 +10,7 @@ import uuid
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# M-06: 会话级上下文配置存储（内存，key=conversation_id）
+# 会话级上下文配置存储（内存，key=conversation_id）
 # 应用域可通过此接口管理 AI 域的上下文保留策略
 _SESSION_CONFIGS: Dict[int, Dict[str, Any]] = {}
 
@@ -37,7 +37,7 @@ class SessionContextUpdate(BaseModel):
 @router.post("/agents/run", status_code=status.HTTP_202_ACCEPTED)
 async def run_agent_endpoint(req: AgentRunRequest, background_tasks: BackgroundTasks):
     """
-    触发 LangGraph 智能体工作流（M-11: 改用 BackgroundTasks）。
+    触发 LangGraph 智能体工作流。
 
     返回 run_id 用于后续查询执行结果。
     """
@@ -55,13 +55,13 @@ async def run_agent_endpoint(req: AgentRunRequest, background_tasks: BackgroundT
                 "enable_agent": True,
                 "enable_tools": True,
                 "tool_payload": req.options.get("tool_payload"),
-                # M-06: 从会话配置中读取回答长度限制
+                # 从会话配置中读取回答长度限制
                 "max_length": _SESSION_CONFIGS.get(req.conversation_id, {}).get("max_length", 0),
                 "max_paragraphs": _SESSION_CONFIGS.get(req.conversation_id, {}).get("max_paragraphs", 0),
             },
         )
 
-        # M-11: BackgroundTasks 确保任务在 FastAPI 生命周期内完成，异常可被记录
+        # BackgroundTasks 确保任务在 FastAPI 生命周期内完成，异常可被记录
         background_tasks.add_task(run_agent_workflow, chat_req)
 
         return {
@@ -89,7 +89,7 @@ async def get_agent_run_endpoint(run_id: str):
 @router.get("/agents/sessions/{conversation_id}/context-config", response_model=SessionContextConfig)
 async def get_session_context_config(conversation_id: int):
     """
-    M-06 查询指定会话的上下文配置。
+    查询指定会话的上下文配置。
     未配置过则返回默认配置。
     """
     config = _SESSION_CONFIGS.get(conversation_id)
@@ -101,7 +101,7 @@ async def get_session_context_config(conversation_id: int):
 @router.put("/agents/sessions/{conversation_id}/context-config", response_model=SessionContextConfig)
 async def update_session_context_config(conversation_id: int, req: SessionContextUpdate):
     """
-    M-06 更新指定会话的上下文配置。
+    更新指定会话的上下文配置。
     仅更新传入的非空字段。
     """
     current = _SESSION_CONFIGS.get(conversation_id, {})

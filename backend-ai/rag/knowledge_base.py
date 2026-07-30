@@ -23,25 +23,18 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
 from modules.kb_rag.ingest.embeddings import get_embedder
-from modules.kb_rag.ingest.bm25 import fit_bm25_on_collection, generate_sparse_vectors_batch
-from modules.kb_rag.ingest.vector_store import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
-from qdrant_client.http.models import SparseVector as QdrantSparseVector
-from shared.constants import DISEASE_REGISTRY
+from modules.kb_rag.ingest.vector_store import DENSE_VECTOR_NAME
+from shared.constants import DISEASE_REGISTRY, VALID_TAGS
 
 logger = logging.getLogger(__name__)
-
-# 有效 tags 白名单
-VALID_TAGS = {"MEL", "BCC", "SCC", "NEV", "ACK", "SEK", "T1", "T2", "T3", "T4", "高危", "肢端", "黏膜", "通用"}
 
 # 文档目录
 DEFAULT_DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
 
 # KB-RAG 使用的 collection 名称（与 modules/kb_rag/ingest/vector_store.py 保持一致）
-# L-12 注意：legacy rag/ 与 KB-RAG 使用相同的 collection 名 "rag_documents"，
-# 但分属不同的 Qdrant 实例或命名空间。rag/knowledge_base.py 通过
-# qdrant_client 直接连接传统 RAG Qdrant 服务（端口 6333），而
-# modules/kb_rag/ 通过 qdrant_client 连接 KB-RAG 专属 Qdrant 实例（端口 6334）。
-# 两者在物理上隔离，不会产生数据混淆。
+# 注意：legacy rag/ 与 KB-RAG 使用相同的 collection 名 "rag_documents"，
+# 但分属不同的 Qdrant 实例或命名空间。两者共用 QDRANT_PORT 配置（默认 6333），
+# 通过不同的 collection 名称实现逻辑隔离。
 COLLECTION_NAME = "rag_documents"
 
 
@@ -63,10 +56,9 @@ class RAGKnowledgeBase:
         self.score_threshold = RAG_SCORE_THRESHOLD
 
     def _ensure_collection_exists(self):
-        """确保 collection 存在，不存在则创建（使用 named hybrid vectors 配置）"""
+        """确保 collection 存在，不存在则创建（纯 Dense 向量配置）"""
         collections = self.client.get_collections().collections
         if not any(c.name == self.collection_name for c in collections):
-            from modules.kb_rag.ingest.vector_store import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config={
@@ -75,11 +67,6 @@ class RAGKnowledgeBase:
                         "distance": models.Distance.COSINE,
                     }
                 },
-                sparse_vectors_config={
-                    SPARSE_VECTOR_NAME: models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False),
-                    )
-                },
             )
             # 创建 payload 索引
             self.client.create_payload_index(self.collection_name, "kb_id", models.PayloadSchemaType.INTEGER)
@@ -87,7 +74,7 @@ class RAGKnowledgeBase:
             self.client.create_payload_index(self.collection_name, "doc_version_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "doctor_id", models.PayloadSchemaType.INTEGER)
             self.client.create_payload_index(self.collection_name, "chunk_id", models.PayloadSchemaType.KEYWORD)
-            logger.info(f"Collection '{self.collection_name}' created with named hybrid vectors (dense + bm25 sparse).")
+            logger.info(f"Collection '{self.collection_name}' created with pure Dense vectors.")
         else:
             # 对已有 collection 补加 doctor_id 索引（幂等）
             try:
@@ -208,22 +195,14 @@ class RAGKnowledgeBase:
         logger.info(f"正在向量化 {len(texts)} 条文档...")
         vectors = self.embedder.encode(texts, normalize_embeddings=True).tolist()
 
-        # 4a. 拟合 BM25 并生成 sparse vectors
-        logger.info(f"正在生成 BM25 sparse 向量（{len(texts)} 条）...")
-        fit_bm25_on_collection(self.collection_name, texts)
-        sparse_vectors = generate_sparse_vectors_batch(texts, self.collection_name)
-
-        # 5. 构建 points（named dense + sparse）
+        # 5. 构建 points（纯 Dense 向量）
         points = []
         for i in range(len(texts)):
-            indices, values = sparse_vectors[i]
             point_dict = {
                 "id": payloads[i]["doc_id"],
                 "vector": {DENSE_VECTOR_NAME: vectors[i]},
                 "payload": payloads[i]
             }
-            if indices:
-                point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
             points.append(models.PointStruct(**point_dict))
 
         # 6. 写入向量数据库
@@ -246,36 +225,6 @@ class RAGKnowledgeBase:
             return result.points_count > 0
         except Exception:
             return False
-
-    def init_from_parsed_data(self, texts: list, payloads: list):
-        """向量化并构建知识库索引（兼容旧接口）。"""
-        if not texts:
-            logger.warning("No texts provided for initialization.")
-            return
-
-        logger.info(f"Embedding {len(texts)} text fragments and building index...")
-
-        self._ensure_collection_exists()
-
-        vectors = self.embedder.encode(texts, show_progress_bar=False).tolist()
-
-        # 生成 BM25 sparse vectors
-        fit_bm25_on_collection(self.collection_name, texts)
-        sparse_vectors = generate_sparse_vectors_batch(texts, self.collection_name)
-
-        points = []
-        for idx in range(len(texts)):
-            indices, values = sparse_vectors[idx]
-            point_dict = {
-                "id": idx,
-                "vector": {DENSE_VECTOR_NAME: vectors[idx]},
-                "payload": {"text": texts[idx], **payloads[idx]}
-            }
-            if indices:
-                point_dict["vector"][SPARSE_VECTOR_NAME] = QdrantSparseVector(indices=indices, values=values)
-            points.append(models.PointStruct(**point_dict))
-        self.client.upsert(collection_name=self.collection_name, points=points)
-        logger.info("RAG Knowledge Base built successfully!")
 
     def _extract_filter_tags(self, clinical_result: dict, pathology_result: dict) -> list:
         """
@@ -400,6 +349,7 @@ class RAGKnowledgeBase:
                 query_filter=query_filter,
                 limit=top_k,
                 score_threshold=self.score_threshold,
+                using="dense",
                 with_payload=True
             )
         except Exception as e:
@@ -409,6 +359,7 @@ class RAGKnowledgeBase:
                 query=query_vector,
                 limit=top_k,
                 score_threshold=self.score_threshold,
+                using="dense",
                 with_payload=True
             )
 

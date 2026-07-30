@@ -69,6 +69,5 @@ python-docx==1.2.0
 # 修复：pandas 3.0+ 可能要求 numpy 2.0，锁定 2.2.x 确保与 numpy 1.26.4 兼容
 pandas==2.2.3
 
-# ----- BM25 / Hybrid Search -----
-rank-bm25==0.2.2
+# ----- 分词 -----
 jieba==0.42.1

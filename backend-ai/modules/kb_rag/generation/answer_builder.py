@@ -24,7 +24,7 @@ DISCLAIMER = "⚠️ 本回答由 AI 基于知识库生成，仅供参考，不�
 
 def _truncate_answer(answer: str, max_length: int, max_paragraphs: int) -> str:
     """
-    M-06 回答长度截断：
+    回答长度截断：
     - max_length > 0 时按字符数截断（保留完整句子）
     - max_paragraphs > 0 时按段落数截断
     两者可叠加，以先到达的条件为准。
@@ -119,7 +119,7 @@ def build_response(
     """
     safe_answer = mask_output(answer)
 
-    # M-06: 回答长度截断
+    # 回答长度截断
     opts = req.options or {}
     max_length = opts.get("max_length", 0) or 0
     max_paragraphs = opts.get("max_paragraphs", 0) or 0
@@ -127,7 +127,9 @@ def build_response(
         safe_answer = _truncate_answer(safe_answer, max_length, max_paragraphs)
 
     # 如果传入了预提取的风险高亮则使用，否则自动提取
-    final_risk_highlights = risk_highlights if risk_highlights is not None else extract_risk_highlights(safe_answer)
+    # 注意：pre-extracted highlights 基于原始 answer，safe_answer 已完成脱敏和截断，
+    # 需要基于最终文本重新提取，以保证 start/end 位置与 safe_answer 对齐
+    final_risk_highlights = extract_risk_highlights(safe_answer)
 
     sources = build_citations(chunks) if chunks else []
 

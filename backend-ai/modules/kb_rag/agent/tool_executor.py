@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 from collections import OrderedDict
 from .pandas_agent import analyze as pandas_analyze
 from ..retrieval.retriever import retrieve as kb_lookup
-from ..schemas import AgentRunTraceObject
+from ..schemas import AgentRunTraceObject, AgentTraceNode
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ async def execute_tool(tool_name: str, args: Dict[str, Any], doctor_id: Optional
     try:
         if tool_name == "pandas_analyzer":
             result = await asyncio.wait_for(
-                pandas_analyze(args.get("dataset_ref", ""), args.get("query", "")),
+                asyncio.to_thread(pandas_analyze, args.get("dataset_ref", ""), args.get("query", "")),
                 timeout=30
             )
             return {"status": "completed", "result": result}
@@ -92,9 +92,8 @@ def update_agent_trace(run_id: str, node_name: str, status: str):
     if run_id not in _RUN_TRACES:
         logger.warning(f"update_agent_trace: run_id={run_id} not found in traces. Initializing.")
         init_agent_trace(run_id)
-    _RUN_TRACES[run_id].nodes.append({"name": node_name, "status": status})
+    _RUN_TRACES[run_id].nodes.append(AgentTraceNode(name=node_name, status=status))
 
 
-async def get_agent_run_trace(run_id: str) -> Optional[Dict]:
-    trace = _RUN_TRACES.get(run_id)
-    return trace.model_dump() if trace else None
+async def get_agent_run_trace(run_id: str) -> Optional[AgentRunTraceObject]:
+    return _RUN_TRACES.get(run_id)

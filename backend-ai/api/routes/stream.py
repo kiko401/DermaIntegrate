@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from config import settings
-from shared.config import TASK_TIMEOUT_SECONDS
+from shared.config import TASK_TIMEOUT_SECONDS, SSE_HEARTBEAT_INTERVAL
 from models.database import get_db, ImageResource as ImageDB, AITask as TaskDB, AIFeature as FeatureDB, async_session
 from pipeline.runner import run_pipeline_with_cancel
 
@@ -66,8 +66,9 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
         )
         inference_thread.start()
 
-        # M-16: 任务超时保护（从 shared/config 统一读取）
+        # 任务超时保护（从 shared/config 统一读取）
         _task_timeout = TASK_TIMEOUT_SECONDS
+        _heartbeat_interval = SSE_HEARTBEAT_INTERVAL
         last_event_time = asyncio.get_event_loop().time()
 
         try:
@@ -78,9 +79,9 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                     break
 
                 try:
-                    # M-16: 带超时的 queue.get()，超时说明推理线程卡住
+                    # 每隔 15 秒检查一次队列，超时则发送心跳
                     event_type, data = await asyncio.wait_for(
-                        queue.get(), timeout=_task_timeout
+                        queue.get(), timeout=_heartbeat_interval
                     )
                     last_event_time = asyncio.get_event_loop().time()
 
@@ -97,7 +98,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                             stage, percent = stage_map[step_name]
                             yield f"event: progress\ndata: {json.dumps({'stage': stage, 'percent': percent})}\n\n"
                         # 发送 step 事件（仅包含 step 和 message 字段，与文档一致）
-                        yield f"event: step\ndata: {json.dumps({'step': step_name, 'message': data.get('message', ''), 'data': data.get('data')})}\n\n"
+                        yield f"event: step\ndata: {json.dumps({'step': step_name, 'message': data.get('message', '')})}\n\n"
                     elif event_type == "error":
                         # 文档定义 error 事件格式为 {error: string}，转换 runner 发出的 {error_code, message}
                         error_msg = data.get("message", data.get("error", "未知错误"))
@@ -111,7 +112,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                                 task_res = await session.execute(
                                     select(TaskDB).where(TaskDB.task_id == task_id)
                                 )
-                                # M-17: 使用 scalar_one_or_none 避免 task 被删除时抛 NoResultFound
+                                # 使用 scalar_one_or_none 避免 task 被删除时抛 NoResultFound
                                 db_task = task_res.scalar_one_or_none()
                                 if db_task is None:
                                     logger.error(f"Task {task_id} not found when saving results (may have been deleted)")
@@ -145,12 +146,16 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                         break
 
                 except asyncio.TimeoutError:
-                    # M-16: queue.get() 超时，说明推理线程卡住超过 _task_timeout
+                    # 心跳：15秒无事件则发送心跳保活
+                    yield f"event: heartbeat\ndata: {json.dumps({})}\n\n"
+                    # 同时检查是否超过任务总超时
                     elapsed = asyncio.get_event_loop().time() - last_event_time
-                    logger.error(f"Task {task_id} appears stuck (no events for {elapsed:.0f}s). Forcing cancellation.")
-                    cancel_event.set()
-                    yield f"event: error\ndata: {json.dumps({'error': f'任务执行超时（{_task_timeout}秒），请稍后重试或联系管理员'})}\n\n"
-                    break
+                    if elapsed >= _task_timeout:
+                        logger.error(f"Task {task_id} appears stuck (no events for {elapsed:.0f}s). Forcing cancellation.")
+                        cancel_event.set()
+                        yield f"event: error\ndata: {json.dumps({'error': f'任务执行超时（{_task_timeout}秒），请稍后重试或联系管理员'})}\n\n"
+                        break
+                    continue
 
         except asyncio.CancelledError:
             cancel_event.set()

@@ -3,10 +3,6 @@
 
 MySQL 表 rag_model_configs 优先，环境变量兜底。
 缓存 TTL 2 分钟，写操作后主动失效。
-
-架构改进（M-02修复）：
-- 使用 shared.event_loop.AsyncExecutor 替代 asyncio.new_event_loop()
-- 避免在已有事件循环的线程中创建新循环
 """
 import os
 import logging

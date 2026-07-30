@@ -1,15 +1,20 @@
-import io
 import logging
+import re
 import asyncio
-import httpx
 from datetime import datetime
 from typing import Dict, Optional, List, Tuple
-from shared.config import ETL_CONNECT_TIMEOUT, ETL_READ_TIMEOUT
+
+import httpx
+
+from shared.config import (
+    ETL_CONNECT_TIMEOUT,
+    ETL_READ_TIMEOUT,
+    MAX_ETL_JOBS as _MAX_ETL_JOBS,
+)
 from ..ingest.parsers import extract_text_with_metadata
-from ..ingest.splitters import split_text
+from ..ingest.splitters import split_text, _get_chunk_position, _split_table_blocks
 from ..ingest.embeddings import generate_embeddings
-from ..ingest.vector_store import upsert_vectors_async, COLLECTION_NAME
-from ..ingest.bm25 import fit_bm25_incremental, fit_bm25_on_collection, generate_sparse_vectors_batch, get_collection_doc_count
+from ..ingest.vector_store import upsert_vectors_async
 from ..ingest.ner import extract_medical_entities, get_entity_signature
 from ..schemas import ETLJobStatus
 
@@ -17,73 +22,11 @@ logger = logging.getLogger(__name__)
 
 # 内存级 ETL 任务状态（上限从 shared/config 统一读取）
 _ETL_JOBS: Dict[str, ETLJobStatus] = {}
-from shared.config import MAX_ETL_JOBS as _MAX_ETL_JOBS
-
-
-def _get_chunk_position(chunk: Dict) -> str:
-    if chunk.get("is_first_chunk"):
-        return "first"
-    if chunk.get("is_last_chunk"):
-        return "last"
-    return "middle"
 
 
 def _derive_doc_title(filename: str) -> str:
     """从文件名推导文档标题（去掉常见扩展名）"""
-    import re
     return re.sub(r"\.(pdf|docx?|xlsx?|csv|txt|md)$", "", filename, flags=re.IGNORECASE)
-
-
-def _split_table_blocks(blocks: List[Dict], doc_id: int, doc_version_id: int) -> List[Dict]:
-    """表格文件切分：100行一组"""
-    if not blocks:
-        return []
-
-    TABLE_ROWS_PER_CHUNK = 100
-    chunks = []
-    chunk_index = 0
-
-    table_blocks = [b for b in blocks if b.get("is_table")]
-    non_table_blocks = [b for b in blocks if not b.get("is_table")]
-
-    for nt in non_table_blocks:
-        text = nt["text"].strip()
-        if not text:
-            continue
-        chunk_id = f"{doc_id}_{doc_version_id}_{str(chunk_index).zfill(3)}"
-        chunks.append({
-            "chunk_id": chunk_id, "chunk_index": chunk_index, "text": text,
-            "section_title": nt.get("section_title", ""),
-            "is_first_chunk": chunk_index == 0, "is_last_chunk": False,
-            "is_heading": nt.get("is_heading", False),
-        })
-        chunk_index += 1
-
-    for tb in table_blocks:
-        tm = tb.get("table_meta") or {}
-        row_count = tm.get("row_count", 0)
-        lines = tb["text"].split("\n")
-        group_count = max(1, (row_count + TABLE_ROWS_PER_CHUNK - 1) // TABLE_ROWS_PER_CHUNK)
-
-        for gi in range(group_count):
-            start_i = gi * TABLE_ROWS_PER_CHUNK
-            end_i = min(start_i + TABLE_ROWS_PER_CHUNK, len(lines))
-            group_text = "\n".join(lines[start_i:end_i])
-            chunk_id = f"{doc_id}_{doc_version_id}_{str(chunk_index).zfill(3)}"
-            chunks.append({
-                "chunk_id": chunk_id, "chunk_index": chunk_index, "text": group_text,
-                "section_title": tb.get("section_title", ""),
-                "is_first_chunk": False, "is_last_chunk": (gi == group_count - 1),
-                "is_heading": False, "is_table": True,
-                "table_meta": {**tm, "chunk_row_start": start_i, "chunk_row_end": end_i,
-                                "chunk_index": gi, "total_chunks": group_count},
-            })
-            chunk_index += 1
-
-    if chunks:
-        chunks[-1]["is_last_chunk"] = True
-    logger.info(f"Table split: {len(chunks)} chunks for doc_id={doc_id}")
-    return chunks
 
 
 def _prune_etl_jobs():
@@ -93,7 +36,7 @@ def _prune_etl_jobs():
     # 按 created_at 升序，删除最早的已完成任务
     sorted_jobs = sorted(
         [(k, v) for k, v in _ETL_JOBS.items() if v.created_at],
-        key=lambda x: x[1].created_at or ""
+        key=lambda x: x[1].created_at or "0"
     )
     remove_count = len(_ETL_JOBS) - _MAX_ETL_JOBS
     for k, _ in sorted_jobs[:remove_count]:
@@ -103,14 +46,15 @@ def _prune_etl_jobs():
 
 def _clean_text(text: str) -> str:
     """
-    M-13 增强清洗逻辑：
+    文本增强清洗流程：
     1. 去除多余空格、换行
-    2. regex 替换（可配置敏感模式）
-    3. 去除重复行（如连续重复的标题/分隔符）
-    4. 去除空值占位符（null/none/NA/-- 等）
+    2. 去除空值占位符（null/none/NA/-- 等）
+    3. 去除连续重复行（如多个空行分隔符 ------- / **** 等）
+    4. 去除句末残余特殊字符
+    5. 去除首尾非文字符号（如 #### 标题边框）
+    6. 合并孤立单字符（医学文本中无意义）
+    7. 再次清理多余空格
     """
-    import re
-
     # 1. 去除多余空格、换行
     text = re.sub(r'\s+', ' ', text).strip()
 
@@ -150,7 +94,7 @@ async def _fetch_from_database(
     chunk_field: str,
 ) -> List[Dict]:
     """
-    M-13 数据库源 ETL：从 MySQL/PostgreSQL 等数据库拉取数据。
+    从 MySQL/PostgreSQL 等关系数据库拉取结构化数据并转换为文本。
 
     Args:
         db_type: mysql | postgresql
@@ -242,7 +186,7 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
             logger.error(f"Failed to fetch URL for ETL: {e}")
             raise RuntimeError(f"Failed to fetch source URL: {e}")
 
-        # URL 文件大小限制，默认 50MB（M-12）
+        # URL 文件大小限制，默认 50MB
         MAX_URL_FILE_SIZE = 50 * 1024 * 1024
         if len(content) > MAX_URL_FILE_SIZE:
             raise RuntimeError(f"URL file size {len(content)} exceeds limit {MAX_URL_FILE_SIZE}MB")
@@ -262,7 +206,7 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
             raise RuntimeError(f"Failed to start ETL task: {e}")
 
     elif req.source_type == "database":
-        # M-13: 数据库源 ETL
+        # 数据库源 ETL
         db_config = req.source_config or {}
         db_type = db_config.get("db_type", "mysql")
         table_name = db_config.get("table_name", "")
@@ -334,8 +278,7 @@ async def extract_and_ingest(
         department_id: Optional[int] = None,
 ):
     """
-    ETL 主流程：抽取 -> 清洗 -> 切分 -> NER 实体抽取 -> BM25 增量拟合 ->
-    Dense+Sparse 混合向量生成 -> Qdrant 双重索引写入
+    ETL 主流程：抽取 -> 清洗 -> 切分 -> NER 实体抽取 -> Dense 向量生成 -> Qdrant 写入
 
     Payload 完整元数据与 ingestion.py 保持一致。
     """
@@ -390,22 +333,12 @@ async def extract_and_ingest(
             c["entity_sig"] = get_entity_signature(chunk_text)
             texts.append(chunk_text)
 
-        # ===== 第5步：BM25 增量拟合 + Sparse 向量 =====
-        job.stage = "bm25_fitting"
-        job.progress = 58
-        existing_count = get_collection_doc_count(COLLECTION_NAME)
-        if existing_count == 0:
-            fit_bm25_on_collection(COLLECTION_NAME, texts)
-        else:
-            fit_bm25_incremental(COLLECTION_NAME, texts)
-        sparse_vectors = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
-
-        # ===== 第6步：Dense 向量 =====
+        # ===== 第5步：Dense 向量 =====
         job.stage = "embedding"
         job.progress = 68
         vectors = generate_embeddings(texts)
 
-        # ===== 第7步：构建完整 Payload =====
+        # ===== 第6步：构建完整 Payload =====
         job.stage = "indexing"
         job.progress = 85
         payloads = []
@@ -441,8 +374,8 @@ async def extract_and_ingest(
             payload = {k: v for k, v in payload.items() if v is not None and v != ""}
             payloads.append(payload)
 
-        # ===== 第8步：写入 Qdrant（双重索引）=====
-        await upsert_vectors_async(vectors, payloads, sparse_vectors)
+        # ===== 第7步：写入 Qdrant（纯 Dense 向量）=====
+        await upsert_vectors_async(vectors, payloads)
 
         job.status = "succeeded"
         job.progress = 100
@@ -462,6 +395,32 @@ async def get_etl_job_status(job_id: str) -> Optional[Dict]:
     """查询 ETL 任务状态"""
     job = _ETL_JOBS.get(job_id)
     return job.model_dump() if job else None
+
+
+def get_etl_jobs_list(status: Optional[str] = None, limit: int = 100) -> List[Dict]:
+    """
+    查询 ETL 任务列表。
+
+    Args:
+        status: 按状态筛选（pending/running/succeeded/failed），None 则返回全部
+        limit: 返回数量限制
+
+    Returns:
+        符合条件的 ETL 任务列表（dict 形式）
+    """
+    all_jobs = list(_ETL_JOBS.values())
+    # 按 created_at 降序排列
+    sorted_jobs = sorted(
+        all_jobs,
+        key=lambda x: x.created_at or "0",
+        reverse=True
+    )
+    # 按状态筛选
+    if status:
+        sorted_jobs = [j for j in sorted_jobs if j.status == status]
+    # 限制数量
+    limited_jobs = sorted_jobs[:limit]
+    return [job.model_dump() for job in limited_jobs]
 
 
 def _build_clinical_text(patient_context: Dict, case_text: str, case_type: str) -> str:
@@ -505,7 +464,7 @@ async def clinical_etl_and_ingest(
 ) -> Tuple[int, str]:
     """
     临床病例 ETL 主流程：文本构建 -> 清洗 -> 切分 -> NER 实体抽取 ->
-    BM25 增量拟合 -> Dense+Sparse 混合向量生成 -> Qdrant 双重索引写入。
+    Dense 向量生成 -> Qdrant 写入。
 
     Payload 完整元数据（与 ingestion.py 保持一致），含：
     - 基础ID（kb_id/doc_id/doc_version_id/chunk_id）
@@ -522,8 +481,8 @@ async def clinical_etl_and_ingest(
     # 2. 清洗
     cleaned_text = _clean_text(raw_text)
 
-    # 3. 切分（doc_id 用 0 占位，kb_id 相同即可检索）
-    doc_id = 0
+    # 3. 切分（doc_id 使用 kb_id 以保证不同 kb_id 的 chunk_id 不互相覆盖）
+    doc_id = kb_id
     chunks = split_text(cleaned_text, chunk_size, chunk_overlap, doc_id, doc_version_id)
     if not chunks:
         raise ValueError("clinical ETL: split produced no chunks")
@@ -539,18 +498,10 @@ async def clinical_etl_and_ingest(
         ]
         c["entity_sig"] = get_entity_signature(c["text"])
 
-    # 5. BM25 增量拟合 + Sparse 向量
-    existing_count = get_collection_doc_count(COLLECTION_NAME)
-    if existing_count == 0:
-        fit_bm25_on_collection(COLLECTION_NAME, texts)
-    else:
-        fit_bm25_incremental(COLLECTION_NAME, texts)
-    sparse_vectors = generate_sparse_vectors_batch(texts, COLLECTION_NAME)
-
-    # 6. Dense embedding
+    # 5. Dense embedding
     vectors = generate_embeddings(texts)
 
-    # 7. Payload 构建（含完整元数据与权限隔离字段）
+    # 6. Payload 构建（含完整元数据与权限隔离字段）
     payloads = []
     for c in chunks:
         payload = {
@@ -571,6 +522,7 @@ async def clinical_etl_and_ingest(
             # 访问控制
             "access_level": access_level,
             "department_id": department_id,
+            "doctor_id": doctor_id,
             # NER 实体
             "entities": c.get("entities", []),
             "entity_sig": c.get("entity_sig", {}),
@@ -578,8 +530,8 @@ async def clinical_etl_and_ingest(
         payload = {k: v for k, v in payload.items() if v is not None and v != ""}
         payloads.append(payload)
 
-    # 8. 混合向量写入 Qdrant
-    await upsert_vectors_async(vectors, payloads, sparse_vectors)
+    # 7. 纯 Dense 向量写入 Qdrant
+    await upsert_vectors_async(vectors, payloads)
 
     logger.info(f"Clinical ETL done: kb_id={kb_id}, case_type={case_type}, chunks={len(vectors)}")
     return len(vectors), "succeeded"
