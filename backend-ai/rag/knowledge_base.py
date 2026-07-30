@@ -143,6 +143,7 @@ class RAGKnowledgeBase:
                         "doc_code": doc_code,
                         "doc_id_str": doc_id_str,
                         "kb_id": 0,  # 0 表示默认知识库
+                        "access_level": "public",  # 内置文档对所有角色可见
                         "doc_version_id": 1,
                         "chunk_id": f"{doc_id_str}_001",
                         "text": clean_text,
