@@ -620,17 +620,19 @@ workflow.add_edge("response_finalize", END)
 app_workflow = workflow.compile()
 
 
-async def run_agent_workflow(req: ChatRequest) -> ChatResponse:
+async def run_agent_workflow(req: ChatRequest, run_id: str | None = None) -> ChatResponse:
     """
     运行智能体工作流
 
     Args:
         req: ChatRequest 请求对象
+        run_id: 外部传入的 run_id；若不传则内部生成
 
     Returns:
         ChatResponse: 完整的响应对象
     """
-    run_id = str(uuid.uuid4())
+    if not run_id:
+        run_id = str(uuid.uuid4())
     init_agent_trace(run_id)
 
     # 初始化状态

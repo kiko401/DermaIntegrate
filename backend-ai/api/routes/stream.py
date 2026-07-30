@@ -97,7 +97,7 @@ async def stream_diagnosis(request: Request, task_id: str, db: AsyncSession = De
                             stage, percent = stage_map[step_name]
                             yield f"event: progress\ndata: {json.dumps({'stage': stage, 'percent': percent})}\n\n"
                         # 发送 step 事件（仅包含 step 和 message 字段，与文档一致）
-                        yield f"event: step\ndata: {json.dumps({'step': step_name, 'message': data.get('message', '')})}\n\n"
+                        yield f"event: step\ndata: {json.dumps({'step': step_name, 'message': data.get('message', ''), 'data': data.get('data')})}\n\n"
                     elif event_type == "error":
                         # 文档定义 error 事件格式为 {error: string}，转换 runner 发出的 {error_code, message}
                         error_msg = data.get("message", data.get("error", "未知错误"))
