@@ -462,6 +462,62 @@ async function get(doctor, conversationId) {
   return toConvObject(row || null);
 }
 
+async function rename(doctor, conversationId, body = {}) {
+  const title = String(body.title || '').trim();
+  if (!title) {
+    const err = new Error('会话标题不能为空');
+    err.status = 400;
+    err.code = 'TITLE_REQUIRED';
+    throw err;
+  }
+  if (title.length > 200) {
+    const err = new Error('会话标题不能超过 200 个字符');
+    err.status = 400;
+    err.code = 'TITLE_TOO_LONG';
+    throw err;
+  }
+
+  const [[convRow]] = await db.query(
+    `SELECT * FROM rag_conversations WHERE id = ? AND status != 'deleted'`,
+    [conversationId]
+  );
+  if (!convRow || !canAccessConversation(doctor, convRow)) {
+    const err = new Error('会话不存在');
+    err.status = 404;
+    err.code = 'CONV_NOT_FOUND';
+    throw err;
+  }
+
+  await db.query(
+    `UPDATE rag_conversations
+     SET title = ?
+     WHERE id = ? AND status != 'deleted'`,
+    [title, conversationId]
+  );
+
+  return await get(doctor, conversationId);
+}
+
+async function remove(doctor, conversationId) {
+  const [[convRow]] = await db.query(
+    `SELECT * FROM rag_conversations WHERE id = ? AND status != 'deleted'`,
+    [conversationId]
+  );
+  if (!convRow || !canAccessConversation(doctor, convRow)) {
+    const err = new Error('会话不存在');
+    err.status = 404;
+    err.code = 'CONV_NOT_FOUND';
+    throw err;
+  }
+
+  await db.query(
+    `UPDATE rag_conversations
+     SET status = 'deleted'
+     WHERE id = ? AND status != 'deleted'`,
+    [conversationId]
+  );
+}
+
 // ── GET /api/rag/conversations/:id/messages ────────────────────────────────
 async function listMessages(doctor, conversationId, query = {}) {
   const conv = await get(doctor, conversationId);
@@ -524,6 +580,7 @@ async function sendMessage(doctor, conversationId, body) {
     history,
     kb_ids: selectedKbIds,
     patient_context: patientContext,
+    doctor_id: doctor.id,
     options,
   };
 
@@ -609,6 +666,7 @@ async function directChat(doctor, body) {
     history: history.slice(-20),
     kb_ids: selectedKbIds,
     patient_context: patientContext,
+    doctor_id: doctor.id,
     options,
   };
 
@@ -686,49 +744,69 @@ async function streamChat(doctor, conversationId, query, res) {
   const cfg = await getSystemConfigs();
   const turns = cfg.context_window_turns || 6;
   const history = await loadHistory(conversationId, turns);
-  const selectedKbIds = resolveKbIds(query.kb_ids || query.selected_kb_ids || query.selectedKbIds, safeJson(convRow.selected_kb_ids, []));
+  const selectedKbIds = resolveKbIds(
+    query.kb_ids || query.selected_kb_ids || query.selectedKbIds,
+    safeJson(convRow.selected_kb_ids, [])
+  );
   const patientContext = safeJson(convRow.patient_context_json, null);
 
   // 用户输入前置 PHI 清洗
   const { text: cleanedQuestion } = sanitizeClinicalText(question, {});
 
-  await msgSvc.saveUserMessage(conversationId, cleanedQuestion);
+  // 构造发往 AI 域的完整请求体（POST JSON body，避免 URL 超长与 PHI 进入 access log）
+  const chatRequest = {
+    conversation_id: conversationId,
+    question: cleanedQuestion,
+    history,
+    kb_ids: selectedKbIds,
+    patient_context: patientContext,
+    doctor_id: doctor.id,
+    options: {
+      top_k: query.top_k != null ? Number(query.top_k) : (cfg.top_k ?? 5),
+      similarity_threshold: query.similarity_threshold != null
+        ? Number(query.similarity_threshold) : (cfg.similarity_threshold ?? 0.35),
+      stream: true,
+      enable_tools: query.enable_tools != null
+        ? (query.enable_tools === 'true' || query.enable_tools === true)
+        : (cfg.enable_tools ?? true),
+      enable_agent: query.enable_agent != null
+        ? (query.enable_agent === 'true' || query.enable_agent === true)
+        : (cfg.enable_agent ?? false),
+      use_rerank: query.use_rerank != null
+        ? (query.use_rerank === 'true' || query.use_rerank === true)
+        : (cfg.enable_rerank ?? false),
+      max_length: query.max_length != null ? Number(query.max_length) : (cfg.max_length ?? 0),
+      max_paragraphs: query.max_paragraphs != null ? Number(query.max_paragraphs) : (cfg.max_paragraphs ?? 0),
+    },
+  };
 
-  const startAt = Date.now();
-
-  // Build query string for AI domain
-  const qs = new URLSearchParams();
-  qs.set('question', cleanedQuestion);
-  qs.set('top_k', String(query.top_k ?? cfg.top_k ?? 5));
-  qs.set('similarity_threshold', String(query.similarity_threshold ?? cfg.similarity_threshold ?? 0.35));
-  qs.set('enable_tools', String(query.enable_tools ?? (cfg.enable_tools ? 'true' : 'false')));
-  qs.set('enable_agent', String(query.enable_agent ?? (cfg.enable_agent ? 'true' : 'false')));
-  qs.set('use_rerank', String(query.use_rerank ?? (cfg.enable_rerank ? 'true' : 'false')));
-  qs.set('max_length', String(query.max_length ?? cfg.max_length ?? 0));
-  qs.set('max_paragraphs', String(query.max_paragraphs ?? cfg.max_paragraphs ?? 0));
-  if (patientContext) qs.set('patient_context', JSON.stringify(patientContext));
-  if (history.length) qs.set('history', JSON.stringify(history));
-  selectedKbIds.forEach(id => qs.append('kb_ids', String(id)));
-
-  const aiUrlStr = `${AI_BASE_URL}/rag/stream/${conversationId}?${qs.toString()}`;
+  const aiUrlStr = `${AI_BASE_URL}/rag/stream/${conversationId}`;
   const aiUrl = new URL(aiUrlStr);
   const useHttps = aiUrl.protocol === 'https:';
   const transport = useHttps ? https : http;
+  const bodyStr = JSON.stringify(chatRequest);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
+  const startAt = Date.now();
+
   const reqOptions = {
     hostname: aiUrl.hostname,
     port: parseInt(aiUrl.port) || (useHttps ? 443 : 80),
-    path: aiUrl.pathname + aiUrl.search,
-    method: 'GET',
-    headers: { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' },
+    path: aiUrl.pathname,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
+      Accept: 'text/event-stream',
+      'Cache-Control': 'no-cache',
+    },
   };
 
-  let buffer = '';
+  let sseBuffer = '';
 
   const aiReq = transport.request(reqOptions, (aiRes) => {
     if (aiRes.statusCode !== 200) {
@@ -738,13 +816,13 @@ async function streamChat(doctor, conversationId, query, res) {
     }
 
     aiRes.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
+      sseBuffer += chunk.toString('utf8');
       res.write(chunk);
     });
 
     aiRes.on('end', async () => {
-      // Parse buffer to find the result event for DB persistence
-      const blocks = buffer.split(/\n\n/);
+      // 从缓冲区解析 result 事件，用于落库
+      const blocks = sseBuffer.split(/\n\n/);
       let resultPayload = null;
       for (const block of blocks) {
         if (!block.trim()) continue;
@@ -755,17 +833,23 @@ async function streamChat(doctor, conversationId, query, res) {
           else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
         }
         if (eventType === 'result' && dataStr) {
-          try { resultPayload = JSON.parse(dataStr); } catch { /* ignore */ }
+          try { resultPayload = JSON.parse(dataStr); } catch { /* 解析失败则跳过 */ }
         }
       }
 
       if (resultPayload) {
+        // 若 AI 域未附带 disclaimer，补发给前端并注入响应
         if (!resultPayload.disclaimer) {
           resultPayload.disclaimer = cfg.disclaimer_text || DEFAULT_DISCLAIMER;
-          // AI domain omitted disclaimer — send it to client now so frontend can display it
-          res.write(`event: disclaimer\ndata: ${JSON.stringify({ disclaimer: resultPayload.disclaimer })}\n\n`);
+          try {
+            res.write(`event: disclaimer\ndata: ${JSON.stringify({ disclaimer: resultPayload.disclaimer })}\n\n`);
+          } catch { /* 客户端已断开，忽略 */ }
         }
+
         try {
+          // 用户消息在确认 AI 域有效响应后才落库，避免 AI 域失败时产生孤立消息
+          await msgSvc.saveUserMessage(conversationId, cleanedQuestion);
+
           const assistantMsg = await msgSvc.saveAssistantMessage(conversationId, resultPayload);
           if (Array.isArray(resultPayload.sources) && resultPayload.sources.length) {
             await msgSvc.saveSources(assistantMsg.id, resultPayload.sources);
@@ -777,7 +861,7 @@ async function streamChat(doctor, conversationId, query, res) {
             message_id: assistantMsg.id,
             kb_ids: selectedKbIds,
             trace_id: resultPayload.trace_id,
-            request_summary: question,
+            request_summary: cleanedQuestion,
             response_summary: resultPayload.answer || '',
             latency_ms: Math.round(Date.now() - startAt),
             status: resultPayload.status === 'blocked' ? 'blocked' : 'success',
@@ -812,7 +896,9 @@ async function streamChat(doctor, conversationId, query, res) {
 
   res.on('close', () => { aiReq.destroy(); });
 
+  // 写入请求体后结束请求（POST 必须显式写入 body）
+  aiReq.write(bodyStr);
   aiReq.end();
 }
 
-module.exports = { list, listForAiExport, create, get, listMessages, sendMessage, directChat, streamChat };
+module.exports = { list, listForAiExport, create, get, rename, remove, listMessages, sendMessage, directChat, streamChat };

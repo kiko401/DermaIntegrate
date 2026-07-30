@@ -28,6 +28,9 @@ const sidebarCollapsed = ref(false)
 const conversations = ref([])
 const activeConvId = ref(null)
 const messages = ref([])
+const conversationActionId = ref(null)
+const editingConvId = ref(null)
+const editingConvTitle = ref('')
 const knowledgeBases = ref([])
 const selectedKbIds = ref([])
 const inputText = ref('')
@@ -146,12 +149,92 @@ async function newConversation() {
 }
 
 async function selectConversation(id) {
+  if (editingConvId.value != null && editingConvId.value !== id) {
+    cancelConversationRename()
+  }
   activeView.value = 'chat'
   activeConvId.value = id
   messages.value = []
   const { data } = await apiFetch(`/api/rag/conversations/${id}/messages`)
   messages.value = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : [])
   scrollToBottom()
+}
+
+function startConversationRename(conv) {
+  if (conversationActionId.value === conv.id) return
+  editingConvId.value = conv.id
+  editingConvTitle.value = String(conv?.title || '').trim() || '未命名会话'
+  nextTick(() => {
+    const input = document.querySelector(`[data-conv-rename-input="${conv.id}"]`)
+    input?.focus()
+    input?.select?.()
+  })
+}
+
+function cancelConversationRename() {
+  editingConvId.value = null
+  editingConvTitle.value = ''
+}
+
+async function submitConversationRename(conv) {
+  const currentTitle = String(conv?.title || '').trim() || '未命名会话'
+  const title = editingConvTitle.value.trim()
+  if (!title) {
+    window.alert('会话名称不能为空')
+    return
+  }
+  if (title === currentTitle) {
+    cancelConversationRename()
+    return
+  }
+
+  conversationActionId.value = conv.id
+  try {
+    const { ok, data } = await apiFetch(`/api/rag/conversations/${conv.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    })
+    if (!ok) throw new Error(data?.message || data?.error || '重命名失败')
+
+    const index = conversations.value.findIndex(item => item.id === conv.id)
+    if (index >= 0) conversations.value[index] = data
+    cancelConversationRename()
+  } catch (error) {
+    window.alert(error.message || '重命名失败')
+  } finally {
+    conversationActionId.value = null
+  }
+}
+
+async function deleteConversation(conv) {
+  if (!window.confirm(`确认删除会话「${conv.title || '未命名会话'}」？`)) return
+
+  conversationActionId.value = conv.id
+  try {
+    const { ok, data } = await apiFetch(`/api/rag/conversations/${conv.id}`, {
+      method: 'DELETE',
+    })
+    if (!ok) throw new Error(data?.message || data?.error || '删除失败')
+
+    const remaining = conversations.value.filter(item => item.id !== conv.id)
+    conversations.value = remaining
+
+    if (activeConvId.value === conv.id) {
+      const nextConv = remaining[0] || null
+      if (nextConv) {
+        await selectConversation(nextConv.id)
+      } else {
+        activeConvId.value = null
+        messages.value = []
+      }
+    }
+    if (editingConvId.value === conv.id) cancelConversationRename()
+  } catch (error) {
+    window.alert(error.message || '删除失败')
+  } finally {
+    conversationActionId.value = null
+  }
 }
 
 async function sendMessage() {
@@ -229,7 +312,16 @@ async function sendMessage() {
         } else if (eventType === 'disclaimer') {
           msg.disclaimer = payload.disclaimer
         } else if (eventType === 'progress') {
-          if (!msg.content_markdown && payload.step) msg._status = payload.step
+          // 节点进度事件：展示当前执行阶段文字提示
+          if (!msg.content_markdown) msg._status = payload.message || payload.step || msg._status
+        } else if (eventType === 'thinking') {
+          // 节点开始事件：AI 域推送节点启动提示，比 progress 更细粒度
+          if (!msg.content_markdown) msg._status = payload.message || msg._status
+        } else if (eventType === 'chunks') {
+          // 检索完成事件：检索结果可提前展示，不等 result 事件
+          if (Array.isArray(payload.chunks) && payload.chunks.length) {
+            msg._status = `已检索到 ${payload.chunks.length} 条参考，正在生成回答...`
+          }
         } else if (eventType === 'error') {
           msg.content_markdown = `请求失败：${payload.message || payload.code}`
           msg._streaming = false
@@ -284,7 +376,10 @@ function toggleKb(id) {
   const i = selectedKbIds.value.indexOf(id)
   if (i >= 0) selectedKbIds.value.splice(i, 1)
   else selectedKbIds.value.push(id)
-  if (selectedKbIds.value.length) kbRequiredHint.value = false
+  if (selectedKbIds.value.length) {
+    kbRequiredHint.value = false
+    kbDrawerOpen.value = false
+  }
   if (!manageSelectedKbId.value) manageSelectedKbId.value = id
 }
 
@@ -566,24 +661,79 @@ function formatDate(value) {
           <span class="muted-text">仅显示通用问答</span>
         </div>
         <div class="conversation-list">
-          <button
+          <div
             v-for="conv in conversations"
             :key="conv.id"
             class="conv-item"
             :class="{ active: conv.id === activeConvId }"
+            role="button"
+            tabindex="0"
             @click="selectConversation(conv.id)"
+            @keydown.enter.prevent="selectConversation(conv.id)"
+            @keydown.space.prevent="selectConversation(conv.id)"
             @mouseenter="hoverConvId = conv.id"
             @mouseleave="hoverConvId = null"
           >
             <div class="conv-main">
-              <div class="conv-title">{{ conv.title || '未命名会话' }}</div>
-              <div class="conv-time">{{ formatDate(conv.updated_at || conv.created_at) }}</div>
+              <template v-if="editingConvId === conv.id">
+                <input
+                  :data-conv-rename-input="conv.id"
+                  v-model="editingConvTitle"
+                  class="conv-title-input"
+                  maxlength="200"
+                  @click.stop
+                  @keydown.enter.prevent="submitConversationRename(conv)"
+                  @keydown.esc.prevent="cancelConversationRename"
+                />
+              </template>
+              <template v-else>
+                <div class="conv-title">{{ conv.title || '未命名会话' }}</div>
+                <div class="conv-time">{{ formatDate(conv.updated_at || conv.created_at) }}</div>
+              </template>
             </div>
             <div class="conv-actions" :class="{ visible: hoverConvId === conv.id }">
-              <span class="icon-btn disabled" title="当前版本暂未开放重命名">✎</span>
-              <span class="icon-btn disabled" title="当前版本暂未开放删除">🗑</span>
+              <template v-if="editingConvId === conv.id">
+                <button
+                  class="icon-btn"
+                  type="button"
+                  title="保存会话名称"
+                  :disabled="conversationActionId === conv.id"
+                  @click.stop="submitConversationRename(conv)"
+                >
+                  ✓
+                </button>
+                <button
+                  class="icon-btn"
+                  type="button"
+                  title="取消重命名"
+                  :disabled="conversationActionId === conv.id"
+                  @click.stop="cancelConversationRename"
+                >
+                  ✕
+                </button>
+              </template>
+              <template v-else>
+                <button
+                  class="icon-btn"
+                  type="button"
+                  title="重命名会话"
+                  :disabled="conversationActionId === conv.id"
+                  @click.stop="startConversationRename(conv)"
+                >
+                  ✎
+                </button>
+                <button
+                  class="icon-btn"
+                  type="button"
+                  title="删除会话"
+                  :disabled="conversationActionId === conv.id"
+                  @click.stop="deleteConversation(conv)"
+                >
+                  🗑
+                </button>
+              </template>
             </div>
-          </button>
+          </div>
           <div v-if="!conversations.length" class="empty-note">暂无通用问答会话</div>
         </div>
       </div>
@@ -1350,6 +1500,7 @@ function formatDate(value) {
 
 .conv-main {
   min-width: 0;
+  flex: 1;
 }
 
 .conv-title,
@@ -1361,6 +1512,23 @@ function formatDate(value) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conv-title-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #16324f;
+  font-size: 13px;
+  outline: none;
+}
+
+.conv-title-input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
 .conv-actions {
@@ -1381,8 +1549,12 @@ function formatDate(value) {
   justify-content: center;
   border-radius: 8px;
   background: rgba(255,255,255,0.9);
+  border: none;
+  color: #64748b;
+  cursor: pointer;
 }
 
+.icon-btn:disabled,
 .icon-btn.disabled {
   color: #9ca3af;
   cursor: not-allowed;
@@ -1829,6 +2001,14 @@ function formatDate(value) {
   display: flex;
   justify-content: flex-end;
   z-index: 2000;
+}
+
+.drawer-backdrop-transparent {
+  background: transparent;
+}
+
+.drawer-backdrop-left {
+  justify-content: flex-start;
 }
 
 .drawer-panel,

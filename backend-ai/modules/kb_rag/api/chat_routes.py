@@ -101,3 +101,44 @@ async def stream_chat_endpoint(
         error_safe_stream(),
         media_type="text/event-stream"
     )
+
+
+class StreamChatRequest(ChatRequest):
+    """
+    POST /rag/stream/{conversation_id} 的请求体。
+
+    继承自 ChatRequest，新增 stream 标志（固定为 True）。
+    应用域通过此接口以 JSON body 传递完整请求参数（含 history / patient_context），
+    避免将大型 JSON 结构序列化到 URL query string，规避 URL 长度限制与 PHI 进入 access log 的风险。
+    """
+    pass
+
+
+@router.post("/stream/{conversation_id}")
+async def stream_chat_post_endpoint(conversation_id: int, req: StreamChatRequest):
+    """
+    SSE 流式问答接口（POST 方法）。
+
+    与 GET /stream/{conversation_id} 功能完全一致，但以 JSON body 传参，
+    适合 history 较长或存在 patient_context 的场景，避免 URL 超长问题。
+
+    conversation_id 路径参数与 req.conversation_id 必须一致，
+    以 req.conversation_id 为准（路径参数仅用于路由匹配）。
+    """
+    # 强制 stream=True，确保选项与接口语义一致
+    if req.options is not None:
+        req.options["stream"] = True
+
+    async def error_safe_stream():
+        try:
+            async for chunk in stream_rag_workflow(req):
+                yield chunk
+        except Exception as e:
+            logger.error(f"Stream POST error for conversation {conversation_id}: {e}", exc_info=True)
+            payload = {"code": "RAG_STREAM_ERROR", "message": str(e)}
+            yield f"event: error\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        error_safe_stream(),
+        media_type="text/event-stream"
+    )

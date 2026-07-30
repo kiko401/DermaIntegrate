@@ -231,17 +231,16 @@ async def intent_route(state: AgentState) -> AgentState:
         state["route"] = "tool_call"
         return state
 
-    # 如果有患者上下文，优先考虑患者上下文问答
-    if req.patient_context:
-        state["route"] = "patient_context_query"
-        return state
-
     # 调用 LLM 进行意图分类
     rewritten_query, route = await rewrite_and_classify(req.question, req.history)
 
     # 校验路由类型有效性
     if route not in VALID_ROUTES:
         route = "knowledge_query"
+
+    # 患者上下文用于增强知识问答，不应覆盖闲聊/规则/工具等既有路由语义
+    if req.patient_context and route == "knowledge_query":
+        route = "patient_context_query"
 
     state["rewritten_query"] = rewritten_query
     state["route"] = route
@@ -556,18 +555,21 @@ workflow.add_edge("response_finalize", END)
 app_workflow = workflow.compile()
 
 
-async def run_agent_workflow(req: ChatRequest) -> ChatResponse:
+async def run_agent_workflow(req: ChatRequest, run_id: Optional[str] = None) -> ChatResponse:
     """
     运行智能体工作流
 
     Args:
-        req: ChatRequest 请求对象
+        req: 请求对象
+        run_id: 外部传入时复用，不传时自动生成
 
     Returns:
         ChatResponse: 完整的响应对象
     """
-    run_id = str(uuid.uuid4())
-    init_agent_trace(run_id)
+    if not run_id:
+        run_id = str(uuid.uuid4())
+        init_agent_trace(run_id)
+    # 外部传入 run_id 时，调用方已完成 init_agent_trace，此处不重复初始化
 
     # 初始化状态
     initial_state: AgentState = {
