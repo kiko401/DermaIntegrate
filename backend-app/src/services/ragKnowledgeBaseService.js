@@ -278,6 +278,11 @@ async function remove(doctor, kbId, mode = 'logical') {
       );
     } catch (e) {
       console.error(`[remove kb] physical index delete failed for kb ${kbId}:`, e.message);
+      const err = new Error('向量索引删除失败，数据库记录已软删，请手动清理 AI 域索引');
+      err.status = 207;
+      err.code = 'INDEX_DELETE_FAILED';
+      err.detail = e.message;
+      throw err;
     }
   }
 }
@@ -403,16 +408,41 @@ async function clone(doctor, kbId, body) {
         body: { kb: await get(doctor, newKb.id), clone_result: aiRes.data },
       };
     } catch (aiError) {
-      // AI 域不可用时，DB 主数据已克隆成功，不回滚；向量索引可后续通过重建索引补充。
+      // AI 域 clone-index 失败：DB 主数据已写入，执行补偿清理后向调用方报错。
       console.error(`[clone kb] clone-index failed for kb ${newKb.id}:`, aiError.message);
-      return {
-        status: 201,
-        body: {
-          kb: await get(doctor, newKb.id),
-          clone_result: null,
-          warning: 'AI 域不可用，文档主数据已克隆但向量索引未复制，可在文档管理中手动触发重建索引。',
-        },
-      };
+      try {
+        await axios.post(
+          `${process.env.RAG_AI_BASE_URL}/rag/delete-index`,
+          { kb_id: newKb.id, delete_all: true },
+          { headers: { 'X-Internal-Token': process.env.X_INTERNAL_SECRET } }
+        );
+      } catch {}
+      const conn2 = await db.getConnection();
+      try {
+        await conn2.beginTransaction();
+        const [targetDocs2] = await conn2.query(
+          `SELECT id FROM rag_documents WHERE kb_id = ?`, [newKb.id]
+        );
+        const targetDocIds2 = targetDocs2.map((d) => d.id);
+        if (targetDocIds2.length) {
+          await conn2.query(`UPDATE rag_documents SET active_version_id = NULL WHERE id IN (?)`, [targetDocIds2]);
+          await conn2.query(`DELETE FROM rag_document_versions WHERE doc_id IN (?)`, [targetDocIds2]);
+          await conn2.query(`DELETE FROM rag_documents WHERE id IN (?)`, [targetDocIds2]);
+        }
+        await conn2.query(`DELETE FROM rag_knowledge_base_members WHERE kb_id = ?`, [newKb.id]);
+        await conn2.query(`DELETE FROM rag_knowledge_bases WHERE id = ?`, [newKb.id]);
+        await conn2.commit();
+      } catch (cleanupError) {
+        await conn2.rollback();
+        console.error(`[clone kb] ai-error cleanup failed for kb ${newKb.id}:`, cleanupError.message);
+      } finally {
+        conn2.release();
+      }
+      const err = new Error('AI 域向量索引克隆失败，已回滚新知识库');
+      err.status = 502;
+      err.code = 'CLONE_INDEX_FAILED';
+      err.detail = aiError.message;
+      throw err;
     }
   } catch (error) {
     // 仅在文档主数据写入过程中出错时才补偿清理（AI 域错误已在内层 catch 处理）
@@ -772,6 +802,11 @@ async function reviewUpgradeRequest(doctor, requestId, body) {
         );
       } catch (e) {
         console.error(`[upgrade approve] clone-index failed for request ${requestId}:`, e.message);
+        const err = new Error('升级申请已审批通过，但 AI 域向量索引克隆失败，请在文档管理中手动触发重建索引');
+        err.status = 207;
+        err.code = 'CLONE_INDEX_FAILED';
+        err.detail = e.message;
+        throw err;
       }
     }
   }

@@ -60,6 +60,7 @@ router.patch('/upgrade-requests/:requestId', requireAdmin, async (req, res) => {
     if (e.status === 400) return res.status(400).json({ error: e.code || 'INVALID_PARAMS', message: e.message });
     if (e.status === 404) return res.status(404).json({ error: e.code || 'NOT_FOUND', message: e.message });
     if (e.status === 409) return res.status(409).json({ error: e.code || 'CONFLICT', message: e.message });
+    if (e.status === 207) return res.status(207).json({ error: e.code || 'CLONE_INDEX_FAILED', message: e.message, detail: e.detail });
     res.status(500).json({ error: 'INTERNAL_ERROR', message: e.message });
   }
 });
@@ -97,6 +98,7 @@ router.delete('/:kbId', requireAdmin, async (req, res) => {
     if (e.status === 404) return res.status(404).json({ error: e.code || 'KB_NOT_FOUND', message: e.message });
     if (e.status === 403) return res.status(403).json({ error: e.code || 'FORBIDDEN', message: e.message });
     if (e.status === 409) return res.status(409).json({ error: e.code || e.message, message: e.message });
+    if (e.status === 207) return res.status(207).json({ error: e.code || 'INDEX_DELETE_FAILED', message: e.message, detail: e.detail });
     res.status(500).json({ error: 'INTERNAL_ERROR', message: e.message });
   }
 });
@@ -110,6 +112,7 @@ router.post('/:kbId/clone', requireAdmin, async (req, res) => {
     if (e.status === 400) return res.status(400).json({ error: e.code || 'INVALID_PARAMS', message: e.message });
     if (e.status === 404) return res.status(404).json({ error: 'KB_NOT_FOUND', message: e.message });
     if (e.status === 409) return res.status(409).json({ error: e.code || 'KB_NAME_DUPLICATE', message: e.message });
+    if (e.status === 502) return res.status(502).json({ error: e.code || 'CLONE_INDEX_FAILED', message: e.message, detail: e.detail });
     res.status(500).json({ error: 'INTERNAL_ERROR', message: e.message });
   }
 });

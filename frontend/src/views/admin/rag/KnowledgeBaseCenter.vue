@@ -264,6 +264,9 @@ async function reviewRequest(req, action) {
     body: JSON.stringify({ action, review_comment: comment || '' }),
   })
   if (!ok) { alert(data?.message || `操作失败（${status}）`); return }
+  if (status === 207) {
+    alert(`审批已完成，但 AI 域向量克隆失败：${data?.message || '请在文档管理中手动触发重建索引'}`)
+  }
   await openUpgradeList()
 }
 

@@ -19,8 +19,8 @@ watch(() => route.path, () => { doctorInfo.value = getDoctorInfo() })
 const isAdmin = computed(() => doctorInfo.value.role === 'admin')
 
 const doctorNavItems = [
-  { path: '/patients',      label: '患者管理' },
-  { path: '/doctor/chat',   label: '知识库' },
+  { path: '/patients',     label: '患者管理' },
+  { path: '/doctor/chat',  label: '知识库' },
 ]
 const adminNavItems = [
   { path: '/admin/patients',         label: '患者管理' },

@@ -56,6 +56,17 @@ const kbForm = ref({ name: '', description: '' })
 const kbFormLoading = ref(false)
 const kbFormError = ref('')
 
+const showUpgradeApplyDialog = ref(false)
+const upgradeApplyTarget = ref(null)
+const upgradeApplyDocs = ref([])
+const upgradeApplyDocsLoading = ref(false)
+const upgradeApplyForm = ref({ target_kb_id: '', selected_doc_ids: [], reason: '' })
+const upgradeApplyError = ref('')
+const upgradeApplyLoading = ref(false)
+const showUpgradeHistoryDialog = ref(false)
+const upgradeHistory = ref([])
+const upgradeHistoryLoading = ref(false)
+
 const fileInput = ref(null)
 const uploadTargetKbId = ref(null)
 const uploadLoadingKbId = ref(null)
@@ -95,6 +106,11 @@ const canUploadToManageKb = computed(() => {
   const kb = manageSelectedKb.value
   return !!kb && kb.scope_type === 'personal' && kb.scope_owner_id === doctorInfo.value.id
 })
+const upgradeApplyAllSelected = computed(() =>
+  upgradeApplyDocs.value.length > 0 &&
+  upgradeApplyDocs.value.every(d => upgradeApplyForm.value.selected_doc_ids.includes(d.id))
+)
+const upgradeTargetKbs = computed(() => [...departmentKbs.value, ...publicKbs.value])
 
 onMounted(async () => {
   await Promise.all([refreshConversations(), refreshKnowledgeBases(), loadTemplates()])
@@ -409,6 +425,7 @@ function openManageView(kbId = null) {
   activeView.value = 'manage'
   if (kbId) manageSelectedKbId.value = kbId
   else if (!manageSelectedKbId.value) manageSelectedKbId.value = selectedKbIds.value[0] || knowledgeBases.value[0]?.id || null
+  refreshKnowledgeBases()
   fetchDocs()
 }
 
@@ -494,6 +511,59 @@ async function deletePersonalKb(kb) {
   if (manageSelectedKbId.value === kb.id) manageSelectedKbId.value = knowledgeBases.value.find(item => item.id !== kb.id)?.id || null
   await refreshKnowledgeBases()
   await fetchDocs()
+}
+
+async function openUpgradeApply(kb) {
+  upgradeApplyTarget.value = kb
+  upgradeApplyForm.value = { target_kb_id: '', selected_doc_ids: [], reason: '' }
+  upgradeApplyError.value = ''
+  showUpgradeApplyDialog.value = true
+  upgradeApplyDocsLoading.value = true
+  const { data } = await apiFetch(`/api/rag/documents?kb_id=${kb.id}&pageSize=100`)
+  upgradeApplyDocs.value = Array.isArray(data?.data) ? data.data : []
+  upgradeApplyDocsLoading.value = false
+}
+
+function toggleUpgradeDoc(docId) {
+  const idx = upgradeApplyForm.value.selected_doc_ids.indexOf(docId)
+  if (idx === -1) upgradeApplyForm.value.selected_doc_ids.push(docId)
+  else upgradeApplyForm.value.selected_doc_ids.splice(idx, 1)
+}
+
+function toggleAllUpgradeDocs() {
+  if (upgradeApplyAllSelected.value) {
+    upgradeApplyForm.value.selected_doc_ids = []
+  } else {
+    upgradeApplyForm.value.selected_doc_ids = upgradeApplyDocs.value.map(d => d.id)
+  }
+}
+
+async function submitUpgradeApply() {
+  if (!upgradeApplyForm.value.target_kb_id) { upgradeApplyError.value = '请选择目标知识库'; return }
+  if (!upgradeApplyForm.value.selected_doc_ids.length) { upgradeApplyError.value = '请至少选择一个文档'; return }
+  upgradeApplyError.value = ''
+  upgradeApplyLoading.value = true
+  const { ok, status, data } = await apiFetch('/api/rag/kbs/upgrade-requests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source_kb_id: upgradeApplyTarget.value.id,
+      target_kb_id: Number(upgradeApplyForm.value.target_kb_id),
+      doc_ids: upgradeApplyForm.value.selected_doc_ids,
+      reason: upgradeApplyForm.value.reason,
+    }),
+  })
+  upgradeApplyLoading.value = false
+  if (!ok) { upgradeApplyError.value = data?.message || `提交失败（${status}）`; return }
+  showUpgradeApplyDialog.value = false
+}
+
+async function openUpgradeHistory() {
+  showUpgradeHistoryDialog.value = true
+  upgradeHistoryLoading.value = true
+  const { data } = await apiFetch('/api/rag/kbs/upgrade-requests')
+  upgradeHistory.value = Array.isArray(data?.data) ? data.data : []
+  upgradeHistoryLoading.value = false
 }
 
 function formatKbScope(kb) {
@@ -858,6 +928,7 @@ function formatDate(value) {
           <div class="manage-kb-panel">
             <div class="section-head">
               <span>我的个人库</span>
+              <button class="text-btn" @click="openUpgradeHistory">申请记录</button>
             </div>
             <div class="create-kb-card">
               <input v-model="kbForm.name" class="field-input" placeholder="新建个人知识库名称" />
@@ -882,6 +953,7 @@ function formatDate(value) {
               <div class="kb-card-desc">{{ kb.description || '无描述' }}</div>
               <div class="kb-card-actions">
                 <span class="kb-scope">个人库</span>
+                <button class="text-btn" @click.stop="openUpgradeApply(kb)">申请升级</button>
                 <button class="text-btn danger-text" @click.stop="deletePersonalKb(kb)">删除</button>
               </div>
             </button>
@@ -993,6 +1065,105 @@ function formatDate(value) {
     </section>
 
     <input ref="fileInput" type="file" multiple hidden @change="handleUpload" />
+
+    <!-- 升级申请弹层 -->
+    <teleport to="body">
+      <div v-if="showUpgradeApplyDialog" class="drawer-backdrop" @click.self="showUpgradeApplyDialog = false">
+        <div class="upgrade-modal">
+          <div class="drawer-header">
+            <div class="page-title small">申请升级 — {{ upgradeApplyTarget?.name }}</div>
+            <button class="close-btn" @click="showUpgradeApplyDialog = false">✕</button>
+          </div>
+          <p class="upgrade-hint">审批通过后，所选文档将被复制到目标知识库，个人库不变。</p>
+
+          <div class="upgrade-field">
+            <label class="upgrade-label">目标知识库 <span class="req">*</span></label>
+            <select v-model="upgradeApplyForm.target_kb_id" class="field-input">
+              <option value="">请选择科室库或公共库</option>
+              <option v-for="kb in upgradeTargetKbs" :key="kb.id" :value="kb.id">
+                {{ kb.name }}（{{ kb.scope_type === 'public' ? '公共' : '科室' }}）
+              </option>
+            </select>
+            <p v-if="!upgradeTargetKbs.length" class="upgrade-hint">当前没有可用的科室库或公共库，请联系管理员</p>
+          </div>
+
+          <div class="upgrade-field">
+            <label class="upgrade-label">选择要升级的文档 <span class="req">*</span></label>
+            <div v-if="upgradeApplyDocsLoading" class="upgrade-hint">加载文档...</div>
+            <div v-else-if="!upgradeApplyDocs.length" class="upgrade-hint">该知识库暂无文档</div>
+            <div v-else class="upgrade-doc-list">
+              <label class="upgrade-doc-item upgrade-doc-all">
+                <input type="checkbox" :checked="upgradeApplyAllSelected" @change="toggleAllUpgradeDocs" />
+                <span>全选（{{ upgradeApplyDocs.length }} 篇）</span>
+              </label>
+              <label v-for="doc in upgradeApplyDocs" :key="doc.id" class="upgrade-doc-item">
+                <input
+                  type="checkbox"
+                  :checked="upgradeApplyForm.selected_doc_ids.includes(doc.id)"
+                  @change="toggleUpgradeDoc(doc.id)"
+                />
+                <span class="upgrade-doc-title">{{ doc.title || doc.file_name }}</span>
+                <span class="upgrade-doc-ext">.{{ doc.file_ext }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="upgrade-field">
+            <label class="upgrade-label">申请原因</label>
+            <textarea v-model="upgradeApplyForm.reason" class="field-input" rows="2" placeholder="可选，说明升级理由" />
+          </div>
+
+          <p v-if="upgradeApplyError" class="error-tip">{{ upgradeApplyError }}</p>
+          <div class="upgrade-footer">
+            <button class="btn-secondary" @click="showUpgradeApplyDialog = false">取消</button>
+            <button class="btn-primary" :disabled="upgradeApplyLoading" @click="submitUpgradeApply">
+              {{ upgradeApplyLoading ? '提交中...' : '提交申请' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </teleport>
+
+    <!-- 申请记录弹层 -->
+    <teleport to="body">
+      <div v-if="showUpgradeHistoryDialog" class="drawer-backdrop" @click.self="showUpgradeHistoryDialog = false">
+        <div class="upgrade-history-modal">
+          <div class="drawer-header">
+            <div class="page-title small">我的升级申请记录</div>
+            <button class="close-btn" @click="showUpgradeHistoryDialog = false">✕</button>
+          </div>
+          <div v-if="upgradeHistoryLoading" class="manage-empty">加载中...</div>
+          <div v-else-if="!upgradeHistory.length" class="manage-empty">暂无申请记录</div>
+          <div v-else class="upgrade-history-list">
+            <div v-for="req in upgradeHistory" :key="req.id" class="upgrade-history-row">
+              <div class="upgrade-history-main">
+                <span class="upgrade-history-source">{{ req.source_kb_name || `库 #${req.source_kb_id}` }}</span>
+                <span class="upgrade-history-arrow">→</span>
+                <span class="upgrade-history-target">{{ req.target_kb_name || `库 #${req.target_kb_id}` }}</span>
+                <span class="upgrade-history-docs">{{ req.doc_ids?.length ?? 0 }} 篇</span>
+              </div>
+              <div class="upgrade-history-meta">
+                <span
+                  class="upgrade-status-badge"
+                  :class="{
+                    'badge-pending': req.status === 'pending',
+                    'badge-approved': req.status === 'approved',
+                    'badge-rejected': req.status === 'rejected',
+                  }"
+                >
+                  {{ req.status === 'pending' ? '待审批' : req.status === 'approved' ? '已批准' : '已拒绝' }}
+                </span>
+                <span v-if="req.review_comment" class="upgrade-history-comment">{{ req.review_comment }}</span>
+                <span class="upgrade-history-time">{{ req.created_at ? new Date(req.created_at).toLocaleDateString() : '--' }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="upgrade-footer">
+            <button class="btn-secondary" @click="showUpgradeHistoryDialog = false">关闭</button>
+          </div>
+        </div>
+      </div>
+    </teleport>
 
     <teleport to="body">
       <div v-if="kbDrawerOpen" class="drawer-backdrop" @click.self="kbDrawerOpen = false">
@@ -2017,6 +2188,7 @@ function formatDate(value) {
   height: 100%;
   padding: 20px;
   border-radius: 0;
+  background: #fff;
   display: flex;
   flex-direction: column;
 }
@@ -2104,6 +2276,86 @@ function formatDate(value) {
   border-color: #a5b4fc;
   background: #eef2ff;
 }
+
+.upgrade-modal {
+  width: 480px;
+  max-width: 92vw;
+  max-height: 88vh;
+  overflow-y: auto;
+  margin: auto;
+  padding: 22px 24px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 18px 38px rgba(95, 130, 171, 0.16);
+  display: flex;
+  flex-direction: column;
+}
+
+.upgrade-history-modal {
+  width: 560px;
+  max-width: 92vw;
+  max-height: 88vh;
+  overflow-y: auto;
+  margin: auto;
+  padding: 22px 24px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 18px 38px rgba(95, 130, 171, 0.16);
+  display: flex;
+  flex-direction: column;
+}
+
+.upgrade-hint { font-size: 12.5px; color: #6b7280; margin: 6px 0 14px; }
+.upgrade-field { margin-top: 14px; }
+.upgrade-label { display: block; font-size: 13px; font-weight: 600; color: #16324f; margin-bottom: 6px; }
+.req { color: #dc2626; }
+
+.upgrade-doc-list {
+  border: 1px solid rgba(109,145,186,0.18);
+  border-radius: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.upgrade-doc-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #334155;
+}
+
+.upgrade-doc-item:hover { background: #f8fafc; }
+.upgrade-doc-item input { flex-shrink: 0; cursor: pointer; }
+.upgrade-doc-all { border-bottom: 1px solid rgba(109,145,186,0.14); font-weight: 600; color: #475569; }
+.upgrade-doc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upgrade-doc-ext { font-size: 11px; color: #94a3b8; flex-shrink: 0; }
+.upgrade-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+.upgrade-history-list { overflow-y: auto; margin-top: 8px; }
+
+.upgrade-history-row {
+  padding: 12px 0;
+  border-bottom: 1px solid #eef2f7;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.upgrade-history-main { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.upgrade-history-source, .upgrade-history-target { font-weight: 600; color: #16324f; }
+.upgrade-history-arrow { color: #94a3b8; }
+.upgrade-history-docs { font-size: 12px; color: #94a3b8; margin-left: auto; }
+.upgrade-history-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.upgrade-history-comment { font-size: 12px; color: #64748b; }
+.upgrade-history-time { font-size: 11.5px; color: #94a3b8; white-space: nowrap; }
+
+.upgrade-status-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.badge-pending  { background: #fef9c3; color: #854d0e; }
+.badge-approved { background: #dcfce7; color: #166534; }
+.badge-rejected { background: #fee2e2; color: #991b1b; }
 
 @media (max-width: 1200px) {
   .chat-workspace {
