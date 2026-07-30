@@ -159,10 +159,8 @@ async function rollback(doctor, docId, versionId) {
   }
 
   const conn = await db.getConnection();
-  let task;
   try {
     await conn.beginTransaction();
-
     await conn.query(
       `UPDATE rag_document_versions
        SET status = CASE WHEN id = ? THEN 'active' ELSE 'archived' END
@@ -175,51 +173,24 @@ async function rollback(doctor, docId, versionId) {
        WHERE id = ?`,
       [targetVersion.id, docId]
     );
-
-    // 任务 INSERT 在同一事务内，事务失败则任务也不存在，消除窗口期不一致
-    const taskCode = `rag_task_reindex_${nanoid(12)}`;
-    const chunkMeta = parseJson(targetVersion.chunk_meta);
-    const [taskResult] = await conn.query(
-      `INSERT INTO rag_tasks
-        (task_code, task_type, kb_id, doc_id, doc_version_id, status,
-         progress_percent, payload_json, created_by)
-       VALUES (?, 'reindex', ?, ?, ?, 'pending', 0, ?, ?)`,
-      [
-        taskCode,
-        doc.kb_id,
-        doc.id,
-        targetVersion.id,
-        JSON.stringify({
-          kb_id: doc.kb_id,
-          doc_id: doc.id,
-          doc_version_id: targetVersion.id,
-          text,
-          chunk_size: Number(chunkMeta.chunk_size) || 800,
-          chunk_overlap: Number(chunkMeta.chunk_overlap) || 120,
-          embedding_model: targetVersion.embedding_model || 'BAAI/bge-small-zh-v1.5',
-        }),
-        doctor?.id || null,
-      ]
-    );
-    const taskId = taskResult.insertId;
-
     await conn.commit();
-
-    // 事务提交后异步 dispatch，dispatch 失败只影响任务状态，不影响已提交的 DB 状态
-    task = { id: taskId, task_code: taskCode, task_type: 'reindex',
-             kb_id: doc.kb_id, doc_id: doc.id, doc_version_id: targetVersion.id,
-             payload_json: { text,
-               chunk_size: Number(chunkMeta.chunk_size) || 800,
-               chunk_overlap: Number(chunkMeta.chunk_overlap) || 120,
-               embedding_model: targetVersion.embedding_model || 'BAAI/bge-small-zh-v1.5',
-             } };
-    setImmediate(() => { ragTaskService.dispatchReindexTextTask(task).catch(() => {}); });
   } catch (error) {
     await conn.rollback();
     throw error;
   } finally {
     conn.release();
   }
+
+  const chunkMeta = parseJson(targetVersion.chunk_meta);
+  const task = await ragTaskService.createReindexTextTask(doctor, {
+    kb_id: doc.kb_id,
+    doc_id: doc.id,
+    doc_version_id: targetVersion.id,
+    text,
+    chunk_size: Number(chunkMeta.chunk_size) || 800,
+    chunk_overlap: Number(chunkMeta.chunk_overlap) || 120,
+    embedding_model: targetVersion.embedding_model || 'BAAI/bge-small-zh-v1.5',
+  });
 
   return {
     task_id: task.id,
@@ -228,4 +199,65 @@ async function rollback(doctor, docId, versionId) {
   };
 }
 
-module.exports = { listVersions, reindex, rollback };
+async function diffVersions(doctor, docId, versionId, against) {
+  const { doc } = await getDocumentContext(doctor, docId);
+
+  const [[targetVersion]] = await db.query(
+    `SELECT id, version_no, raw_text, cleaned_text FROM rag_document_versions WHERE id = ? AND doc_id = ?`,
+    [versionId, docId]
+  );
+  if (!targetVersion) {
+    throw Object.assign(new Error('版本不存在'), { status: 404, code: 'VERSION_NOT_FOUND' });
+  }
+
+  let baseVersion;
+  if (against === 'active' || !against) {
+    if (doc.active_version_id === targetVersion.id) {
+      throw Object.assign(new Error('目标版本已是当前激活版本'), { status: 400, code: 'INVALID_PARAMS' });
+    }
+    const [[av]] = await db.query(
+      `SELECT id, version_no, raw_text, cleaned_text FROM rag_document_versions WHERE id = ? AND doc_id = ?`,
+      [doc.active_version_id, docId]
+    );
+    baseVersion = av;
+  } else if (against === 'prev') {
+    const [[pv]] = await db.query(
+      `SELECT id, version_no, raw_text, cleaned_text FROM rag_document_versions
+       WHERE doc_id = ? AND version_no < ? ORDER BY version_no DESC LIMIT 1`,
+      [docId, targetVersion.version_no]
+    );
+    baseVersion = pv;
+  } else {
+    const againstId = Number(against);
+    if (!Number.isFinite(againstId) || againstId <= 0) {
+      throw Object.assign(new Error('against 参数无效'), { status: 400, code: 'INVALID_PARAMS' });
+    }
+    const [[ov]] = await db.query(
+      `SELECT id, version_no, raw_text, cleaned_text FROM rag_document_versions WHERE id = ? AND doc_id = ?`,
+      [againstId, docId]
+    );
+    baseVersion = ov;
+  }
+
+  if (!baseVersion) {
+    throw Object.assign(new Error('基准版本不存在'), { status: 404, code: 'VERSION_NOT_FOUND' });
+  }
+
+  const PREVIEW_LEN = 1000;
+  const baseText = String(baseVersion.cleaned_text || baseVersion.raw_text || '');
+  const targetText = String(targetVersion.cleaned_text || targetVersion.raw_text || '');
+
+  return {
+    base_version_id: baseVersion.id,
+    target_version_id: targetVersion.id,
+    base_version_no: baseVersion.version_no,
+    target_version_no: targetVersion.version_no,
+    base_text_preview: baseText.slice(0, PREVIEW_LEN),
+    target_text_preview: targetText.slice(0, PREVIEW_LEN),
+    base_text_length: baseText.length,
+    target_text_length: targetText.length,
+    changed: baseText !== targetText,
+  };
+}
+
+module.exports = { listVersions, reindex, rollback, diffVersions };

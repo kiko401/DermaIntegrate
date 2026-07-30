@@ -5,7 +5,7 @@ dotenv.config();
 
 const config = {
   port: process.env.PORT || 3000,
-  aiBaseUrl: process.env.AI_BASE_URL || 'http://124.222.0.186/ai'
+  aiBaseUrl: process.env.AI_BASE_URL || 'http://124.222.0.186:8201'
 };
 
 // 启动时打印配置，便于调试

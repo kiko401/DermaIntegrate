@@ -151,6 +151,27 @@ async function exportFeedback() {
   }
 }
 
+// ── 日志归档 ───────────────────────────────────────────────────────────
+const archiveLoading = ref(false)
+
+async function triggerArchive(dryRun = false) {
+  if (!dryRun && !confirm('确认将 90 天前的日志归档到 rag_logs_archive？此操作幂等，可重复执行。')) return
+  archiveLoading.value = true
+  try {
+    const url = dryRun ? '/api/rag/admin/logs/archive?dry_run=1' : '/api/rag/admin/logs/archive'
+    const { ok, data } = await apiFetch(url, { method: 'POST' })
+    if (ok) {
+      alert(`归档${dryRun ? '（演练）' : ''}完成\n${data.output || ''}`)
+    } else {
+      alert(`归档失败\n${data?.error || JSON.stringify(data)}`)
+    }
+  } catch (e) {
+    alert(`归档请求失败: ${e.message}`)
+  } finally {
+    archiveLoading.value = false
+  }
+}
+
 // ── 工具函数 ──────────────────────────────────────────────────────────
 const LOG_TYPE_LABELS = {
   chat: '对话', ingest: '入库', api: 'API', tool: '工具',
@@ -173,9 +194,12 @@ onMounted(() => { loadLogs(); loadStats() })
 </script>
 
 <template>
-  <div class="logs-page">
+  <div class="logs-page rag-admin-page">
     <div class="page-header">
-      <h2 class="page-title">对话日志</h2>
+      <div class="title-block">
+        <h2 class="page-title">问答日志</h2>
+        <p class="page-subtitle">统一查看统计、筛选、导出与归档操作，页面铺满更直观。</p>
+      </div>
       <div class="header-actions">
         <select v-model="exportFormat" class="export-fmt-select">
           <option value="csv">CSV</option>
@@ -186,6 +210,12 @@ onMounted(() => { loadLogs(); loadStats() })
         </button>
         <button class="btn btn-secondary" :disabled="fbExportLoading" @click="exportFeedback">
           {{ fbExportLoading ? '导出中...' : '导出反馈(JSONL)' }}
+        </button>
+        <button class="btn btn-warning" :disabled="archiveLoading" @click="triggerArchive(true)">
+          {{ archiveLoading ? '归档中...' : '演练归档' }}
+        </button>
+        <button class="btn btn-danger" :disabled="archiveLoading" @click="triggerArchive(false)">
+          {{ archiveLoading ? '归档中...' : '执行归档' }}
         </button>
       </div>
     </div>
@@ -223,18 +253,20 @@ onMounted(() => { loadLogs(); loadStats() })
     </div>
 
     <!-- 筛选栏 -->
-    <div class="filter-bar">
-      <select v-model="filter.log_type" class="filter-input filter-select">
-        <option value="">全部类型</option>
-        <option v-for="(label, key) in LOG_TYPE_LABELS" :key="key" :value="key">{{ label }}</option>
-      </select>
-      <input v-model="filter.start_date" type="date" class="filter-input" />
-      <input v-model="filter.end_date" type="date" class="filter-input" />
-      <input v-model="filter.doctor_id" type="number" class="filter-input" placeholder="用户 ID" style="width:100px" />
-      <input v-model="filter.kb_id" type="number" class="filter-input" placeholder="知识库 ID" style="width:100px" />
-      <input v-model="filter.keyword" type="text" class="filter-input" placeholder="关键词搜索" style="width:160px" />
-      <button class="btn btn-primary" @click="applyFilter">查询</button>
-      <button class="btn btn-ghost" @click="resetFilter">重置</button>
+    <div class="filter-card">
+      <div class="filter-bar">
+        <select v-model="filter.log_type" class="filter-input filter-select">
+          <option value="">全部类型</option>
+          <option v-for="(label, key) in LOG_TYPE_LABELS" :key="key" :value="key">{{ label }}</option>
+        </select>
+        <input v-model="filter.start_date" type="date" class="filter-input" />
+        <input v-model="filter.end_date" type="date" class="filter-input" />
+        <input v-model="filter.doctor_id" type="number" class="filter-input" placeholder="用户 ID" style="width:100px" />
+        <input v-model="filter.kb_id" type="number" class="filter-input" placeholder="知识库 ID" style="width:100px" />
+        <input v-model="filter.keyword" type="text" class="filter-input" placeholder="关键词搜索" style="width:160px" />
+        <button class="btn btn-primary" @click="applyFilter">查询</button>
+        <button class="btn btn-ghost" @click="resetFilter">重置</button>
+      </div>
     </div>
 
     <div v-if="logsError" class="error-msg">{{ logsError }}</div>
@@ -289,52 +321,69 @@ onMounted(() => { loadLogs(); loadStats() })
 </template>
 
 <style scoped>
-.logs-page { padding: 24px; max-width: 1400px; }
-.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
-.page-title { font-size: 18px; font-weight: 600; color: #1e293b; margin: 0; }
-.header-actions { display: flex; gap: 8px; align-items: center; }
-.stats-row { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-.stat-card { flex: 1; min-width: 160px; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 20px; }
+.logs-page {
+  padding: 20px 24px;
+  min-height: 100%;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at 10% 14%, rgba(76,128,255,0.08) 0%, transparent 24%),
+    radial-gradient(circle at 84% 18%, rgba(0,198,208,0.06) 0%, transparent 22%),
+    linear-gradient(180deg, #f7fbff 0%, #eef5fb 52%, #f8fbff 100%);
+}
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 20px; gap: 16px; }
+.title-block { display: flex; flex-direction: column; gap: 6px; }
+.page-title { font-size: 18px; font-weight: 700; color: #1e293b; margin: 0; }
+.page-subtitle { margin: 0; color: #64748b; font-size: 13px; }
+.header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.stats-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+.stat-card { min-width: 0; border-radius: 22px; padding: 20px 22px; }
 .stat-label { font-size: 12px; color: #64748b; margin-bottom: 6px; }
-.stat-value { font-size: 24px; font-weight: 700; color: #1e293b; }
+.stat-value { font-size: 28px; font-weight: 700; color: #1e293b; }
 .stat-value.success { color: #16a34a; }
 .stat-value.blocked { color: #dc2626; }
-.top-questions { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
-.section-title { font-size: 13px; font-weight: 600; color: #475569; margin-bottom: 10px; }
+.top-questions, .filter-card, .table-wrap { border-radius: 22px; }
+.top-questions { padding: 18px; margin-bottom: 20px; }
+.section-title { font-size: 14px; font-weight: 700; color: #334155; margin-bottom: 12px; }
 .tq-list { display: flex; flex-direction: column; gap: 6px; }
 .tq-item { display: flex; align-items: center; gap: 10px; font-size: 13px; }
-.tq-rank { width: 24px; height: 24px; border-radius: 50%; background: #e2e8f0; color: #475569; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
+.tq-rank { width: 26px; height: 26px; border-radius: 50%; background: #e2e8f0; color: #475569; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
 .tq-text { flex: 1; color: #334155; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tq-count { font-size: 12px; color: #64748b; flex-shrink: 0; }
-.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; align-items: center; }
-.filter-input { height: 32px; padding: 0 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; }
-.filter-input:focus { outline: none; border-color: #2563eb; }
-.filter-select { min-width: 100px; }
-.export-fmt-select { height: 32px; padding: 0 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
-.btn { height: 32px; padding: 0 14px; border-radius: 6px; font-size: 13px; cursor: pointer; border: none; }
+.filter-card { margin-bottom: 16px; padding: 14px; background: rgba(255,255,255,0.96); border: 1px solid rgba(226,232,240,0.9); box-shadow: 0 18px 42px rgba(15,23,42,0.06); }
+.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.filter-input, .export-fmt-select { height: 36px; padding: 0 12px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 13px; color: #334155; background: #fff; }
+.filter-input:focus, .export-fmt-select:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
+.filter-select { min-width: 120px; }
+.btn { height: 36px; padding: 0 14px; border-radius: 10px; font-size: 13px; cursor: pointer; border: none; font-weight: 600; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: #2563eb; color: #fff; }
-.btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+.btn-primary { background: linear-gradient(135deg, #2563eb, #3b82f6); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, #1d4ed8, #2563eb); }
 .btn-secondary { background: #fff; color: #475569; border: 1px solid #cbd5e1; }
 .btn-secondary:hover:not(:disabled) { background: #f8fafc; }
 .btn-ghost { background: transparent; color: #64748b; border: 1px solid #e2e8f0; }
 .btn-ghost:hover:not(:disabled) { background: #f8fafc; }
-.table-wrap { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
+.btn-warning { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+.btn-warning:hover:not(:disabled) { background: #fde68a; }
+.btn-danger { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+.btn-danger:hover:not(:disabled) { background: #fecaca; }
+.table-wrap { overflow-x: auto; border: 1px solid rgba(226,232,240,0.9); background: rgba(255,255,255,0.96); }
 .logs-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.logs-table th { background: #f8fafc; padding: 10px 12px; text-align: left; font-weight: 600; color: #475569; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
-.logs-table td { padding: 9px 12px; border-bottom: 1px solid #f1f5f9; color: #334155; vertical-align: top; }
+.logs-table th { background: rgba(248, 250, 252, 0.9); padding: 12px 14px; text-align: left; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
+.logs-table td { padding: 11px 14px; border-bottom: 1px solid #f1f5f9; color: #334155; vertical-align: top; }
 .logs-table tr:last-child td { border-bottom: none; }
-.logs-table tr:hover td { background: #f8fafc; }
+.logs-table tr:hover td { background: #f8fbff; }
 .td-center { text-align: center; color: #94a3b8; }
-.td-empty { padding: 32px !important; }
-.td-summary { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.td-empty { padding: 42px !important; }
+.td-summary { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .td-time { white-space: nowrap; font-size: 12px; color: #64748b; }
-.status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.status-badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; }
 .status-success { background: #dcfce7; color: #16a34a; }
 .status-blocked { background: #fef3c7; color: #d97706; }
 .status-failed { background: #fee2e2; color: #dc2626; }
-.type-tag { background: #eff6ff; color: #2563eb; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+.type-tag { background: #eff6ff; color: #2563eb; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; }
 .pagination { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
 .page-info { font-size: 13px; color: #64748b; flex: 1; }
-.error-msg { background: #fee2e2; color: #dc2626; padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+.error-msg { background: #fee2e2; color: #dc2626; padding: 10px 14px; border-radius: 12px; margin-bottom: 12px; font-size: 13px; }
+@media (max-width: 1200px) { .stats-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .page-header { flex-direction: column; } .stats-row { grid-template-columns: 1fr; } .td-summary { max-width: 180px; } }
 </style>

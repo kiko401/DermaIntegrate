@@ -21,11 +21,9 @@ function readDoctorInfo() {
 }
 
 const doctorInfo = ref(readDoctorInfo())
-
-// sidebar state
-const activeTab = ref('conv')
-const expandedKbId = ref(null)
-const newKbOpen = ref(false)
+const activeView = ref('chat')
+const hoverConvId = ref(null)
+const sidebarCollapsed = ref(false)
 
 const conversations = ref([])
 const activeConvId = ref(null)
@@ -36,6 +34,20 @@ const inputText = ref('')
 const loading = ref(false)
 const kbLoading = ref(false)
 const msgContainer = ref(null)
+const quickTemplates = ref([])
+const kbRequiredHint = ref(false)
+const kbSelectOpen = ref(false)
+const kbSearchText = ref('')
+
+const kbDrawerOpen = ref(false)
+const fileDrawerOpen = ref(false)
+const docPreviewOpen = ref(false)
+const docPreviewLoading = ref(false)
+const docPreviewErr = ref('')
+const docPreviewData = ref(null)
+const docPreviewTitle = ref('')
+const docPreviewChunkId = ref(null)
+const docPreviewTab = ref('chunks')
 
 const kbForm = ref({ name: '', description: '' })
 const kbFormLoading = ref(false)
@@ -47,22 +59,65 @@ const uploadLoadingKbId = ref(null)
 const uploadError = ref('')
 const uploadErrorKbId = ref(null)
 
-const activeConv = computed(() => conversations.value.find(c => c.id === activeConvId.value))
-const personalKbs = computed(() =>
-  knowledgeBases.value.filter(kb => kb.scope_type === 'personal' && kb.scope_owner_id === doctorInfo.value.id)
-)
-const sharedKbs = computed(() =>
-  knowledgeBases.value.filter(kb => !(kb.scope_type === 'personal' && kb.scope_owner_id === doctorInfo.value.id))
-)
+const docSearch = ref('')
+const docsLoading = ref(false)
+const docs = ref([])
+const docsPage = ref(1)
+const docsPageSize = ref(20)
+const docsTotal = ref(0)
+const manageSelectedKbId = ref(null)
+const selectedDocIds = ref([])
+
+const activeConv = computed(() => conversations.value.find(c => c.id === activeConvId.value) || null)
+const personalKbs = computed(() => knowledgeBases.value.filter(kb => kb.scope_type === 'personal' && kb.scope_owner_id === doctorInfo.value.id))
+const departmentKbs = computed(() => knowledgeBases.value.filter(kb => kb.scope_type === 'department'))
+const publicKbs = computed(() => knowledgeBases.value.filter(kb => kb.scope_type === 'public'))
+const selectedKnowledgeBases = computed(() => knowledgeBases.value.filter(kb => selectedKbIds.value.includes(kb.id)))
+const selectedKbSummary = computed(() => {
+  if (!selectedKnowledgeBases.value.length) return '未选择知识库'
+  if (selectedKnowledgeBases.value.length === 1) return selectedKnowledgeBases.value[0].name
+  return `已选择 ${selectedKnowledgeBases.value.length} 个知识库`
+})
+const filteredKnowledgeBases = computed(() => {
+  const keyword = kbSearchText.value.trim().toLowerCase()
+  if (!keyword) return knowledgeBases.value
+  return knowledgeBases.value.filter(kb => {
+    const scope = formatKbScope(kb)
+    return [kb.name, kb.description, scope].some(item => String(item || '').toLowerCase().includes(keyword))
+  })
+})
+const manageSelectedKb = computed(() => knowledgeBases.value.find(kb => String(kb.id) === String(manageSelectedKbId.value)) || null)
+const totalDocPages = computed(() => Math.max(1, Math.ceil(docsTotal.value / docsPageSize.value)))
+const canUploadToManageKb = computed(() => {
+  const kb = manageSelectedKb.value
+  return !!kb && kb.scope_type === 'personal' && kb.scope_owner_id === doctorInfo.value.id
+})
 
 onMounted(async () => {
-  await Promise.all([refreshConversations(), refreshKnowledgeBases()])
+  await Promise.all([refreshConversations(), refreshKnowledgeBases(), loadTemplates()])
   if (conversations.value.length) await selectConversation(conversations.value[0].id)
 })
 
+async function loadTemplates() {
+  try {
+    const { ok, data } = await apiFetch('/api/rag/tools/templates')
+    if (ok && Array.isArray(data?.templates)) quickTemplates.value = data.templates
+  } catch {
+    // ignore
+  }
+}
+
+function applyTemplate(tpl) {
+  inputText.value = tpl.question_template
+}
+
 async function refreshConversations() {
   const { data } = await apiFetch('/api/rag/conversations')
-  conversations.value = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : [])
+  const raw = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : [])
+  conversations.value = raw.filter(item => !item.scene_type || item.scene_type === 'general')
+  if (activeConvId.value && !conversations.value.some(item => item.id === activeConvId.value)) {
+    activeConvId.value = conversations.value[0]?.id || null
+  }
 }
 
 async function refreshKnowledgeBases() {
@@ -70,6 +125,9 @@ async function refreshKnowledgeBases() {
   try {
     const { data } = await apiFetch('/api/rag/kbs')
     knowledgeBases.value = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : [])
+    if (!manageSelectedKbId.value) {
+      manageSelectedKbId.value = selectedKbIds.value[0] || knowledgeBases.value[0]?.id || null
+    }
   } finally {
     kbLoading.value = false
   }
@@ -83,10 +141,12 @@ async function newConversation() {
   })
   if (!ok) throw new Error(data?.message || '创建会话失败')
   conversations.value.unshift(data)
+  activeView.value = 'chat'
   await selectConversation(data.id)
 }
 
 async function selectConversation(id) {
+  activeView.value = 'chat'
   activeConvId.value = id
   messages.value = []
   const { data } = await apiFetch(`/api/rag/conversations/${id}/messages`)
@@ -94,14 +154,12 @@ async function selectConversation(id) {
   scrollToBottom()
 }
 
-const kbRequiredHint = ref(false)
-
 async function sendMessage() {
   const question = inputText.value.trim()
   if (!question || loading.value) return
   if (!selectedKbIds.value.length) {
     kbRequiredHint.value = true
-    activeTab.value = 'kb'
+    kbDrawerOpen.value = true
     return
   }
   kbRequiredHint.value = false
@@ -112,7 +170,6 @@ async function sendMessage() {
   loading.value = true
   scrollToBottom()
 
-  // Placeholder for streaming assistant reply
   const assistantIdx = messages.value.length
   messages.value.push({
     role: 'assistant',
@@ -143,10 +200,8 @@ async function sendMessage() {
       const { done, value } = await reader.read()
       if (done) break
       sseBuffer += decoder.decode(value, { stream: true })
-
-      // Process complete SSE blocks separated by \n\n
       const blocks = sseBuffer.split(/\n\n/)
-      sseBuffer = blocks.pop() // keep incomplete trailing block
+      sseBuffer = blocks.pop()
 
       for (const block of blocks) {
         if (!block.trim()) continue
@@ -170,15 +225,11 @@ async function sendMessage() {
           msg.confidence = payload.confidence
           msg._streaming = false
         } else if (eventType === 'saved') {
-          // 后端落库完成，携带真实 message_id，供反馈使用
           msg.id = payload.message_id
         } else if (eventType === 'disclaimer') {
           msg.disclaimer = payload.disclaimer
         } else if (eventType === 'progress') {
-          // Show intermediate status text while streaming
-          if (!msg.content_markdown && payload.step) {
-            msg._status = payload.step
-          }
+          if (!msg.content_markdown && payload.step) msg._status = payload.step
         } else if (eventType === 'error') {
           msg.content_markdown = `请求失败：${payload.message || payload.code}`
           msg._streaming = false
@@ -187,10 +238,7 @@ async function sendMessage() {
       }
     }
 
-    // Mark done if result event never arrived (e.g. upstream closed early)
-    if (messages.value[assistantIdx]._streaming) {
-      messages.value[assistantIdx]._streaming = false
-    }
+    if (messages.value[assistantIdx]._streaming) messages.value[assistantIdx]._streaming = false
   } catch (error) {
     messages.value[assistantIdx].content_markdown = `请求失败：${error.message}`
     messages.value[assistantIdx]._streaming = false
@@ -200,8 +248,7 @@ async function sendMessage() {
   }
 }
 
-// ── 反馈 ──────────────────────────────────────────────────────────────
-const feedbackState = ref({}) // { [msgId]: 'up' | 'down' | 'sending' }
+const feedbackState = ref({})
 
 async function submitFeedback(msg, rating) {
   if (!msg.id) return
@@ -221,11 +268,16 @@ async function submitFeedback(msg, rating) {
 }
 
 function scrollToBottom() {
-  nextTick(() => { if (msgContainer.value) msgContainer.value.scrollTop = msgContainer.value.scrollHeight })
+  nextTick(() => {
+    if (msgContainer.value) msgContainer.value.scrollTop = msgContainer.value.scrollHeight
+  })
 }
 
 function handleKeydown(event) {
-  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage() }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    sendMessage()
+  }
 }
 
 function toggleKb(id) {
@@ -233,34 +285,66 @@ function toggleKb(id) {
   if (i >= 0) selectedKbIds.value.splice(i, 1)
   else selectedKbIds.value.push(id)
   if (selectedKbIds.value.length) kbRequiredHint.value = false
+  if (!manageSelectedKbId.value) manageSelectedKbId.value = id
 }
 
-function toggleExpand(kbId) {
-  expandedKbId.value = expandedKbId.value === kbId ? null : kbId
+function focusKbSelect() {
+  kbSelectOpen.value = true
+  kbSearchText.value = ''
 }
 
-function toggleNewKb() {
-  newKbOpen.value = !newKbOpen.value
-  if (!newKbOpen.value) { kbForm.value = { name: '', description: '' }; kbFormError.value = '' }
+function chooseKbFromSelect(id) {
+  toggleKb(id)
+  kbSelectOpen.value = false
+  kbSearchText.value = ''
+}
+
+function openKbDrawer() {
+  kbDrawerOpen.value = true
+}
+
+function openFileDrawer(kbId = null) {
+  if (kbId) manageSelectedKbId.value = kbId
+  else if (!manageSelectedKbId.value) manageSelectedKbId.value = selectedKbIds.value[0] || knowledgeBases.value[0]?.id || null
+  fileDrawerOpen.value = true
+  fetchDocs()
+}
+
+function openManageView(kbId = null) {
+  activeView.value = 'manage'
+  if (kbId) manageSelectedKbId.value = kbId
+  else if (!manageSelectedKbId.value) manageSelectedKbId.value = selectedKbIds.value[0] || knowledgeBases.value[0]?.id || null
+  fetchDocs()
+}
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
 }
 
 async function createPersonalKb() {
-  if (!kbForm.value.name.trim()) { kbFormError.value = '请输入知识库名称'; return }
+  if (!kbForm.value.name.trim()) {
+    kbFormError.value = '请输入知识库名称'
+    return
+  }
   kbFormLoading.value = true
   kbFormError.value = ''
   try {
     const { ok, status, data } = await apiFetch('/api/rag/kbs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: kbForm.value.name.trim(), description: kbForm.value.description.trim(), scope_type: 'personal' }),
+      body: JSON.stringify({
+        name: kbForm.value.name.trim(),
+        description: kbForm.value.description.trim(),
+        scope_type: 'personal',
+      }),
     })
     if (!ok) {
       if (status === 409) throw new Error('知识库名称已存在')
       throw new Error(data?.message || data?.error || '创建失败')
     }
     kbForm.value = { name: '', description: '' }
-    newKbOpen.value = false
     await refreshKnowledgeBases()
+    manageSelectedKbId.value = data?.id || manageSelectedKbId.value
   } catch (error) {
     kbFormError.value = error.message
   } finally {
@@ -292,6 +376,7 @@ async function handleUpload(event) {
     const data = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(data?.message || data?.error || '上传失败')
     await refreshKnowledgeBases()
+    await fetchDocs()
   } catch (error) {
     uploadError.value = error.message
     uploadErrorKbId.value = targetId
@@ -310,322 +395,1583 @@ async function deletePersonalKb(kb) {
     uploadErrorKbId.value = kb.id
     return
   }
-  if (expandedKbId.value === kb.id) expandedKbId.value = null
   selectedKbIds.value = selectedKbIds.value.filter(id => id !== kb.id)
+  if (manageSelectedKbId.value === kb.id) manageSelectedKbId.value = knowledgeBases.value.find(item => item.id !== kb.id)?.id || null
   await refreshKnowledgeBases()
+  await fetchDocs()
+}
+
+function formatKbScope(kb) {
+  if (kb.scope_type === 'personal') return '个人库'
+  if (kb.scope_type === 'department') return '科室库'
+  return '公共库'
 }
 
 function displayRisk(item) {
   if (typeof item === 'string') return item
   return item?.label || item?.text || item?.message || JSON.stringify(item)
 }
+
+async function fetchDocs(page = docsPage.value) {
+  if (!manageSelectedKbId.value) {
+    docs.value = []
+    docsTotal.value = 0
+    return
+  }
+  docsLoading.value = true
+  docsPage.value = page
+  const params = new URLSearchParams()
+  params.set('kb_id', String(manageSelectedKbId.value))
+  if (docSearch.value.trim()) params.set('search', docSearch.value.trim())
+  params.set('page', String(docsPage.value))
+  params.set('pageSize', String(docsPageSize.value))
+  try {
+    const { ok, data } = await apiFetch(`/api/rag/documents?${params.toString()}`)
+    if (!ok) throw new Error(data?.message || data?.error || '加载文件失败')
+    docs.value = Array.isArray(data?.data) ? data.data : []
+    docsTotal.value = data?.total || 0
+    selectedDocIds.value = selectedDocIds.value.filter(id => docs.value.some(doc => doc.id === id))
+  } catch (error) {
+    uploadError.value = error.message
+  } finally {
+    docsLoading.value = false
+  }
+}
+
+function onDocSearch() {
+  fetchDocs(1)
+}
+
+function toggleDocSelection(docId) {
+  const i = selectedDocIds.value.indexOf(docId)
+  if (i >= 0) selectedDocIds.value.splice(i, 1)
+  else selectedDocIds.value.push(docId)
+}
+
+function selectAllDocs(checked) {
+  selectedDocIds.value = checked ? docs.value.map(doc => doc.id) : []
+}
+
+function downloadDoc(doc) {
+  const a = document.createElement('a')
+  a.href = `/api/rag/documents/${doc.id}/download`
+  a.download = doc.file_name || doc.title || `document-${doc.id}`
+  a.click()
+}
+
+function downloadSelectedDocs() {
+  const targets = docs.value.filter(doc => selectedDocIds.value.includes(doc.id))
+  targets.forEach(doc => downloadDoc(doc))
+}
+
+async function openDocPreviewByDoc(doc) {
+  docPreviewOpen.value = true
+  docPreviewLoading.value = true
+  docPreviewErr.value = ''
+  docPreviewData.value = null
+  docPreviewTitle.value = doc.title || doc.file_name || `文档 #${doc.id}`
+  docPreviewChunkId.value = null
+  docPreviewTab.value = 'raw'
+  try {
+    const { ok, data } = await apiFetch(`/api/rag/documents/${doc.id}/preview`)
+    if (!ok) throw new Error(data?.message || data?.error || '加载预览失败')
+    docPreviewData.value = data
+  } catch (error) {
+    docPreviewErr.value = error.message
+  } finally {
+    docPreviewLoading.value = false
+  }
+}
+
+async function openSourcePreview(src) {
+  if (!src.doc_id) return
+  docPreviewOpen.value = true
+  docPreviewLoading.value = true
+  docPreviewErr.value = ''
+  docPreviewData.value = null
+  docPreviewTitle.value = src.title || `文档 #${src.doc_id}`
+  docPreviewChunkId.value = src.chunk_id || null
+  docPreviewTab.value = 'chunks'
+  try {
+    const qs = src.chunk_id ? `?chunk_id=${encodeURIComponent(src.chunk_id)}` : ''
+    const { ok, data } = await apiFetch(`/api/rag/documents/${src.doc_id}/preview${qs}`)
+    if (!ok) throw new Error(data?.message || data?.error || '加载失败')
+    docPreviewData.value = data
+  } catch (error) {
+    docPreviewErr.value = error.message
+  } finally {
+    docPreviewLoading.value = false
+  }
+}
+
+function closeDocPreview() {
+  docPreviewOpen.value = false
+  docPreviewData.value = null
+  docPreviewErr.value = ''
+}
+
+function formatDate(value) {
+  if (!value) return '--'
+  try {
+    return new Date(value).toLocaleString()
+  } catch {
+    return value
+  }
+}
 </script>
 
 <template>
   <div class="chat-workspace">
-    <aside class="sidebar">
-
-      <!-- Tab 切换 -->
-      <div class="sidebar-tabs">
-        <button class="tab-btn" :class="{ active: activeTab === 'conv' }" @click="activeTab = 'conv'">
-          会话
-        </button>
-        <button class="tab-btn" :class="{ active: activeTab === 'kb' }" @click="activeTab = 'kb'">
-          知识库
-          <span v-if="selectedKbIds.length" class="tab-badge">{{ selectedKbIds.length }}</span>
+    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
+      <template v-if="!sidebarCollapsed">
+      <div class="sidebar-header">
+        <button class="new-chat-btn" @click="newConversation">
+          <span class="new-chat-plus">⊕</span>
+          <span>开启新对话</span>
         </button>
       </div>
 
-      <!-- 会话 Tab -->
-      <div v-show="activeTab === 'conv'" class="tab-content">
-        <div class="tab-header">
-          <button class="btn-new" @click="newConversation">+ 新建会话</button>
-        </div>
-        <div class="conv-list">
-          <div
-            v-for="conv in conversations" :key="conv.id"
-            class="conv-item" :class="{ active: conv.id === activeConvId }"
-            @click="selectConversation(conv.id)"
-          >
-            <span class="conv-title">{{ conv.title || '未命名会话' }}</span>
-            <span class="conv-date">{{ new Date(conv.created_at).toLocaleDateString() }}</span>
-          </div>
-          <div v-if="!conversations.length" class="empty-hint">暂无会话</div>
-        </div>
-      </div>
-
-      <!-- 知识库 Tab -->
-      <div v-show="activeTab === 'kb'" class="tab-content">
-        <div class="tab-header">
-          <button class="btn-new" @click="toggleNewKb">
-            {{ newKbOpen ? '取消' : '+ 新建个人库' }}
-          </button>
-        </div>
-
-        <!-- 新建表单（内联，不弹窗） -->
-        <div v-if="newKbOpen" class="new-kb-form">
+      <div class="kb-summary-card">
+        <div class="kb-select-label">当前知识库</div>
+        <div class="kb-combobox" @focusout="setTimeout(() => { kbSelectOpen = false }, 120)">
           <input
-            v-model="kbForm.name" class="field-input" placeholder="知识库名称"
-            @keydown.enter="createPersonalKb"
+            v-model="kbSearchText"
+            class="kb-combobox-input"
+            :placeholder="selectedKbSummary"
+            @focus="focusKbSelect"
+            @input="kbSelectOpen = true"
           />
-          <input v-model="kbForm.description" class="field-input" placeholder="描述（可选）" />
-          <div v-if="kbFormError" class="error-tip">{{ kbFormError }}</div>
-          <button class="btn-confirm" :disabled="kbFormLoading" @click="createPersonalKb">
-            {{ kbFormLoading ? '创建中...' : '确认创建' }}
-          </button>
-        </div>
-
-        <div class="kb-scroll">
-          <div v-if="kbLoading" class="empty-hint">加载中...</div>
-          <template v-else>
-
-          <!-- 我的个人库 -->
-          <div class="kb-section-label">我的个人库</div>
-          <div v-if="!personalKbs.length" class="empty-hint">还没有个人知识库</div>
-
-          <div v-for="kb in personalKbs" :key="kb.id" class="kb-group">
-            <div class="kb-item" :class="{ selected: selectedKbIds.includes(kb.id) }">
-              <span class="kb-dot" @click="toggleKb(kb.id)" />
-              <span class="kb-name" @click="toggleKb(kb.id)">{{ kb.name }}</span>
-              <span class="kb-count">{{ kb.doc_count || 0 }}</span>
-              <button class="kb-expand-btn" @click="toggleExpand(kb.id)">
-                {{ expandedKbId === kb.id ? '▾' : '▸' }}
-              </button>
-            </div>
-
-            <!-- 展开：上传 / 删除 -->
-            <div v-if="expandedKbId === kb.id" class="kb-detail">
-              <p v-if="kb.description" class="kb-detail-desc">{{ kb.description }}</p>
-              <div v-if="uploadErrorKbId === kb.id && uploadError" class="error-tip">{{ uploadError }}</div>
-              <div class="kb-detail-actions">
-                <button
-                  class="btn-sm"
-                  :disabled="uploadLoadingKbId === kb.id"
-                  @click="triggerUpload(kb.id)"
-                >
-                  {{ uploadLoadingKbId === kb.id ? '上传中...' : '上传文档' }}
-                </button>
-                <button class="btn-sm btn-danger" @click="deletePersonalKb(kb)">删除</button>
-              </div>
-            </div>
-          </div>
-
-          <!-- 公共 / 科室库 -->
-          <template v-if="sharedKbs.length">
-            <div class="kb-section-label" style="margin-top: 12px;">公共 / 科室库</div>
-            <div
-              v-for="kb in sharedKbs" :key="kb.id"
-              class="kb-item" :class="{ selected: selectedKbIds.includes(kb.id) }"
-              @click="toggleKb(kb.id)"
+          <span class="kb-combobox-arrow">⌄</span>
+          <div v-if="kbSelectOpen" class="kb-combobox-menu">
+            <button
+              v-for="kb in filteredKnowledgeBases"
+              :key="kb.id"
+              class="kb-option"
+              :class="{ selected: selectedKbIds.includes(kb.id) }"
+              @mousedown.prevent="chooseKbFromSelect(kb.id)"
             >
-              <span class="kb-dot" />
-              <span class="kb-name">{{ kb.name }}</span>
-              <span class="kb-count">{{ kb.doc_count || 0 }}</span>
-              <span class="kb-scope-tag">{{ kb.scope_type === 'public' ? '公开' : '科室' }}</span>
-            </div>
-          </template>
+              <span class="kb-option-main">{{ kb.name }}</span>
+              <span class="kb-option-meta">{{ formatKbScope(kb) }} · {{ kb.doc_count || 0 }} 个文件</span>
+              <span v-if="selectedKbIds.includes(kb.id)" class="kb-option-check">✓</span>
+            </button>
+            <div v-if="!filteredKnowledgeBases.length" class="kb-option-empty">未找到知识库</div>
+          </div>
+        </div>
+        <div v-if="kbRequiredHint" class="error-tip">请先选择至少一个知识库再提问。</div>
+      </div>
 
-          </template>
+      <div class="conversation-panel">
+        <div class="section-head">
+          <span>最近会话</span>
+          <span class="muted-text">仅显示通用问答</span>
+        </div>
+        <div class="conversation-list">
+          <button
+            v-for="conv in conversations"
+            :key="conv.id"
+            class="conv-item"
+            :class="{ active: conv.id === activeConvId }"
+            @click="selectConversation(conv.id)"
+            @mouseenter="hoverConvId = conv.id"
+            @mouseleave="hoverConvId = null"
+          >
+            <div class="conv-main">
+              <div class="conv-title">{{ conv.title || '未命名会话' }}</div>
+              <div class="conv-time">{{ formatDate(conv.updated_at || conv.created_at) }}</div>
+            </div>
+            <div class="conv-actions" :class="{ visible: hoverConvId === conv.id }">
+              <span class="icon-btn disabled" title="当前版本暂未开放重命名">✎</span>
+              <span class="icon-btn disabled" title="当前版本暂未开放删除">🗑</span>
+            </div>
+          </button>
+          <div v-if="!conversations.length" class="empty-note">暂无通用问答会话</div>
         </div>
       </div>
 
+      <button class="manage-entry" :class="{ active: activeView === 'manage' }" @click="openManageView()">
+        知识库管理
+      </button>
+      </template>
+      <template v-else>
+        <div class="collapsed-actions">
+          <button class="collapsed-icon-btn" title="新建会话" @click="newConversation">✚</button>
+          <button class="collapsed-icon-btn" title="知识库选择" @click="openKbDrawer">库</button>
+          <button class="collapsed-icon-btn" title="知识库管理" @click="openManageView()">管</button>
+        </div>
+      </template>
     </aside>
 
-    <!-- 聊天主区域 -->
-    <div class="chat-main">
-      <div class="chat-header">
-        <span class="chat-title">{{ activeConv?.title || '知识库问答' }}</span>
-        <span v-if="selectedKbIds.length" class="kb-badge">{{ selectedKbIds.length }} 个知识库</span>
-      </div>
+    <div class="sidebar-divider">
+      <button
+        class="sidebar-toggle"
+        :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+        @click="toggleSidebar"
+      >
+        {{ sidebarCollapsed ? '☰' : '◧' }}
+      </button>
+    </div>
 
-      <div ref="msgContainer" class="msg-list">
-        <div v-if="!messages.length && !loading" class="msg-empty">发送问题，从知识库中获取回答</div>
-        <div v-for="(msg, idx) in messages" :key="idx" class="msg-row" :class="msg.role">
-          <div class="msg-bubble" :class="{ loading: msg._streaming && !msg.content_markdown }">
-            <div v-if="msg.content_markdown" class="msg-content" v-html="renderMd(msg.content_markdown)" />
-            <span v-else-if="msg._streaming" class="streaming-hint">{{ msg._status || '正在检索知识库...' }}</span>
+    <section class="main-panel">
+      <template v-if="activeView === 'chat'">
+        <div class="main-toolbar">
+          <div>
+            <div class="page-title">{{ activeConv?.title || '知识问答' }}</div>
+            <div class="page-subtitle">{{ selectedKbSummary }}</div>
+          </div>
+        </div>
 
-            <div v-if="msg.sources?.length" class="msg-sources">
-              <div class="sources-label">引用来源</div>
-              <div v-for="(src, si) in msg.sources" :key="si" class="source-item">
-                <span class="source-title">{{ src.title || `文档#${src.doc_id}` }}</span>
-                <span v-if="src.score != null" class="source-score">[{{ (src.score * 100).toFixed(0) }}%]</span>
-                <span class="source-snippet">{{ src.snippet }}</span>
+        <div ref="msgContainer" class="message-board">
+          <div v-if="!messages.length && !loading" class="message-empty">
+            <div class="empty-title">开始新的通用知识问答</div>
+            <div class="empty-note">可选择一个或多个知识库进行检索问答。</div>
+          </div>
+
+          <div v-for="(msg, idx) in messages" :key="idx" class="msg-row" :class="msg.role">
+            <div class="msg-bubble">
+              <div v-if="msg.content_markdown" class="msg-content" v-html="renderMd(msg.content_markdown)" />
+              <div v-else-if="msg._streaming" class="streaming-hint">{{ msg._status || '正在检索知识库...' }}</div>
+
+              <div v-if="msg.sources?.length" class="msg-section">
+                <div class="msg-section-title">引用来源</div>
+                <button
+                  v-for="(src, si) in msg.sources"
+                  :key="si"
+                  class="source-item"
+                  @click="openSourcePreview(src)"
+                >
+                  <div class="source-head">
+                    <span>{{ src.title || `文档 #${src.doc_id}` }}</span>
+                    <span v-if="src.score != null" class="source-score">{{ (src.score * 100).toFixed(0) }}%</span>
+                  </div>
+                  <div class="source-snippet">{{ src.snippet }}</div>
+                </button>
               </div>
-            </div>
 
-            <div v-if="msg.risk_highlights?.length" class="msg-risks">
-              <span v-for="(risk, ri) in msg.risk_highlights" :key="ri" class="risk-tag">
-                ⚠ {{ displayRisk(risk) }}
-              </span>
-            </div>
+              <div v-if="msg.risk_highlights?.length" class="msg-section">
+                <div class="risk-list">
+                  <span v-for="(risk, ri) in msg.risk_highlights" :key="ri" class="risk-tag">⚠ {{ displayRisk(risk) }}</span>
+                </div>
+              </div>
 
-            <div v-if="msg.disclaimer" class="msg-disclaimer">{{ msg.disclaimer }}</div>
+              <div v-if="msg.disclaimer" class="msg-disclaimer">{{ msg.disclaimer }}</div>
 
-            <!-- 反馈按钮：只对有 id 的已落库消息展示 -->
-            <div v-if="msg.role === 'assistant' && msg.id && !msg._streaming" class="msg-feedback">
-              <button
-                :class="['fb-btn', feedbackState[msg.id] === 'up' && 'fb-active-up']"
-                :disabled="feedbackState[msg.id] === 'sending'"
-                title="有帮助"
-                @click="submitFeedback(msg, 'up')"
-              >👍</button>
-              <button
-                :class="['fb-btn', feedbackState[msg.id] === 'down' && 'fb-active-down']"
-                :disabled="feedbackState[msg.id] === 'sending'"
-                title="没帮助"
-                @click="submitFeedback(msg, 'down')"
-              >👎</button>
+              <div v-if="msg.role === 'assistant' && msg.id && !msg._streaming" class="msg-feedback">
+                <button
+                  class="feedback-btn"
+                  :class="{ active: feedbackState[msg.id] === 'up' }"
+                  :disabled="feedbackState[msg.id] === 'sending'"
+                  @click="submitFeedback(msg, 'up')"
+                >
+                  👍 有帮助
+                </button>
+                <button
+                  class="feedback-btn"
+                  :class="{ active: feedbackState[msg.id] === 'down' }"
+                  :disabled="feedbackState[msg.id] === 'sending'"
+                  @click="submitFeedback(msg, 'down')"
+                >
+                  👎 需改进
+                </button>
+              </div>
             </div>
           </div>
         </div>
 
-        <div v-if="loading && !messages.some(m => m._streaming)" class="msg-row assistant">
-          <div class="msg-bubble loading">正在检索知识库...</div>
-        </div>
-      </div>
-
-      <div class="input-bar">
-        <div v-if="kbRequiredHint" class="kb-hint">请先在左侧「知识库」标签中选择至少一个知识库</div>
-        <div class="input-row">
-          <textarea
-            v-model="inputText"
-            class="input-box"
-            placeholder="输入问题，按 Enter 发送（Shift+Enter 换行）"
-            :disabled="loading"
-            rows="3"
-            @keydown="handleKeydown"
-          />
-          <button class="btn-send" :disabled="loading || !inputText.trim()" @click="sendMessage">
-            发送
+        <div v-if="quickTemplates.length" class="template-row">
+          <button v-for="tpl in quickTemplates" :key="tpl.template_id" class="template-chip" @click="applyTemplate(tpl)">
+            {{ tpl.name }}
           </button>
         </div>
-      </div>
-    </div>
 
-    <input
-      ref="fileInput"
-      type="file"
-      multiple
-      style="display:none"
-      accept=".txt,.md,.pdf,.docx,.csv,.xlsx,.xls"
-      @change="handleUpload"
-    />
+        <div class="composer">
+          <div class="composer-card">
+            <textarea
+              v-model="inputText"
+              class="composer-input"
+              placeholder="输入问题，按 Enter 发送，Shift + Enter 换行"
+              @keydown="handleKeydown"
+            />
+            <button class="send-icon-btn" :disabled="loading" @click="sendMessage">↑</button>
+          </div>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="main-toolbar">
+          <div>
+            <div class="page-title">知识库管理</div>
+            <div class="page-subtitle">查看可访问知识库及其文件</div>
+          </div>
+        </div>
+
+        <div class="manage-layout">
+          <div class="manage-kb-panel">
+            <div class="section-head">
+              <span>我的个人库</span>
+            </div>
+            <div class="create-kb-card">
+              <input v-model="kbForm.name" class="field-input" placeholder="新建个人知识库名称" />
+              <input v-model="kbForm.description" class="field-input" placeholder="描述（可选）" />
+              <div v-if="kbFormError" class="error-tip">{{ kbFormError }}</div>
+              <button class="btn-primary small-btn" :disabled="kbFormLoading" @click="createPersonalKb">
+                {{ kbFormLoading ? '创建中...' : '创建个人库' }}
+              </button>
+            </div>
+            <div v-if="!personalKbs.length" class="empty-note">暂无个人知识库</div>
+            <button
+              v-for="kb in personalKbs"
+              :key="kb.id"
+              class="kb-card"
+              :class="{ active: String(manageSelectedKbId) === String(kb.id) }"
+              @click="manageSelectedKbId = kb.id; fetchDocs(1)"
+            >
+              <div class="kb-card-title-row">
+                <span class="kb-card-title">{{ kb.name }}</span>
+                <span class="kb-card-count">{{ kb.doc_count || 0 }}</span>
+              </div>
+              <div class="kb-card-desc">{{ kb.description || '无描述' }}</div>
+              <div class="kb-card-actions">
+                <span class="kb-scope">个人库</span>
+                <button class="text-btn danger-text" @click.stop="deletePersonalKb(kb)">删除</button>
+              </div>
+            </button>
+
+            <div class="section-head with-top-gap"><span>科室库</span></div>
+            <div v-if="!departmentKbs.length" class="empty-note">暂无科室知识库</div>
+            <button
+              v-for="kb in departmentKbs"
+              :key="kb.id"
+              class="kb-card"
+              :class="{ active: String(manageSelectedKbId) === String(kb.id) }"
+              @click="manageSelectedKbId = kb.id; fetchDocs(1)"
+            >
+              <div class="kb-card-title-row">
+                <span class="kb-card-title">{{ kb.name }}</span>
+                <span class="kb-card-count">{{ kb.doc_count || 0 }}</span>
+              </div>
+              <div class="kb-card-desc">{{ kb.description || '无描述' }}</div>
+              <div class="kb-card-actions"><span class="kb-scope">科室库</span></div>
+            </button>
+
+            <div class="section-head with-top-gap"><span>公共库</span></div>
+            <div v-if="!publicKbs.length" class="empty-note">暂无公共知识库</div>
+            <button
+              v-for="kb in publicKbs"
+              :key="kb.id"
+              class="kb-card"
+              :class="{ active: String(manageSelectedKbId) === String(kb.id) }"
+              @click="manageSelectedKbId = kb.id; fetchDocs(1)"
+            >
+              <div class="kb-card-title-row">
+                <span class="kb-card-title">{{ kb.name }}</span>
+                <span class="kb-card-count">{{ kb.doc_count || 0 }}</span>
+              </div>
+              <div class="kb-card-desc">{{ kb.description || '无描述' }}</div>
+              <div class="kb-card-actions"><span class="kb-scope">公共库</span></div>
+            </button>
+          </div>
+
+          <div class="manage-doc-panel">
+            <div class="manage-doc-toolbar">
+              <div>
+                <div class="page-title small">{{ manageSelectedKb?.name || '请选择知识库' }}</div>
+                <div class="page-subtitle">{{ manageSelectedKb ? formatKbScope(manageSelectedKb) : '选择左侧知识库后查看文件' }}</div>
+              </div>
+              <div class="toolbar-actions wrap">
+                <input v-model="docSearch" class="field-input search-input" placeholder="搜索文件名" @keydown.enter="onDocSearch" />
+                <button class="btn-secondary" @click="onDocSearch">搜索</button>
+                <button class="btn-secondary" :disabled="!selectedDocIds.length" @click="downloadSelectedDocs">批量下载</button>
+                <button
+                  v-if="canUploadToManageKb"
+                  class="btn-primary"
+                  :disabled="uploadLoadingKbId === manageSelectedKbId"
+                  @click="triggerUpload(manageSelectedKbId)"
+                >
+                  {{ uploadLoadingKbId === manageSelectedKbId ? '上传中...' : '上传文件' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="uploadErrorKbId === manageSelectedKbId && uploadError" class="error-banner">{{ uploadError }}</div>
+
+            <div v-if="!manageSelectedKbId" class="manage-empty">请先在左侧选择知识库。</div>
+            <div v-else class="doc-table-wrap">
+              <div v-if="docsLoading" class="manage-empty">加载中...</div>
+              <div v-else-if="!docs.length" class="manage-empty">暂无文件</div>
+              <template v-else>
+                <table class="doc-table">
+                  <thead>
+                    <tr>
+                      <th><input type="checkbox" :checked="selectedDocIds.length && selectedDocIds.length === docs.length" @change="selectAllDocs($event.target.checked)" /></th>
+                      <th>文件名</th>
+                      <th>类型</th>
+                      <th>状态</th>
+                      <th>更新时间</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="doc in docs" :key="doc.id">
+                      <td><input type="checkbox" :checked="selectedDocIds.includes(doc.id)" @change="toggleDocSelection(doc.id)" /></td>
+                      <td>
+                        <div class="doc-title">{{ doc.title }}</div>
+                        <div class="doc-meta">{{ doc.file_name || `文档 #${doc.id}` }}</div>
+                      </td>
+                      <td>{{ doc.file_ext || '--' }}</td>
+                      <td>{{ doc.status || '--' }}</td>
+                      <td>{{ formatDate(doc.updated_at || doc.created_at) }}</td>
+                      <td>
+                        <div class="table-actions">
+                          <button class="text-btn" @click="openDocPreviewByDoc(doc)">预览</button>
+                          <button class="text-btn" @click="downloadDoc(doc)">下载</button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div class="pager">
+                  <button class="btn-secondary" :disabled="docsPage <= 1" @click="fetchDocs(docsPage - 1)">上一页</button>
+                  <span>第 {{ docsPage }} / {{ totalDocPages }} 页</span>
+                  <button class="btn-secondary" :disabled="docsPage >= totalDocPages" @click="fetchDocs(docsPage + 1)">下一页</button>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+    </section>
+
+    <input ref="fileInput" type="file" multiple hidden @change="handleUpload" />
+
+    <teleport to="body">
+      <div v-if="kbDrawerOpen" class="drawer-backdrop" @click.self="kbDrawerOpen = false">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div>
+              <div class="page-title small">选择知识库</div>
+              <div class="page-subtitle">可多选，用于当前通用问答</div>
+            </div>
+            <button class="close-btn" @click="kbDrawerOpen = false">✕</button>
+          </div>
+          <div v-if="kbLoading" class="manage-empty">加载中...</div>
+          <div v-else class="drawer-body">
+            <div class="drawer-section">
+              <div class="section-head"><span>我的个人库</span></div>
+              <label v-for="kb in personalKbs" :key="kb.id" class="drawer-kb-row">
+                <input :checked="selectedKbIds.includes(kb.id)" type="checkbox" @change="toggleKb(kb.id)" />
+                <div class="drawer-kb-info">
+                  <div>{{ kb.name }}</div>
+                  <div class="muted-text">{{ kb.doc_count || 0 }} 个文件</div>
+                </div>
+                <button class="text-btn" @click.prevent="openManageView(kb.id); kbDrawerOpen = false">管理</button>
+              </label>
+            </div>
+            <div class="drawer-section">
+              <div class="section-head"><span>科室库</span></div>
+              <label v-for="kb in departmentKbs" :key="kb.id" class="drawer-kb-row">
+                <input :checked="selectedKbIds.includes(kb.id)" type="checkbox" @change="toggleKb(kb.id)" />
+                <div class="drawer-kb-info">
+                  <div>{{ kb.name }}</div>
+                  <div class="muted-text">{{ kb.doc_count || 0 }} 个文件</div>
+                </div>
+                <button class="text-btn" @click.prevent="openFileDrawer(kb.id); kbDrawerOpen = false">文件</button>
+              </label>
+            </div>
+            <div class="drawer-section">
+              <div class="section-head"><span>公共库</span></div>
+              <label v-for="kb in publicKbs" :key="kb.id" class="drawer-kb-row">
+                <input :checked="selectedKbIds.includes(kb.id)" type="checkbox" @change="toggleKb(kb.id)" />
+                <div class="drawer-kb-info">
+                  <div>{{ kb.name }}</div>
+                  <div class="muted-text">{{ kb.doc_count || 0 }} 个文件</div>
+                </div>
+                <button class="text-btn" @click.prevent="openFileDrawer(kb.id); kbDrawerOpen = false">文件</button>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </teleport>
+
+    <teleport to="body">
+      <div v-if="fileDrawerOpen" class="drawer-backdrop" @click.self="fileDrawerOpen = false">
+        <div class="drawer-panel wide-drawer">
+          <div class="drawer-header">
+            <div>
+              <div class="page-title small">文件查看</div>
+              <div class="page-subtitle">{{ manageSelectedKb?.name || '请选择知识库' }}</div>
+            </div>
+            <button class="close-btn" @click="fileDrawerOpen = false">✕</button>
+          </div>
+          <div class="drawer-toolbar">
+            <select v-model="manageSelectedKbId" class="field-input select-input" @change="fetchDocs(1)">
+              <option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+            </select>
+            <input v-model="docSearch" class="field-input search-input" placeholder="搜索文件名" @keydown.enter="onDocSearch" />
+            <button class="btn-secondary" @click="onDocSearch">搜索</button>
+          </div>
+          <div class="drawer-body">
+            <div v-if="docsLoading" class="manage-empty">加载中...</div>
+            <div v-else-if="!docs.length" class="manage-empty">暂无文件</div>
+            <div v-else class="drawer-doc-list">
+              <div v-for="doc in docs" :key="doc.id" class="drawer-doc-row">
+                <div class="drawer-doc-main">
+                  <div class="doc-title">{{ doc.title }}</div>
+                  <div class="doc-meta">{{ doc.file_ext || '--' }} · {{ formatDate(doc.updated_at || doc.created_at) }}</div>
+                </div>
+                <div class="table-actions">
+                  <button class="text-btn" @click="openDocPreviewByDoc(doc)">预览</button>
+                  <button class="text-btn" @click="downloadDoc(doc)">下载</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </teleport>
+
+    <teleport to="body">
+      <div v-if="docPreviewOpen" class="drawer-backdrop" @click.self="closeDocPreview">
+        <div class="preview-modal">
+          <div class="drawer-header">
+            <div class="page-title small">{{ docPreviewTitle }}</div>
+            <button class="close-btn" @click="closeDocPreview">✕</button>
+          </div>
+          <div v-if="docPreviewLoading" class="manage-empty">加载中...</div>
+          <div v-else-if="docPreviewErr" class="error-banner">{{ docPreviewErr }}</div>
+          <template v-else-if="docPreviewData">
+            <div class="preview-meta">
+              <span>版本 v{{ docPreviewData.version_no || '--' }}</span>
+              <span>模型 {{ docPreviewData.embedding_model || '--' }}</span>
+              <span>{{ docPreviewData.chunk_count || 0 }} chunks</span>
+            </div>
+            <div class="preview-tabs">
+              <button class="preview-tab" :class="{ active: docPreviewTab === 'raw' }" @click="docPreviewTab = 'raw'">原始文本</button>
+              <button class="preview-tab" :class="{ active: docPreviewTab === 'clean' }" @click="docPreviewTab = 'clean'">清洗文本</button>
+              <button class="preview-tab" :class="{ active: docPreviewTab === 'chunks' }" @click="docPreviewTab = 'chunks'">Chunks</button>
+            </div>
+            <div class="preview-body">
+              <div v-show="docPreviewTab === 'raw'" class="preview-text"><pre>{{ docPreviewData.raw_text_preview || '暂无原始文本' }}</pre></div>
+              <div v-show="docPreviewTab === 'clean'" class="preview-text"><pre>{{ docPreviewData.cleaned_text_preview || '暂无清洗文本' }}</pre></div>
+              <div v-show="docPreviewTab === 'chunks'" class="preview-chunk-list">
+                <div v-if="!docPreviewData.chunks_preview?.length" class="manage-empty">暂无 Chunk 数据</div>
+                <div
+                  v-for="chunk in docPreviewData.chunks_preview || []"
+                  :key="chunk.chunk_index"
+                  class="preview-chunk-item"
+                  :class="{ hit: chunk.is_hit || chunk.chunk_id === docPreviewChunkId }"
+                >
+                  <div class="preview-chunk-head">
+                    <span>{{ chunk.chunk_id }}</span>
+                    <span>{{ (chunk.text || '').length }} 字</span>
+                  </div>
+                  <div class="preview-chunk-text">{{ chunk.text }}</div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </teleport>
   </div>
 </template>
 
 <style scoped>
-.chat-workspace { display: flex; height: calc(100vh - 52px); overflow: hidden; }
+.chat-workspace {
+  display: flex;
+  height: calc(100vh - 52px);
+  min-height: calc(100vh - 52px);
+  max-height: calc(100vh - 52px);
+  padding: 26px 32px 32px;
+  gap: 0;
+  overflow: hidden;
+  background: #f4f9ff;
+  color: #16324f;
+  font-size: 14px;
+}
 
-/* ── 侧栏 ── */
-.sidebar { width: 260px; min-width: 220px; border-right: 1px solid #e2e8f0; background: #fff; display: flex; flex-direction: column; }
+.sidebar {
+  width: 237px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 4px 18px 4px 0;
+  border-right: none;
+  background: transparent;
+  transition: width 0.2s ease, padding 0.2s ease;
+}
 
-.sidebar-tabs { display: flex; border-bottom: 1px solid #e2e8f0; flex-shrink: 0; }
-.tab-btn { flex: 1; padding: 10px 4px; border: none; background: none; font-size: 13px; color: #64748b; cursor: pointer; position: relative; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; }
-.tab-btn:hover { color: #334155; }
-.tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
-.tab-badge { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 8px; background: #2563eb; color: #fff; font-size: 10px; font-weight: 700; margin-left: 4px; }
+.sidebar.collapsed {
+  width: 56px;
+  padding-right: 8px;
+}
 
-.tab-content { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
-.tab-header { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; flex-shrink: 0; }
+.sidebar-header,
+.kb-summary-card,
+.conversation-panel,
+.manage-entry,
+.main-panel,
+.drawer-panel,
+.preview-modal,
+.kb-card,
+.create-kb-card {
+  border-radius: 16px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  backdrop-filter: none;
+}
 
-/* 会话 tab */
-.conv-list { flex: 1; overflow-y: auto; padding: 6px 0; }
-.conv-item { padding: 9px 14px; cursor: pointer; transition: background 0.1s; }
-.conv-item:hover { background: #f8fafc; }
-.conv-item.active { background: #eff6ff; }
-.conv-title { display: block; font-size: 13px; color: #334155; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.conv-date { display: block; font-size: 11px; color: #94a3b8; margin-top: 2px; }
+.sidebar-header,
+.kb-summary-card,
+.conversation-panel {
+  padding: 8px 10px 0;
+}
 
-/* 知识库 tab */
-.new-kb-form { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
-.kb-scroll { flex: 1; overflow-y: auto; padding: 8px 0; }
-.kb-section-label { font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 14px 4px; }
+.sidebar-title,
+.page-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #16324f;
+  line-height: 1.3;
+}
 
-.kb-group { }
-.kb-item { display: flex; align-items: center; gap: 6px; padding: 6px 14px; cursor: pointer; transition: background 0.1s; }
-.kb-item:hover { background: #f8fafc; }
-.kb-item.selected { background: #eff6ff; }
-.kb-dot { width: 7px; height: 7px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; transition: background 0.15s; }
-.kb-item.selected .kb-dot { background: #2563eb; }
-.kb-name { flex: 1; font-size: 13px; color: #334155; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.kb-item.selected .kb-name { color: #2563eb; }
-.kb-count { font-size: 11px; color: #94a3b8; flex-shrink: 0; }
-.kb-expand-btn { border: none; background: none; color: #94a3b8; cursor: pointer; font-size: 11px; padding: 0 2px; flex-shrink: 0; line-height: 1; }
-.kb-expand-btn:hover { color: #334155; }
-.kb-scope-tag { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: #f1f5f9; color: #64748b; flex-shrink: 0; }
+.page-title.small {
+  font-size: 15px;
+}
 
-.kb-detail { margin: 0 14px 4px; padding: 8px 10px; background: #f8fafc; border-radius: 6px; border: 1px solid #f1f5f9; }
-.kb-detail-desc { font-size: 12px; color: #64748b; margin: 0 0 8px; }
-.kb-detail-actions { display: flex; gap: 6px; }
+.main-toolbar > div:first-child .page-title {
+  border-left: 3px solid #19c6d0;
+  padding-left: 10px;
+  font-weight: 700;
+}
 
-/* ── 공통 버튼 ── */
-.btn-new { width: 100%; font-size: 12px; padding: 5px 10px; border: 1px solid #2563eb; color: #2563eb; border-radius: 5px; background: none; cursor: pointer; }
-.btn-new:hover { background: #eff6ff; }
-.btn-confirm { align-self: flex-start; font-size: 12px; padding: 5px 12px; background: #2563eb; color: #fff; border: none; border-radius: 5px; cursor: pointer; }
-.btn-confirm:hover:not(:disabled) { background: #1d4ed8; }
-.btn-confirm:disabled { background: #93c5fd; cursor: not-allowed; }
-.btn-sm { border: 1px solid #cbd5e1; background: #fff; color: #334155; border-radius: 5px; font-size: 12px; padding: 4px 8px; cursor: pointer; }
-.btn-sm:hover:not(:disabled) { background: #eff6ff; border-color: #93c5fd; }
-.btn-sm:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-danger { color: #dc2626; border-color: #fecaca; }
-.btn-danger:hover:not(:disabled) { background: #fef2f2; }
+.sidebar-subtitle,
+.page-subtitle,
+.muted-text,
+.empty-note,
+.doc-meta,
+.conv-time,
+.kb-card-desc,
+.msg-disclaimer {
+  color: #6b7280;
+  font-size: 12.5px;
+}
 
-.field-input { width: 100%; box-sizing: border-box; border: 1px solid #dbe5f0; border-radius: 6px; padding: 7px 10px; font-size: 13px; outline: none; }
-.field-input:focus { border-color: #2563eb; }
-.error-tip { color: #dc2626; font-size: 12px; margin: 2px 0; }
-.empty-hint { padding: 12px 14px; font-size: 12px; color: #94a3b8; }
+.sidebar-title {
+  margin-bottom: 2px;
+}
 
-/* ── 聊天主区域 ── */
-.chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.chat-header { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid #e2e8f0; background: #fff; flex-shrink: 0; }
-.chat-title { font-size: 15px; font-weight: 600; color: #1e293b; }
-.kb-badge { font-size: 11px; padding: 2px 8px; background: #eff6ff; color: #2563eb; border-radius: 10px; }
+.new-chat-btn {
+  width: 100%;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid rgba(109, 145, 186, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #334155;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(95,130,171,0.08);
+  transition: all 0.2s ease;
+}
 
-.msg-list { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; background: #f8fafc; }
-.msg-empty { text-align: center; color: #94a3b8; font-size: 14px; margin-top: 60px; }
-.msg-row { display: flex; }
-.msg-row.user { justify-content: flex-end; }
-.msg-row.assistant { justify-content: flex-start; }
-.msg-bubble { max-width: 72%; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.6; }
-.msg-row.user .msg-bubble { background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
-.msg-row.assistant .msg-bubble { background: #fff; color: #334155; border: 1px solid #e2e8f0; border-bottom-left-radius: 4px; }
-.msg-bubble.loading { color: #94a3b8; font-style: italic; }
-.streaming-hint { color: #94a3b8; font-style: italic; font-size: 13px; }
-.msg-content { white-space: normal; word-break: break-word; margin: 0; line-height: 1.65; }
-.msg-content :deep(p) { margin: 0 0 8px; }
-.msg-content :deep(p:last-child) { margin-bottom: 0; }
-.msg-content :deep(ul), .msg-content :deep(ol) { margin: 4px 0 8px; padding-left: 20px; }
-.msg-content :deep(li) { margin-bottom: 3px; }
-.msg-content :deep(strong) { font-weight: 600; }
-.msg-content :deep(code) { background: rgba(0,0,0,0.06); border-radius: 3px; padding: 1px 4px; font-size: 12px; }
-.msg-content :deep(pre) { background: rgba(0,0,0,0.06); border-radius: 6px; padding: 8px 12px; overflow-x: auto; margin: 6px 0; }
-.msg-content :deep(pre code) { background: none; padding: 0; }
+.new-chat-btn:hover {
+  background: #fff;
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.24);
+}
 
-.msg-sources { margin-top: 12px; padding-top: 10px; border-top: 1px solid #f1f5f9; }
-.sources-label { font-size: 11px; font-weight: 600; color: #64748b; margin-bottom: 6px; }
-.source-item { font-size: 12px; color: #475569; margin-bottom: 4px; }
-.source-title { font-weight: 500; color: #2563eb; margin-right: 4px; }
-.source-score { color: #94a3b8; margin-right: 6px; }
-.source-snippet { color: #64748b; }
-.msg-risks { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-.risk-tag { font-size: 11px; padding: 2px 8px; border-radius: 12px; background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
-.msg-disclaimer { margin-top: 10px; font-size: 11px; color: #f59e0b; border-top: 1px solid #fef3c7; padding-top: 8px; }
+.new-chat-plus {
+  color: #64748b;
+  font-size: 14px;
+}
 
-.msg-feedback { display: flex; gap: 6px; margin-top: 8px; }
-.fb-btn { border: 1px solid #e2e8f0; background: #fff; border-radius: 6px; padding: 2px 8px; font-size: 14px; cursor: pointer; color: #94a3b8; transition: border-color 0.15s, background 0.15s; }
-.fb-btn:hover:not(:disabled) { border-color: #2563eb; background: #eff6ff; }
-.fb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.fb-active-up { background: #dcfce7 !important; border-color: #16a34a !important; }
-.fb-active-down { background: #fee2e2 !important; border-color: #dc2626 !important; }
+.page-subtitle {
+  color: #7d94ad;
+  margin-top: 6px;
+  padding-left: 15px;
+}
 
-.input-bar { display: flex; flex-direction: column; gap: 6px; padding: 16px 24px; background: #fff; border-top: 1px solid #e2e8f0; flex-shrink: 0; }
-.kb-hint { font-size: 12px; color: #b45309; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 12px; }
-.input-row { display: flex; gap: 12px; }
-.input-box { flex: 1; resize: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s; }
-.input-box:focus { border-color: #2563eb; }
-.input-box:disabled { background: #f8fafc; color: #94a3b8; }
-.btn-send { padding: 0 20px; background: #2563eb; color: #fff; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background 0.15s; white-space: nowrap; }
-.btn-send:hover:not(:disabled) { background: #1d4ed8; }
-.btn-send:disabled { background: #93c5fd; cursor: not-allowed; }
+.btn-primary,
+.btn-secondary,
+.text-btn,
+.manage-entry,
+.conv-item,
+.source-item,
+.composer-link,
+.template-chip,
+.preview-tab {
+  transition: all 0.2s ease;
+}
+
+.btn-primary,
+.btn-secondary,
+.manage-entry {
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.btn-primary {
+  background: #fff;
+  color: #2563eb;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(37,99,235,0.16);
+  box-shadow: none;
+}
+
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #fff;
+  color: #2563eb;
+  border: 1px solid rgba(37,99,235,0.16);
+  padding: 8px 12px;
+  border-radius: 12px;
+}
+
+.small-btn {
+  width: 100%;
+}
+
+.text-btn {
+  border: none;
+  background: transparent;
+  color: #4f46e5;
+  cursor: pointer;
+  padding: 0;
+}
+
+.danger-text {
+  color: #dc2626;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.with-top-gap {
+  margin-top: 18px;
+}
+
+.kb-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.kb-select-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #16324f;
+}
+
+.kb-combobox {
+  position: relative;
+}
+
+.kb-combobox-input {
+  width: 100%;
+  height: 38px;
+  border: 1px solid rgba(109,145,186,0.18);
+  border-radius: 12px;
+  padding: 0 34px 0 12px;
+  background: rgba(255,255,255,0.78);
+  color: #16324f;
+  font: inherit;
+  outline: none;
+  box-shadow: 0 8px 18px rgba(95,130,171,0.04);
+}
+
+.kb-combobox-input::placeholder {
+  color: #6b7280;
+  opacity: 1;
+}
+
+.kb-combobox-input:focus {
+  border-color: rgba(37,99,235,0.28);
+  background: #fff;
+}
+
+.kb-combobox-arrow {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-55%);
+  color: #94a3b8;
+  pointer-events: none;
+}
+
+.kb-combobox-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 14px;
+  background: #fff;
+  border: 1px solid rgba(109,145,186,0.14);
+  box-shadow: 0 18px 36px rgba(95,130,171,0.16);
+}
+
+.kb-option {
+  position: relative;
+  width: 100%;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  padding: 8px 28px 8px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kb-option:hover,
+.kb-option.selected {
+  background: #eef4ff;
+}
+
+.kb-option-main {
+  display: block;
+  color: #16324f;
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-option-meta {
+  display: block;
+  margin-top: 3px;
+  color: #8a9bb0;
+  font-size: 12px;
+}
+
+.kb-option-check {
+  position: absolute;
+  right: 10px;
+  top: 12px;
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.kb-option-empty {
+  padding: 12px;
+  color: #94a3b8;
+  font-size: 12.5px;
+}
+
+.kb-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kb-chip,
+.risk-tag,
+.kb-scope {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 0;
+  border-radius: 0;
+  background: transparent;
+  color: #2563eb;
+  font-size: 12px;
+}
+
+.error-tip,
+.error-banner {
+  color: #b91c1c;
+  font-size: 12.5px;
+}
+
+.error-banner {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fef2f2;
+}
+
+.conversation-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-top: 6px;
+}
+
+.conversation-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.conv-item {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 14px;
+  text-align: left;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.conv-item:hover,
+.conv-item.active {
+  border-color: rgba(47,111,237,0.12);
+  background: rgba(255,255,255,0.56);
+}
+
+.conv-main {
+  min-width: 0;
+}
+
+.conv-title,
+.doc-title,
+.kb-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #16324f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-actions {
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+}
+
+.conv-actions.visible {
+  opacity: 1;
+}
+
+.icon-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.9);
+}
+
+.icon-btn.disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.manage-entry {
+  margin-top: auto;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.62);
+  color: #52708e;
+  text-align: center;
+  border: 1px solid rgba(109, 145, 186, 0.1);
+  box-shadow: 0 10px 24px rgba(95,130,171,0.06);
+}
+
+.manage-entry.active,
+.manage-entry:hover {
+  background: #fff;
+  color: #2563eb;
+}
+
+.collapsed-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.collapsed-icon-btn {
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(109, 145, 186, 0.12);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.7);
+  color: #52708e;
+  cursor: pointer;
+}
+
+.sidebar-divider {
+  width: 1px;
+  align-self: stretch;
+  background: rgba(109,145,186,0.18);
+  position: relative;
+  margin: 0 16px 0 2px;
+}
+
+.sidebar-toggle {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(109,145,186,0.16);
+  border-radius: 12px;
+  background: #fff;
+  color: #64748b;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(95,130,171,0.08);
+  font-size: 16px;
+}
+
+.main-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(109, 145, 186, 0.12);
+  box-shadow: 0 18px 38px rgba(95, 130, 171, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.main-toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toolbar-actions.wrap {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.message-board {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 4px 8px 0;
+}
+
+.message-empty,
+.manage-empty {
+  height: 100%;
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: #94a3b8;
+}
+
+.empty-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #475569;
+}
+
+.msg-row {
+  display: flex;
+  margin-bottom: 16px;
+}
+
+.msg-row.user {
+  justify-content: flex-end;
+}
+
+.msg-row.assistant {
+  justify-content: flex-start;
+}
+
+.msg-bubble {
+  max-width: min(880px, 82%);
+  padding: 13px 15px;
+  border-radius: 18px;
+  background: #ffffff;
+  border: 1px solid rgba(109, 145, 186, 0.12);
+  box-shadow: 0 12px 28px rgba(95, 130, 171, 0.08);
+}
+
+.msg-row.user .msg-bubble {
+  background: #ffffff;
+  color: #16324f;
+  border-color: rgba(109, 145, 186, 0.12);
+}
+
+.msg-content :deep(p:first-child) {
+  margin-top: 0;
+}
+
+.msg-content :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.msg-section {
+  margin-top: 12px;
+}
+
+.msg-section-title {
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.source-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 8px 10px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.source-item:hover {
+  border-color: rgba(47,111,237,0.24);
+  background: #eff6ff;
+}
+
+.source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.source-score {
+  color: #4f46e5;
+}
+
+.source-snippet {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: #64748b;
+}
+
+.risk-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.msg-row.user .msg-disclaimer,
+.msg-row.user .source-item,
+.msg-row.user .risk-tag {
+  color: inherit;
+}
+
+.msg-feedback {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.feedback-btn {
+  border: 1px solid #dbeafe;
+  background: #eff6ff;
+  color: #2563eb;
+  padding: 7px 9px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.feedback-btn.active {
+  border-color: #1d4ed8;
+}
+
+.streaming-hint {
+  color: #64748b;
+}
+
+.template-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.template-chip {
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: #4b5563;
+  padding: 7px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.template-chip:hover {
+  border-color: #c7d2fe;
+  color: #4338ca;
+}
+
+.composer {
+  margin-top: 12px;
+}
+
+.composer-card {
+  position: relative;
+  border: 1px solid rgba(109,145,186,0.16);
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 12px 28px rgba(95,130,171,0.06);
+  padding: 14px 56px 14px 18px;
+}
+
+.composer-input,
+.field-input,
+.select-input {
+  width: 100%;
+  border: 1px solid rgba(109,145,186,0.18);
+  border-radius: 14px;
+  padding: 12px 14px;
+  font: inherit;
+  background: #fff;
+  color: #16324f;
+}
+
+.composer-input {
+  min-height: 58px;
+  max-height: 132px;
+  resize: none;
+  border: none;
+  padding: 0;
+  outline: none;
+  box-shadow: none;
+  line-height: 1.55;
+}
+
+.search-input {
+  min-width: 220px;
+}
+
+.composer-footer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.composer-link {
+  border: none;
+  background: transparent;
+  color: #2563eb;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12.5px;
+}
+
+.composer-link:last-of-type {
+  margin-right: auto;
+}
+
+.send-icon-btn {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: none;
+  background: #e8edff;
+  color: #4f46e5;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.send-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.manage-layout {
+  display: flex;
+  gap: 18px;
+  flex: 1;
+  min-height: 0;
+}
+
+.manage-kb-panel {
+  width: 290px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.manage-doc-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.create-kb-card {
+  border: 1px solid #eef2f7;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.kb-card {
+  width: 100%;
+  text-align: left;
+  border: 1px solid #e5e7eb;
+  padding: 11px 12px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.kb-card.active,
+.kb-card:hover {
+  border-color: rgba(47,111,237,0.22);
+  background: #eff6ff;
+}
+
+.kb-card-title-row,
+.kb-card-actions,
+.manage-doc-toolbar,
+.preview-meta,
+.preview-chunk-head,
+.drawer-header,
+.drawer-toolbar,
+.drawer-kb-row,
+.drawer-doc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.kb-card-count {
+  color: #4338ca;
+  font-size: 12.5px;
+}
+
+.doc-table-wrap {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.doc-table th,
+.doc-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eef2f7;
+  text-align: left;
+  font-size: 12.5px;
+}
+
+.doc-table th {
+  background: #f7fbff;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.table-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 2000;
+}
+
+.drawer-panel,
+.preview-modal {
+  width: 420px;
+  height: 100%;
+  padding: 20px;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wide-drawer {
+  width: 620px;
+}
+
+.preview-modal {
+  width: min(860px, 92vw);
+  height: min(88vh, 860px);
+  margin: auto;
+  border-radius: 20px;
+}
+
+.drawer-body,
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.drawer-section {
+  margin-bottom: 20px;
+}
+
+.drawer-kb-row,
+.drawer-doc-row {
+  width: 100%;
+  padding: 12px 0;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.drawer-kb-info,
+.drawer-doc-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.close-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 10px;
+  background: #f3f4f6;
+  cursor: pointer;
+}
+
+.preview-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0;
+}
+
+.preview-tab {
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  padding: 8px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.preview-tab.active {
+  border-color: #2f6fed;
+  color: #2563eb;
+  background: #eef2ff;
+}
+
+.preview-text pre,
+.preview-chunk-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #334155;
+  line-height: 1.7;
+}
+
+.preview-chunk-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.preview-chunk-item.hit {
+  border-color: #a5b4fc;
+  background: #eef2ff;
+}
+
+@media (max-width: 1200px) {
+  .chat-workspace {
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+    padding: 18px;
+  }
+
+  .sidebar {
+    width: auto;
+    padding-right: 0;
+  }
+
+  .sidebar.collapsed {
+    width: auto;
+    padding-right: 0;
+  }
+
+  .sidebar-divider {
+    width: 100%;
+    height: 1px;
+    margin: 10px 0;
+  }
+
+  .sidebar-toggle {
+    left: auto;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .manage-layout {
+    flex-direction: column;
+  }
+
+  .manage-kb-panel {
+    width: auto;
+  }
+
+  .main-toolbar,
+  .manage-doc-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .msg-bubble {
+    max-width: 100%;
+  }
+}
 </style>

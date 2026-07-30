@@ -5,6 +5,8 @@ const db = require('../db');
 const axios = require('axios');
 const { nanoid } = require('nanoid');
 const msgSvc = require('./ragMessageService');
+const empiSvc = require('./empiService');
+const phiAudit = require('./ragPhiAuditService');
 
 const AI_BASE_URL = process.env.RAG_AI_BASE_URL || 'http://localhost:8000';
 const DEFAULT_DISCLAIMER = '⚠️ 本回答由 AI 基于知识库生成，仅供参考，不能替代执业医师临床判断';
@@ -33,6 +35,154 @@ function resolveKbIds(primary, fallback = []) {
   const normalized = normalizeKbIds(primary);
   if (normalized.length) return normalized;
   return normalizeKbIds(fallback);
+}
+
+/**
+ * 从 clinical-view 构建脱敏患者上下文。
+ * PHI 字段（name/id_card/phone/patient_id/source_id）一律不进入上下文。
+ * 仅提取临床最小必要字段：性别、年龄、诊断、主诉、化验关键值、病理要点、PACS描述。
+ * 自由文本字段经 sanitizeClinicalText 二次清洗后才写入。
+ */
+async function buildPatientContext(patientId, doctorId, conversationId = null) {
+  if (!patientId) return null;
+
+  let view;
+  try {
+    view = await empiSvc.getClinicalView(patientId);
+  } catch (e) {
+    console.error('[buildPatientContext] getClinicalView failed:', e.message);
+    return null;
+  }
+
+  if (!view) return null;
+
+  const patient = view.patient || {};
+
+  // 写 PHI 审计日志 — 仅记录字段名，不记录原始值
+  phiAudit.writePhiAuditLog({
+    doctorId,
+    patientId,
+    conversationId,
+    action: 'generate_context',
+    phiFields: ['name', 'id_card', 'phone', 'patient_id'],
+  });
+
+  // 年龄（从 birth_date 计算，不含原始生日）
+  let age = null;
+  if (patient.birth_date) {
+    const birth = new Date(patient.birth_date);
+    const now = new Date();
+    age = now.getFullYear() - birth.getFullYear();
+    if (now.getMonth() < birth.getMonth() || (now.getMonth() === birth.getMonth() && now.getDate() < birth.getDate())) {
+      age -= 1;
+    }
+  }
+
+  const gender = patient.gender || null;
+
+  // 最近诊断（来自 HIS，取最近一次，过自由文本清洗）
+  const recentHis = (view.his || []).sort((a, b) => new Date(b.visit_date || 0) - new Date(a.visit_date || 0))[0] || {};
+  const { text: recentDiagnosis, detectedFields: dxPhi } = sanitizeClinicalText(recentHis.diagnosis_name || null, patient);
+  const { text: chiefComplaint, detectedFields: ccPhi } = sanitizeClinicalText(recentHis.chief_complaint || null, patient);
+
+  // 化验关键值（异常优先，取最近5条，仅字段名+数值+单位，不含患者ID）
+  const labLines = (view.lis || [])
+    .filter(l => l.abnormal_flag)
+    .slice(0, 5)
+    .map(l => `${l.test_name}: ${l.value}${l.unit || ''}${l.ref_range ? `（参考 ${l.ref_range}）` : ''}`)
+    .join('；');
+
+  // 病理要点（取最近一份，仅描述类字段，过自由文本清洗）
+  const pathology = (view.lis_pathology || []).sort((a, b) => new Date(b.reported_at || 0) - new Date(a.reported_at || 0))[0] || {};
+  const pathologyPoints = [];
+  const allPathPhi = [];
+  if (pathology.diagnosis_text) {
+    const { text: diagText, detectedFields: dpPhi } = sanitizeClinicalText(pathology.diagnosis_text, patient);
+    pathologyPoints.push(diagText);
+    allPathPhi.push(...dpPhi);
+  }
+  if (pathology.breslow_thickness_mm) pathologyPoints.push(`Breslow ${pathology.breslow_thickness_mm}mm`);
+  if (pathology.ulceration) pathologyPoints.push('伴溃疡形成');
+
+  // PACS 描述（取最近一条描述，过自由文本清洗）
+  const rawPacsDesc = (view.pacs || []).sort((a, b) => new Date(b.recorded_at || 0) - new Date(a.recorded_at || 0))[0]?.description || null;
+  const { text: pacsDesc, detectedFields: pacsPhi } = sanitizeClinicalText(rawPacsDesc, patient);
+
+  // 汇总自由文本清洗命中的 PHI 字段类型，写审计（仅在实际命中时写）
+  const allFreeTextPhi = [...new Set([...dxPhi, ...ccPhi, ...allPathPhi, ...pacsPhi])];
+  if (allFreeTextPhi.length) {
+    phiAudit.writePhiAuditLog({
+      doctorId,
+      patientId,
+      conversationId,
+      action: 'phi_check',
+      phiFields: allFreeTextPhi,
+    });
+  }
+
+  // 构建 summary_text（仅包含清洗后的内容）
+  const parts = ['当前患者'];
+  if (gender) parts.push(gender);
+  if (age !== null) parts.push(`${age}岁`);
+  if (recentDiagnosis) parts.push(`近期诊断：${recentDiagnosis}`);
+  if (chiefComplaint) parts.push(`主诉：${chiefComplaint}`);
+  if (labLines) parts.push(`化验关键值：${labLines}`);
+  if (pathologyPoints.length) parts.push(`病理要点：${pathologyPoints.join('，')}`);
+  if (pacsDesc) parts.push(`影像描述：${pacsDesc}`);
+
+  const summary_text = parts.join('，') + '。';
+
+  return {
+    summary_text,
+    structured: {
+      gender,
+      age,
+      recent_diagnosis: recentDiagnosis || null,
+      chief_complaint: chiefComplaint || null,
+      pathology_key_points: pathologyPoints,
+    },
+  };
+}
+
+/**
+ * 对自由文本字段做最小 PHI 清洗。
+ * 替换患者姓名、手机号、身份证号、住院号/病历号等可识别信息。
+ * 返回 { text: string, detectedFields: string[] }，不记录原始值。
+ */
+function sanitizeClinicalText(text, patient = {}) {
+  if (!text || typeof text !== 'string') return { text: text || '', detectedFields: [] };
+
+  let result = text;
+  const detectedFields = [];
+
+  // 替换患者姓名（仅当姓名有效且足够长时才替换，避免误伤常用字）
+  if (patient.name && patient.name.length >= 2) {
+    const nameRe = new RegExp(patient.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    if (nameRe.test(result)) {
+      result = result.replace(nameRe, '[患者]');
+      detectedFields.push('patient_name');
+    }
+  }
+
+  // 替换手机号（11位，1开头）
+  if (/1[3-9]\d{9}/.test(result)) {
+    result = result.replace(/1[3-9]\d{9}/g, '[手机号]');
+    detectedFields.push('phone');
+  }
+
+  // 替换身份证号（18位或15位）
+  if (/\d{17}[\dXx]|\d{15}/.test(result)) {
+    result = result.replace(/\d{17}[\dXx]/g, '[身份证号]').replace(/\b\d{15}\b/g, '[身份证号]');
+    detectedFields.push('id_card');
+  }
+
+  // 替换明显住院号/病历号模式（纯数字6-12位，通常独立出现）
+  if (/\b\d{6,12}\b/.test(result)) {
+    result = result.replace(/\b\d{6,12}\b/g, '[病历号]');
+    detectedFields.push('medical_record_no');
+  }
+
+  return { text: result, detectedFields };
 }
 
 function toConvObject(row) {
@@ -254,20 +404,48 @@ async function create(doctor, body) {
   const scene_type = body.scene_type || 'general';
   const selectedKbIds = resolveKbIds(body.selected_kb_ids || body.kb_ids || body.selectedKbIds || body.kbIds, []);
   const patient_id = body.patient_id || null;
-  const patient_context = body.patient_context != null ? safeJson(body.patient_context, body.patient_context) : null;
+
+  // 前端传入的 patient_context 不可信，一律不使用。
+  // 若前端有传入，在 INSERT 后写一条带真实 conversation_id 的 block 审计。
+  const hadFrontendPatientContext = body.patient_context != null;
 
   const convCode = `conv_${nanoid(12)}`;
 
+  // 步骤 1：先插入会话记录，patient_context_json 暂为 null
   const [result] = await db.query(
     `INSERT INTO rag_conversations
        (conversation_code, doctor_id, title, scene_type, patient_id, selected_kb_ids, patient_context_json, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
-    [convCode, doctor.id, title, scene_type, patient_id, JSON.stringify(selectedKbIds), patient_context ? JSON.stringify(patient_context) : null]
+     VALUES (?, ?, ?, ?, ?, ?, NULL, 'active')`,
+    [convCode, doctor.id, title, scene_type, patient_id, JSON.stringify(selectedKbIds)]
   );
+  const conversationId = result.insertId;
 
+  // 补写带 conversation_id 的 block 审计（此时 ID 已知）
+  if (hadFrontendPatientContext) {
+    phiAudit.writePhiAuditLog({
+      doctorId: doctor.id,
+      patientId: patient_id,
+      conversationId,
+      action: 'block',
+      phiFields: ['frontend_patient_context_ignored'],
+    });
+  }
+
+  // 步骤 2：若需要患者上下文，带上 conversationId 生成，写 PHI 审计，再 UPDATE
+  if (scene_type === 'patient_context' && patient_id) {
+    const ctx = await buildPatientContext(patient_id, doctor.id, conversationId);
+    if (ctx) {
+      await db.query(
+        `UPDATE rag_conversations SET patient_context_json = ? WHERE id = ?`,
+        [JSON.stringify(ctx), conversationId]
+      );
+    }
+  }
+
+  // 步骤 3：重新查询返回（patient_context_json 不返回给前端，由 toConvObject 保证）
   const [[row]] = await db.query(
     `SELECT *, 0 AS message_count FROM rag_conversations WHERE id = ?`,
-    [result.insertId]
+    [conversationId]
   );
   return toConvObject(row);
 }
@@ -332,13 +510,17 @@ async function sendMessage(doctor, conversationId, body) {
   const turns = cfg.context_window_turns || 6;
   const history = await loadHistory(conversationId, turns);
   const selectedKbIds = resolveKbIds(body.kb_ids || body.selected_kb_ids || body.selectedKbIds, safeJson(convRow.selected_kb_ids, []));
-  const patientContext = safeJson(body.patient_context, safeJson(convRow.patient_context_json, null));
+  // 患者上下文只从 DB 读取，不接受前端传入
+  const patientContext = safeJson(convRow.patient_context_json, null);
   const options = buildOptions(cfg, reqOptions);
   options.stream = false;
 
+  // 用户输入前置 PHI 清洗（手机号/身份证/住院号，姓名依赖患者对象故跳过）
+  const { text: cleanedQuestion } = sanitizeClinicalText(question.trim(), {});
+
   const chatRequest = {
     conversation_id: conversationId,
-    question: question.trim(),
+    question: cleanedQuestion,
     history,
     kb_ids: selectedKbIds,
     patient_context: patientContext,
@@ -397,9 +579,12 @@ async function directChat(doctor, body) {
     const e = new Error('问题不能为空'); e.status = 400; e.code = 'QUESTION_REQUIRED'; throw e;
   }
 
+  // 用户输入前置 PHI 清洗
+  const { text: cleanedQuestion } = sanitizeClinicalText(question.trim(), {});
+
   const cfg = await getSystemConfigs();
   let selectedKbIds = resolveKbIds(body.kb_ids || body.selected_kb_ids || body.selectedKbIds, []);
-  let patientContext = safeJson(body.patient_context, null);
+  let patientContext = null;  // 患者上下文不接受前端传入，只从会话 DB 读取
 
   if (conversation_id) {
     const [[convRow]] = await db.query(
@@ -420,7 +605,7 @@ async function directChat(doctor, body) {
 
   const chatRequest = {
     conversation_id: conversation_id || 0,
-    question: question.trim(),
+    question: cleanedQuestion,
     history: history.slice(-20),
     kb_ids: selectedKbIds,
     patient_context: patientContext,
@@ -430,7 +615,7 @@ async function directChat(doctor, body) {
   const startAt = Date.now();
   let userMsgId = null;
   if (conversation_id) {
-    const userMsg = await msgSvc.saveUserMessage(conversation_id, question.trim());
+    const userMsg = await msgSvc.saveUserMessage(conversation_id, cleanedQuestion);
     userMsgId = userMsg.id;
   }
 
@@ -461,7 +646,7 @@ async function directChat(doctor, body) {
       message_id: assistantMsg.id,
       kb_ids: selectedKbIds,
       trace_id: chatResponse.trace_id,
-      request_summary: question,
+      request_summary: cleanedQuestion,
       response_summary: chatResponse.answer || '',
       latency_ms: Math.round(latencyMs),
       status: chatResponse.status === 'blocked' ? 'blocked' : 'success',
@@ -472,7 +657,7 @@ async function directChat(doctor, body) {
       doctor_id: doctor.id,
       kb_ids: selectedKbIds,
       trace_id: chatResponse.trace_id,
-      request_summary: question,
+      request_summary: cleanedQuestion,
       response_summary: chatResponse.answer || '',
       latency_ms: Math.round(latencyMs),
       status: chatResponse.status === 'blocked' ? 'blocked' : 'success',
@@ -504,13 +689,16 @@ async function streamChat(doctor, conversationId, query, res) {
   const selectedKbIds = resolveKbIds(query.kb_ids || query.selected_kb_ids || query.selectedKbIds, safeJson(convRow.selected_kb_ids, []));
   const patientContext = safeJson(convRow.patient_context_json, null);
 
-  await msgSvc.saveUserMessage(conversationId, question);
+  // 用户输入前置 PHI 清洗
+  const { text: cleanedQuestion } = sanitizeClinicalText(question, {});
+
+  await msgSvc.saveUserMessage(conversationId, cleanedQuestion);
 
   const startAt = Date.now();
 
   // Build query string for AI domain
   const qs = new URLSearchParams();
-  qs.set('question', question);
+  qs.set('question', cleanedQuestion);
   qs.set('top_k', String(query.top_k ?? cfg.top_k ?? 5));
   qs.set('similarity_threshold', String(query.similarity_threshold ?? cfg.similarity_threshold ?? 0.35));
   qs.set('enable_tools', String(query.enable_tools ?? (cfg.enable_tools ? 'true' : 'false')));

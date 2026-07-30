@@ -164,6 +164,15 @@ function fmtDate(str) {
   if (!str) return '-'
   return new Date(str).toLocaleString('zh-CN', { hour12: false })
 }
+
+function fmtDuration(task) {
+  if (!task.completed_at || !task.created_at) return '-'
+  const ms = new Date(task.completed_at) - new Date(task.created_at)
+  if (ms < 0) return '-'
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`
+}
 const stageCN = {
   parsing: '解析', splitting: '切分', embedding: '向量化',
   indexing: '写入索引', dense_embedding: '向量化',
@@ -227,7 +236,7 @@ async function runRebuild() {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page rag-admin-page">
     <!-- ── 页头 ── -->
     <div class="page-header">
       <h2 class="page-title">向量与任务管理</h2>
@@ -333,6 +342,7 @@ async function runRebuild() {
           <th>知识库</th>
           <th>状态</th>
           <th>Chunks</th>
+          <th>耗时</th>
           <th>错误信息</th>
           <th>创建时间</th>
           <th>实时进度</th>
@@ -365,6 +375,7 @@ async function runRebuild() {
             </div>
           </td>
           <td class="num-cell">{{ chunkCount(task) }}</td>
+          <td class="dur-cell">{{ fmtDuration(task) }}</td>
           <td class="err-cell" :title="liveMap[task.id]?.error || task.error_message">
             {{ liveMap[task.id]?.error || task.error_message || '-' }}
           </td>
@@ -394,7 +405,15 @@ async function runRebuild() {
 </template>
 
 <style scoped>
-.page { padding: 24px; }
+.page {
+  padding: 20px 24px;
+  min-height: 100%;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at 10% 14%, rgba(76,128,255,0.08) 0%, transparent 24%),
+    radial-gradient(circle at 84% 18%, rgba(0,198,208,0.06) 0%, transparent 22%),
+    linear-gradient(180deg, #f7fbff 0%, #eef5fb 52%, #f8fbff 100%);
+}
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
 .page-title { font-size: 18px; font-weight: 700; color: #1e293b; margin: 0; }
 .header-actions { display: flex; gap: 8px; }
@@ -426,6 +445,7 @@ async function runRebuild() {
 .num-cell  { text-align: right; font-variant-numeric: tabular-nums; }
 .date-cell { white-space: nowrap; color: #64748b; font-size: 12px; }
 .err-cell  { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626; font-size: 12px; }
+.dur-cell  { white-space: nowrap; color: #64748b; font-size: 12px; font-variant-numeric: tabular-nums; }
 .na-text   { color: #cbd5e1; font-size: 12px; }
 
 .type-badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #f1f5f9; color: #475569; }

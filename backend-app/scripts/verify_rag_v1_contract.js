@@ -49,8 +49,8 @@ function main() {
   requireText(versionService, 'createReindexTextTask', '版本回滚');
   requireText(aiSchemas, 'document_mappings: List[CloneDocumentMapping]', 'AI 克隆请求');
   requireText(aiSchemas, 'task_id: int', '纯文本重索引请求');
-  requireText(aiIngestion, 'replace_document_vectors_async', '重索引安全替换');
-  requireText(aiVectorStore, 'old_point_ids - new_point_ids', '旧向量清理');
+  requireText(aiIngestion, 'reindex_text', '重索引安全替换');
+  requireText(aiVectorStore, 'delete_document_index_async', '旧向量清理');
 
   if (versionService.includes('not implemented')) {
     throw new Error('版本服务仍包含占位实现');

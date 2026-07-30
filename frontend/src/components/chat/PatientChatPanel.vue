@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { message } from 'ant-design-vue'
 import { apiFetch } from '@/utils/api'
 import { marked } from 'marked'
@@ -13,7 +13,6 @@ function renderMd(text) {
 
 const props = defineProps({
   patientId: { type: [String, Number], required: true },
-  // ???????????ID????
   conversationId: { type: [String, Number], default: null },
   patientContext: { type: Object, default: null },
 })
@@ -23,20 +22,40 @@ const messages = ref([])
 const loadingHistory = ref(false)
 const patientContext = ref(null)
 
-// 问答状态
 const question = ref('')
 const sending = ref(false)
 const streaming = ref(false)
 const streamAnswer = ref('')
-
-// SSE
-let sseSource = null
 const inputRef = ref(null)
 
-// 知识库选择
 const availableKbs = ref([])
 const selectedKbIds = ref([])
 const kbLoading = ref(false)
+const kbDrawerOpen = ref(false)
+const fileDrawerOpen = ref(false)
+
+const docSearch = ref('')
+const docs = ref([])
+const docsLoading = ref(false)
+const fileKbId = ref(null)
+
+const docPreviewOpen = ref(false)
+const docPreviewLoading = ref(false)
+const docPreviewErr = ref('')
+const docPreviewData = ref(null)
+const docPreviewTitle = ref('')
+const docPreviewChunkId = ref(null)
+const docPreviewTab = ref('chunks')
+
+let sseSource = null
+
+const selectedKbList = computed(() => availableKbs.value.filter(kb => selectedKbIds.value.includes(kb.id)))
+const selectedKbSummary = computed(() => {
+  if (!selectedKbList.value.length) return '未选择知识库'
+  if (selectedKbList.value.length === 1) return selectedKbList.value[0].name
+  return `已选择 ${selectedKbList.value.length} 个知识库`
+})
+const currentFileKb = computed(() => availableKbs.value.find(kb => String(kb.id) === String(fileKbId.value)) || null)
 
 async function loadKbs() {
   kbLoading.value = true
@@ -47,6 +66,7 @@ async function loadKbs() {
     if (availableKbs.value.length === 1 && !selectedKbIds.value.length) {
       selectedKbIds.value = [availableKbs.value[0].id]
     }
+    if (!fileKbId.value) fileKbId.value = selectedKbIds.value[0] || availableKbs.value[0]?.id || null
   } catch {
     // ignore
   } finally {
@@ -57,9 +77,7 @@ async function loadKbs() {
 async function init() {
   if (convId.value) {
     await loadHistory()
-    if (!patientContext.value && props.patientContext) {
-      patientContext.value = props.patientContext
-    }
+    if (!patientContext.value && props.patientContext) patientContext.value = props.patientContext
     return
   }
   loadingHistory.value = true
@@ -72,16 +90,13 @@ async function init() {
         scene_type: 'patient_context',
         patient_id: props.patientId,
         kb_ids: selectedKbIds.value,
-        patient_context: props.patientContext || null,
       }),
     })
     if (!res.ok) throw new Error('创建会话失败')
     const data = await res.json()
     convId.value = data.id
     patientContext.value = props.patientContext || (data.patient_context_json
-      ? (typeof data.patient_context_json === 'string'
-          ? JSON.parse(data.patient_context_json)
-          : data.patient_context_json)
+      ? (typeof data.patient_context_json === 'string' ? JSON.parse(data.patient_context_json) : data.patient_context_json)
       : null)
   } catch (e) {
     message.error(e.message || '初始化会话失败')
@@ -113,6 +128,7 @@ async function send() {
     return
   }
   if (!selectedKbIds.value.length) {
+    kbDrawerOpen.value = true
     message.warning('请至少选择一个知识库')
     return
   }
@@ -129,7 +145,6 @@ async function send() {
   try {
     const qs = new URLSearchParams({ question: q })
     selectedKbIds.value.forEach(id => qs.append('kb_ids', String(id)))
-    if (patientContext.value) qs.set('patient_context', JSON.stringify(patientContext.value))
     const url = `/api/rag/conversations/${convId.value}/stream?${qs.toString()}`
 
     const res = await fetch(url, { credentials: 'include' })
@@ -146,7 +161,6 @@ async function send() {
       const { done, value } = await reader.read()
       if (done) break
       sseBuffer += decoder.decode(value, { stream: true })
-
       const blocks = sseBuffer.split(/\n\n/)
       sseBuffer = blocks.pop()
 
@@ -159,6 +173,7 @@ async function send() {
           else if (line.startsWith('data:')) dataStr = line.slice(5).trim()
         }
         if (!dataStr) continue
+
         let payload
         try { payload = JSON.parse(dataStr) } catch { continue }
 
@@ -203,20 +218,6 @@ async function send() {
   }
 }
 
-const messagesEndRef = ref(null)
-async function scrollBottom() {
-  await nextTick()
-  messagesEndRef.value?.scrollIntoView({ behavior: 'smooth' })
-}
-
-function onKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault()
-    send()
-  }
-}
-
-// ── 反馈 ──────────────────────────────────────────────────────────────
 const feedbackState = ref({})
 
 async function submitFeedback(msg, rating) {
@@ -237,6 +238,123 @@ async function submitFeedback(msg, rating) {
   }
 }
 
+async function fetchDocs() {
+  if (!fileKbId.value) {
+    docs.value = []
+    return
+  }
+  docsLoading.value = true
+  try {
+    const params = new URLSearchParams()
+    params.set('kb_id', String(fileKbId.value))
+    if (docSearch.value.trim()) params.set('search', docSearch.value.trim())
+    params.set('page', '1')
+    params.set('pageSize', '50')
+    const res = await apiFetch(`/api/rag/documents?${params.toString()}`)
+    const data = await res.json()
+    docs.value = Array.isArray(data?.data) ? data.data : []
+  } catch {
+    docs.value = []
+  } finally {
+    docsLoading.value = false
+  }
+}
+
+function toggleKb(id) {
+  const idx = selectedKbIds.value.indexOf(id)
+  if (idx >= 0) selectedKbIds.value.splice(idx, 1)
+  else selectedKbIds.value.push(id)
+  if (!fileKbId.value) fileKbId.value = id
+}
+
+function openKbDrawer() {
+  kbDrawerOpen.value = true
+}
+
+function openFileDrawer(kbId = null) {
+  if (kbId) fileKbId.value = kbId
+  else if (!fileKbId.value) fileKbId.value = selectedKbIds.value[0] || availableKbs.value[0]?.id || null
+  fileDrawerOpen.value = true
+  fetchDocs()
+}
+
+function downloadDoc(doc) {
+  const a = document.createElement('a')
+  a.href = `/api/rag/documents/${doc.id}/download`
+  a.download = doc.file_name || doc.title || `document-${doc.id}`
+  a.click()
+}
+
+async function openSourcePreview(src) {
+  if (!src.doc_id) return
+  docPreviewOpen.value = true
+  docPreviewLoading.value = true
+  docPreviewErr.value = ''
+  docPreviewData.value = null
+  docPreviewTitle.value = src.title || `文档 #${src.doc_id}`
+  docPreviewChunkId.value = src.chunk_id || null
+  docPreviewTab.value = 'chunks'
+  try {
+    const qs = src.chunk_id ? `?chunk_id=${encodeURIComponent(src.chunk_id)}` : ''
+    const res = await apiFetch(`/api/rag/documents/${src.doc_id}/preview${qs}`)
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      throw new Error(d?.message || d?.error || '加载失败')
+    }
+    docPreviewData.value = await res.json()
+  } catch (e) {
+    docPreviewErr.value = e.message || '加载失败'
+  } finally {
+    docPreviewLoading.value = false
+  }
+}
+
+async function openDocPreview(doc) {
+  docPreviewOpen.value = true
+  docPreviewLoading.value = true
+  docPreviewErr.value = ''
+  docPreviewData.value = null
+  docPreviewTitle.value = doc.title || doc.file_name || `文档 #${doc.id}`
+  docPreviewChunkId.value = null
+  docPreviewTab.value = 'raw'
+  try {
+    const res = await apiFetch(`/api/rag/documents/${doc.id}/preview`)
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      throw new Error(d?.message || d?.error || '加载预览失败')
+    }
+    docPreviewData.value = await res.json()
+  } catch (e) {
+    docPreviewErr.value = e.message || '加载预览失败'
+  } finally {
+    docPreviewLoading.value = false
+  }
+}
+
+function closeDocPreview() {
+  docPreviewOpen.value = false
+  docPreviewData.value = null
+  docPreviewErr.value = ''
+}
+
+const messagesEndRef = ref(null)
+async function scrollBottom() {
+  await nextTick()
+  messagesEndRef.value?.scrollIntoView({ behavior: 'smooth' })
+}
+
+function onKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    send()
+  }
+}
+
+function applyTemplate(tpl) {
+  question.value = tpl.question_template
+  nextTick(() => inputRef.value?.focus())
+}
+
 function closeSse() {
   if (sseSource) {
     sseSource.close()
@@ -244,8 +362,26 @@ function closeSse() {
   }
 }
 
+const quickTemplates = ref([])
+const templatesLoading = ref(false)
+
+async function loadTemplates() {
+  templatesLoading.value = true
+  try {
+    const res = await apiFetch('/api/rag/tools/templates')
+    if (!res.ok) return
+    const data = await res.json()
+    quickTemplates.value = Array.isArray(data?.templates) ? data.templates : []
+  } catch {
+    // ignore
+  } finally {
+    templatesLoading.value = false
+  }
+}
+
 onMounted(async () => {
   await loadKbs()
+  await loadTemplates()
   await init()
 })
 
@@ -256,37 +392,28 @@ onUnmounted(() => {
 
 <template>
   <div class="pcp-root">
-    <!-- 患者上下文摘要条 -->
-    <div v-if="patientContext" class="pcp-context-bar">
-      <span class="pcp-context-label">上下文</span>
-      <span class="pcp-context-text">{{ patientContext.summary_text }}</span>
+    <div class="pcp-topbar">
+      <div class="pcp-context-card">
+        <div class="pcp-context-title">患者上下文</div>
+        <div class="pcp-context-text">{{ patientContext?.summary_text || '正在准备患者上下文...' }}</div>
+      </div>
+
+      <div class="pcp-actions-card">
+        <div class="pcp-selected-text">{{ selectedKbSummary }}</div>
+        <div class="pcp-action-row">
+          <button class="pcp-btn secondary" @click="openKbDrawer">选择知识库</button>
+          <button class="pcp-btn secondary" @click="openFileDrawer()">查看文件</button>
+        </div>
+      </div>
     </div>
 
-    <!-- 知识库选择 -->
-    <div class="pcp-kb-bar">
-      <span class="pcp-kb-label">知识库</span>
-      <a-select
-        v-model:value="selectedKbIds"
-        mode="multiple"
-        size="small"
-        placeholder="不选则使用默认"
-        :options="availableKbs.map(kb => ({ label: kb.name, value: kb.id }))"
-        :loading="kbLoading"
-        style="flex: 1; min-width: 0;"
-        :max-tag-count="2"
-        allow-clear
-      />
-    </div>
-
-    <!-- 消息列表 -->
     <div class="pcp-messages">
       <a-spin v-if="loadingHistory" class="pcp-loading" />
 
       <template v-else>
         <div v-if="!messages.length" class="pcp-empty">
-          <div class="pcp-empty-icon">💬</div>
-          <div class="pcp-empty-text">基于当前患者上下文提问</div>
-          <div class="pcp-empty-sub">患者信息已自动注入，AI 会结合临床数据检索知识库</div>
+          <div class="pcp-empty-title">基于当前患者上下文提问</div>
+          <div class="pcp-empty-sub">系统会自动结合当前患者临床摘要和所选知识库回答。</div>
         </div>
 
         <div
@@ -295,62 +422,47 @@ onUnmounted(() => {
           class="pcp-msg-wrap"
           :class="msg.role === 'user' ? 'pcp-msg-user' : 'pcp-msg-assistant'"
         >
-          <!-- 用户消息 -->
           <div v-if="msg.role === 'user'" class="pcp-bubble pcp-bubble-user">
             {{ msg.content_markdown }}
           </div>
 
-          <!-- AI 消息 -->
           <div v-else class="pcp-bubble pcp-bubble-assistant">
-            <!-- 阻断提示 -->
-            <div v-if="msg.blocked_reason" class="pcp-blocked">
-              ⚠️ {{ msg.blocked_reason }}
-            </div>
+            <div v-if="msg.blocked_reason" class="pcp-blocked">⚠ {{ msg.blocked_reason }}</div>
+            <div v-else class="pcp-markdown" v-html="renderMd(msg.content_markdown)" />
 
-            <div
-              v-else
-              class="pcp-markdown"
-              v-html="renderMd(msg.content_markdown)"
-            />
-
-            <!-- 来源引用 -->
-            <div v-if="msg.sources && msg.sources.length" class="pcp-sources">
-              <div class="pcp-sources-title">参考来源</div>
-              <div
+            <div v-if="msg.sources?.length" class="pcp-section">
+              <div class="pcp-section-title">引用来源</div>
+              <button
                 v-for="(src, si) in msg.sources"
                 :key="si"
                 class="pcp-source-item"
+                @click="openSourcePreview(src)"
               >
-                <span class="pcp-source-title">{{ src.title || `文档 ${src.doc_id}` }}</span>
-                <span v-if="src.score != null" class="pcp-source-score">{{ (src.score * 100).toFixed(0) }}%</span>
+                <div class="pcp-source-head">
+                  <span>{{ src.title || `文档 ${src.doc_id}` }}</span>
+                  <span v-if="src.score != null" class="pcp-source-score">{{ (src.score * 100).toFixed(0) }}%</span>
+                </div>
                 <div v-if="src.snippet" class="pcp-source-snippet">{{ src.snippet }}</div>
-              </div>
+              </button>
             </div>
 
-            <!-- 免责声明 -->
-            <div v-if="msg.disclaimer" class="pcp-disclaimer">
-              {{ msg.disclaimer }}
-            </div>
+            <div v-if="msg.disclaimer" class="pcp-disclaimer">{{ msg.disclaimer }}</div>
 
-            <!-- 反馈按钮 -->
             <div v-if="msg.id" class="pcp-feedback">
               <button
                 :class="['pcp-fb-btn', feedbackState[msg.id] === 'up' && 'pcp-fb-up']"
                 :disabled="feedbackState[msg.id] === 'sending'"
-                title="有帮助"
                 @click="submitFeedback(msg, 'up')"
-              >👍</button>
+              >👍 有帮助</button>
               <button
                 :class="['pcp-fb-btn', feedbackState[msg.id] === 'down' && 'pcp-fb-down']"
                 :disabled="feedbackState[msg.id] === 'sending'"
-                title="没帮助"
                 @click="submitFeedback(msg, 'down')"
-              >👎</button>
+              >👎 需改进</button>
             </div>
           </div>
         </div>
 
-        <!-- 流式占位 -->
         <div v-if="streaming" class="pcp-msg-wrap pcp-msg-assistant">
           <div class="pcp-bubble pcp-bubble-assistant">
             <div class="pcp-markdown" v-html="renderMd(streamAnswer) || '&nbsp;'" />
@@ -362,28 +474,144 @@ onUnmounted(() => {
       <div ref="messagesEndRef" />
     </div>
 
-    <!-- 输入区 -->
+    <div v-if="quickTemplates.length" class="pcp-templates">
+      <button
+        v-for="tpl in quickTemplates"
+        :key="tpl.template_id"
+        class="pcp-tpl-chip"
+        :title="tpl.question_template"
+        @click="applyTemplate(tpl)"
+      >{{ tpl.name }}</button>
+    </div>
+
     <div class="pcp-input-area">
       <a-textarea
         ref="inputRef"
         v-model:value="question"
-        placeholder="基于该患者提问，按 Enter 发送，Shift+Enter 换行"
+        placeholder="基于该患者提问，按 Enter 发送，Shift + Enter 换行"
         :auto-size="{ minRows: 2, maxRows: 5 }"
         :disabled="sending || streaming || loadingHistory"
         @keydown="onKeydown"
         class="pcp-textarea"
       />
-      <a-button
-        type="primary"
-        :loading="sending"
-        :disabled="!question.trim() || loadingHistory"
-        @click="send"
-        class="pcp-send-btn"
-      >
-        发送
-      </a-button>
     </div>
   </div>
+
+  <teleport to="body">
+    <div v-if="kbDrawerOpen" class="pcp-overlay" @click.self="kbDrawerOpen = false">
+      <div class="pcp-drawer">
+        <div class="pcp-drawer-head">
+          <div>
+            <div class="pcp-panel-title">选择知识库</div>
+            <div class="pcp-panel-sub">用于当前患者问答</div>
+          </div>
+          <button class="pcp-close-btn" @click="kbDrawerOpen = false">✕</button>
+        </div>
+
+        <div v-if="kbLoading" class="pcp-panel-empty">加载中...</div>
+        <div v-else class="pcp-drawer-body">
+          <label v-for="kb in availableKbs" :key="kb.id" class="pcp-kb-row">
+            <input :checked="selectedKbIds.includes(kb.id)" type="checkbox" @change="toggleKb(kb.id)" />
+            <div class="pcp-kb-main">
+              <div class="pcp-kb-name">{{ kb.name }}</div>
+              <div class="pcp-kb-meta">{{ kb.doc_count || 0 }} 个文件</div>
+            </div>
+            <button class="pcp-link-btn" @click.prevent="openFileDrawer(kb.id); kbDrawerOpen = false">文件</button>
+          </label>
+        </div>
+      </div>
+    </div>
+  </teleport>
+
+  <teleport to="body">
+    <div v-if="fileDrawerOpen" class="pcp-overlay" @click.self="fileDrawerOpen = false">
+      <div class="pcp-drawer pcp-drawer-wide">
+        <div class="pcp-drawer-head">
+          <div>
+            <div class="pcp-panel-title">文件查看</div>
+            <div class="pcp-panel-sub">{{ currentFileKb?.name || '请选择知识库' }}</div>
+          </div>
+          <button class="pcp-close-btn" @click="fileDrawerOpen = false">✕</button>
+        </div>
+
+        <div class="pcp-file-toolbar">
+          <select v-model="fileKbId" class="pcp-select" @change="fetchDocs()">
+            <option v-for="kb in availableKbs" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+          </select>
+          <input v-model="docSearch" class="pcp-search" placeholder="搜索文件名" @keydown.enter="fetchDocs()" />
+          <button class="pcp-btn secondary" @click="fetchDocs()">搜索</button>
+        </div>
+
+        <div class="pcp-drawer-body">
+          <div v-if="docsLoading" class="pcp-panel-empty">加载中...</div>
+          <div v-else-if="!docs.length" class="pcp-panel-empty">暂无文件</div>
+          <div v-else class="pcp-file-list">
+            <div v-for="doc in docs" :key="doc.id" class="pcp-file-row">
+              <div class="pcp-file-main">
+                <div class="pcp-file-title">{{ doc.title }}</div>
+                <div class="pcp-file-meta">{{ doc.file_ext || '--' }} · {{ doc.file_name || `文档 #${doc.id}` }}</div>
+              </div>
+              <div class="pcp-file-actions">
+                <button class="pcp-link-btn" @click="openDocPreview(doc)">预览</button>
+                <button class="pcp-link-btn" @click="downloadDoc(doc)">下载</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </teleport>
+
+  <teleport to="body">
+    <div v-if="docPreviewOpen" class="pcp-overlay" @click.self="closeDocPreview">
+      <div class="pcp-preview-modal">
+        <div class="pcp-drawer-head">
+          <div class="pcp-panel-title">{{ docPreviewTitle }}</div>
+          <button class="pcp-close-btn" @click="closeDocPreview">✕</button>
+        </div>
+
+        <div v-if="docPreviewLoading" class="pcp-panel-empty">加载中...</div>
+        <div v-else-if="docPreviewErr" class="pcp-preview-error">{{ docPreviewErr }}</div>
+        <template v-else-if="docPreviewData">
+          <div class="pcp-preview-meta">
+            <span>版本 v{{ docPreviewData.version_no || '--' }}</span>
+            <span>模型 {{ docPreviewData.embedding_model || '--' }}</span>
+            <span>{{ docPreviewData.chunk_count || 0 }} chunks</span>
+          </div>
+
+          <div class="pcp-preview-tabs">
+            <button class="pcp-preview-tab" :class="{ active: docPreviewTab === 'raw' }" @click="docPreviewTab = 'raw'">原始文本</button>
+            <button class="pcp-preview-tab" :class="{ active: docPreviewTab === 'clean' }" @click="docPreviewTab = 'clean'">清洗文本</button>
+            <button class="pcp-preview-tab" :class="{ active: docPreviewTab === 'chunks' }" @click="docPreviewTab = 'chunks'">Chunks</button>
+          </div>
+
+          <div class="pcp-preview-body">
+            <div v-show="docPreviewTab === 'raw'" class="pcp-preview-text">
+              <pre>{{ docPreviewData.raw_text_preview || '暂无原始文本' }}</pre>
+            </div>
+            <div v-show="docPreviewTab === 'clean'" class="pcp-preview-text">
+              <pre>{{ docPreviewData.cleaned_text_preview || '暂无清洗文本' }}</pre>
+            </div>
+            <div v-show="docPreviewTab === 'chunks'">
+              <div v-if="!docPreviewData.chunks_preview?.length" class="pcp-panel-empty">暂无 Chunk 数据</div>
+              <div
+                v-for="chunk in docPreviewData.chunks_preview || []"
+                :key="chunk.chunk_index"
+                class="pcp-chunk-row"
+                :class="{ hit: chunk.is_hit || chunk.chunk_id === docPreviewChunkId }"
+              >
+                <div class="pcp-chunk-head">
+                  <span>{{ chunk.chunk_id }}</span>
+                  <span>{{ (chunk.text || '').length }} 字</span>
+                </div>
+                <div class="pcp-chunk-text">{{ chunk.text }}</div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </teleport>
 </template>
 
 <style scoped>
@@ -392,88 +620,109 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  font-size: 13px;
+  background:
+    radial-gradient(circle at 16% 0%, rgba(76,128,255,0.08) 0%, transparent 30%),
+    linear-gradient(180deg, #f8fbff 0%, #eef5fb 100%);
 }
 
-.pcp-context-bar {
+.pcp-topbar {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 8px 12px;
-  background: rgba(47, 111, 237, 0.06);
-  border-bottom: 1px solid rgba(47, 111, 237, 0.1);
-  font-size: 11px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.pcp-context-card,
+.pcp-actions-card,
+.pcp-bubble,
+.pcp-drawer,
+.pcp-preview-modal {
+  background: #fff;
+  border: 1px solid rgba(109, 145, 186, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 14px 30px rgba(95, 130, 171, 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.pcp-context-card,
+.pcp-actions-card {
+  padding: 10px 12px;
+}
+
+.pcp-context-title,
+.pcp-panel-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #16324f;
+  margin-bottom: 4px;
+}
+
+.pcp-context-text,
+.pcp-panel-sub,
+.pcp-selected-text,
+.pcp-file-meta,
+.pcp-kb-meta,
+.pcp-empty-sub,
+.pcp-disclaimer {
+  font-size: 12.5px;
+  color: #6b7280;
   line-height: 1.5;
 }
 
-.pcp-context-label {
-  flex-shrink: 0;
-  font-weight: 700;
-  color: #2f6fed;
-  padding-top: 1px;
-}
-
 .pcp-context-text {
-  color: #35506f;
-  flex: 1;
-  min-width: 0;
+  max-height: 58px;
+  overflow-y: auto;
 }
 
-.pcp-kb-bar {
+.pcp-action-row {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-bottom: 1px solid rgba(116, 152, 193, 0.1);
+  gap: 8px;
+  margin-top: 8px;
 }
 
-.pcp-kb-label {
-  font-size: 11px;
+.pcp-btn {
+  border: none;
+  border-radius: 10px;
+  padding: 7px 10px;
   font-weight: 600;
-  color: #8aa0b8;
-  flex-shrink: 0;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.pcp-btn.secondary {
+  background: rgba(255,255,255,0.78);
+  color: #2563eb;
+  border: 1px solid rgba(37,99,235,0.16);
 }
 
 .pcp-messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 0 12px 12px;
+}
+
+.pcp-empty,
+.pcp-panel-empty {
+  min-height: 180px;
   display: flex;
+  align-items: center;
+  justify-content: center;
   flex-direction: column;
   gap: 10px;
-  min-height: 0;
+  color: #94a3b8;
 }
 
-.pcp-loading {
-  display: flex;
-  justify-content: center;
-  padding: 32px;
-}
-
-.pcp-empty {
-  text-align: center;
-  padding: 32px 16px;
-}
-
-.pcp-empty-icon {
-  font-size: 28px;
-  margin-bottom: 8px;
-}
-
-.pcp-empty-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: #5f7894;
-}
-
-.pcp-empty-sub {
-  font-size: 11px;
-  color: #8aa0b8;
-  margin-top: 4px;
-  line-height: 1.6;
+.pcp-empty-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #475569;
 }
 
 .pcp-msg-wrap {
   display: flex;
+  margin-bottom: 14px;
 }
 
 .pcp-msg-user {
@@ -485,148 +734,280 @@ onUnmounted(() => {
 }
 
 .pcp-bubble {
-  max-width: 90%;
-  border-radius: 14px;
-  padding: 10px 12px;
-  font-size: 12px;
-  line-height: 1.6;
+  max-width: 86%;
+  padding: 12px 14px;
 }
 
 .pcp-bubble-user {
   background: linear-gradient(135deg, #2f6fed 0%, #19c6d0 100%);
+  border-color: transparent;
   color: #fff;
-  border-bottom-right-radius: 4px;
 }
 
-.pcp-bubble-assistant {
-  background: rgba(248, 251, 255, 0.9);
-  border: 1px solid rgba(116, 152, 193, 0.12);
-  color: #35506f;
-  border-bottom-left-radius: 4px;
-  width: 100%;
-  max-width: 100%;
+.pcp-markdown :deep(p:first-child) {
+  margin-top: 0;
+}
+
+.pcp-markdown :deep(p:last-child) {
+  margin-bottom: 0;
 }
 
 .pcp-blocked {
-  color: #c2410c;
-  background: rgba(254, 215, 170, 0.4);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 12px;
+  color: #b91c1c;
+  font-weight: 600;
 }
 
-.pcp-markdown {
-  font-size: 12px;
-  line-height: 1.7;
-  color: #35506f;
-  word-break: break-word;
-}
-.pcp-markdown :deep(p) { margin: 0 0 6px; }
-.pcp-markdown :deep(p:last-child) { margin-bottom: 0; }
-.pcp-markdown :deep(ul), .pcp-markdown :deep(ol) { margin: 4px 0 6px; padding-left: 18px; }
-.pcp-markdown :deep(li) { margin-bottom: 2px; }
-.pcp-markdown :deep(strong) { font-weight: 600; }
-.pcp-markdown :deep(code) { background: rgba(47,111,237,0.08); border-radius: 3px; padding: 1px 4px; font-size: 11px; }
-.pcp-markdown :deep(pre) { background: rgba(47,111,237,0.06); border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 4px 0; }
-.pcp-markdown :deep(pre code) { background: none; padding: 0; }
-
-.pcp-sources {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(116, 152, 193, 0.1);
+.pcp-section {
+  margin-top: 12px;
 }
 
-.pcp-sources-title {
-  font-size: 10px;
-  font-weight: 700;
-  color: #8aa0b8;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 5px;
+.pcp-section-title {
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #334155;
 }
 
 .pcp-source-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px;
-  margin-bottom: 4px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 8px 10px;
+  cursor: pointer;
+  margin-bottom: 8px;
 }
 
-.pcp-source-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: #2f6fed;
+.pcp-source-head,
+.pcp-file-row,
+.pcp-file-actions,
+.pcp-preview-meta,
+.pcp-chunk-head,
+.pcp-drawer-head,
+.pcp-file-toolbar,
+.pcp-kb-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .pcp-source-score {
-  font-size: 10px;
-  color: #8aa0b8;
+  color: #2563eb;
 }
 
 .pcp-source-snippet {
-  width: 100%;
-  font-size: 11px;
-  color: #5f7894;
-  line-height: 1.5;
-  background: rgba(116, 152, 193, 0.06);
-  border-radius: 6px;
-  padding: 4px 8px;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12.5px;
 }
 
-.pcp-disclaimer {
-  margin-top: 8px;
-  font-size: 10px;
-  color: #8aa0b8;
-  line-height: 1.6;
-  border-top: 1px solid rgba(116, 152, 193, 0.1);
-  padding-top: 6px;
+.pcp-feedback {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
 }
 
-.pcp-feedback { display: flex; gap: 5px; margin-top: 6px; }
-.pcp-fb-btn { border: 1px solid #e2e8f0; background: #fff; border-radius: 5px; padding: 2px 7px; font-size: 13px; cursor: pointer; color: #94a3b8; transition: border-color 0.15s, background 0.15s; }
-.pcp-fb-btn:hover:not(:disabled) { border-color: #2563eb; background: #eff6ff; }
-.pcp-fb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.pcp-fb-up { background: #dcfce7 !important; border-color: #16a34a !important; }
-.pcp-fb-down { background: #fee2e2 !important; border-color: #dc2626 !important; }
+.pcp-fb-btn {
+  border: 1px solid #dbeafe;
+  background: #eff6ff;
+  color: #2563eb;
+  padding: 7px 9px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.pcp-fb-up,
+.pcp-fb-down {
+  border-color: #1d4ed8;
+}
 
 .pcp-cursor {
   display: inline-block;
-  width: 2px;
-  height: 12px;
-  background: #2f6fed;
-  border-radius: 1px;
-  animation: blink 0.9s infinite;
-  vertical-align: middle;
-  margin-left: 2px;
+  width: 8px;
+  height: 18px;
+  background: #2563eb;
+  animation: blink 1s infinite;
 }
 
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+.pcp-templates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.pcp-tpl-chip {
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: #4b5563;
+  padding: 7px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pcp-tpl-chip:hover {
+  border-color: rgba(47,111,237,0.24);
+  color: #2563eb;
 }
 
 .pcp-input-area {
-  padding: 10px 12px;
-  border-top: 1px solid rgba(116, 152, 193, 0.1);
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
+  padding: 0 12px 12px;
 }
 
 .pcp-textarea {
-  flex: 1;
-  border-radius: 12px !important;
-  font-size: 12px;
-  resize: none;
+  width: 100%;
 }
 
-.pcp-send-btn {
-  flex-shrink: 0;
-  border-radius: 10px !important;
-  border: none !important;
-  background: #2f9fe2 !important;
+.pcp-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 2100;
+}
+
+.pcp-drawer,
+.pcp-preview-modal {
+  width: 400px;
+  height: 100%;
+  padding: 18px;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pcp-drawer-wide {
+  width: 560px;
+}
+
+.pcp-preview-modal {
+  width: min(860px, 92vw);
+  height: min(88vh, 860px);
+  margin: auto;
+  border-radius: 20px;
+}
+
+.pcp-drawer-body,
+.pcp-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pcp-close-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 10px;
+  background: #f3f4f6;
+  cursor: pointer;
+}
+
+.pcp-kb-row,
+.pcp-file-row {
+  padding: 10px 0;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.pcp-kb-main,
+.pcp-file-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.pcp-kb-name,
+.pcp-file-title {
+  font-size: 13px;
   font-weight: 600;
-  align-self: flex-end;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pcp-link-btn {
+  border: none;
+  background: transparent;
+  color: #2563eb;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.pcp-select,
+.pcp-search {
+  border: 1px solid rgba(109,145,186,0.18);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  width: 100%;
+}
+
+.pcp-preview-error {
+  color: #b91c1c;
+  padding: 12px 0;
+}
+
+.pcp-preview-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0;
+}
+
+.pcp-preview-tab {
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  padding: 8px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pcp-preview-tab.active {
+  border-color: #2f6fed;
+  color: #2563eb;
+  background: #eef2ff;
+}
+
+.pcp-preview-text pre,
+.pcp-chunk-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #334155;
+  line-height: 1.7;
+}
+
+.pcp-chunk-row {
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.pcp-chunk-row.hit {
+  border-color: #a5b4fc;
+  background: #eef2ff;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+@media (max-width: 900px) {
+  .pcp-topbar,
+  .pcp-input-area,
+  .pcp-file-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pcp-bubble {
+    max-width: 100%;
+  }
 }
 </style>

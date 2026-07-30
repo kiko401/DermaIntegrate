@@ -6,6 +6,9 @@ const route = useRoute()
 const router = useRouter()
 
 const isAuthPage = computed(() => route.meta.requiresAuth === false)
+const isFixedViewportPage = computed(() => {
+  return route.path.startsWith('/clinical/') || route.path === '/doctor/chat'
+})
 
 function getDoctorInfo() {
   try { return JSON.parse(localStorage.getItem('doctor_info') || '{}') } catch { return {} }
@@ -71,7 +74,7 @@ async function logout() {
         <span class="logout-btn" @click="logout">退出</span>
       </div>
     </header>
-    <main class="main-content">
+    <main class="main-content" :class="{ 'main-content--fixed': isFixedViewportPage }">
       <RouterView />
     </main>
   </div>
@@ -136,6 +139,11 @@ async function logout() {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  overflow: auto;
+}
+
+.main-content--fixed {
+  height: calc(100vh - 52px);
   overflow: hidden;
 }
 </style>

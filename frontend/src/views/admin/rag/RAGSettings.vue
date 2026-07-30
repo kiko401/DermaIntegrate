@@ -92,10 +92,12 @@ onMounted(loadConfig)
 </script>
 
 <template>
-  <div class="settings-page">
+  <div class="settings-page rag-admin-page">
     <div class="page-header">
-      <h2 class="page-title">RAG 系统配置</h2>
-      <div class="header-desc">配置实时生效，无需重启后端。AI 域每次调用时由应用域注入最新配置值。</div>
+      <div class="title-block">
+        <h2 class="page-title">RAG 配置</h2>
+        <div class="header-desc">配置实时生效，无需重启后端。AI 域每次调用时由应用域注入最新配置值。</div>
+      </div>
     </div>
 
     <div v-if="loading" class="loading-msg">加载配置中...</div>
@@ -154,36 +156,46 @@ onMounted(loadConfig)
 </template>
 
 <style scoped>
-.settings-page { padding: 24px; max-width: 900px; }
+.settings-page {
+  padding: 20px 24px;
+  min-height: 100%;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at 10% 14%, rgba(76,128,255,0.08) 0%, transparent 24%),
+    radial-gradient(circle at 84% 18%, rgba(0,198,208,0.06) 0%, transparent 22%),
+    linear-gradient(180deg, #f7fbff 0%, #eef5fb 52%, #f8fbff 100%);
+}
 .page-header { margin-bottom: 24px; }
-.page-title { font-size: 18px; font-weight: 600; color: #1e293b; margin: 0 0 6px; }
+.title-block { display: flex; flex-direction: column; gap: 6px; }
+.page-title { font-size: 18px; font-weight: 700; color: #1e293b; margin: 0; }
 .header-desc { font-size: 13px; color: #64748b; }
-.loading-msg { color: #94a3b8; padding: 32px 0; font-size: 14px; }
+.loading-msg { color: #94a3b8; padding: 48px 0; font-size: 14px; text-align: center; }
 .config-form { display: flex; flex-direction: column; gap: 24px; }
-.section { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 20px 24px; }
-.section-title { font-size: 14px; font-weight: 600; color: #334155; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid #f1f5f9; }
-.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; }
-.field-item { display: flex; flex-direction: column; gap: 4px; }
+.section { border-radius: 22px; padding: 22px 24px; }
+.section-title { font-size: 15px; font-weight: 700; color: #334155; margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid #f1f5f9; }
+.field-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 22px; }
+.field-item { display: flex; flex-direction: column; gap: 6px; }
 .field-item-full { grid-column: 1 / -1; }
-.field-label { font-size: 13px; font-weight: 500; color: #475569; }
-.field-input { height: 34px; padding: 0 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; transition: border-color 0.15s; box-sizing: border-box; }
-.field-input:focus { outline: none; border-color: #2563eb; }
-.field-textarea { height: auto; padding: 8px 10px; resize: vertical; }
-.field-desc { font-size: 11px; color: #94a3b8; }
-.toggle-grid { display: flex; flex-direction: column; gap: 0; }
-.toggle-item { display: flex; flex-direction: column; gap: 2px; padding: 10px 0; border-bottom: 1px solid #f1f5f9; }
-.toggle-item:last-child { border-bottom: none; }
+.field-label { font-size: 13px; font-weight: 600; color: #475569; }
+.field-input { height: 40px; padding: 0 12px; border: 1px solid #cbd5e1; border-radius: 12px; font-size: 13px; color: #334155; background: #fff; transition: border-color 0.15s, box-shadow 0.15s; box-sizing: border-box; }
+.field-input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
+.field-textarea { height: auto; min-height: 96px; padding: 10px 12px; resize: vertical; }
+.field-desc { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+.toggle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.toggle-item { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border: 1px solid #eef2f7; border-radius: 16px; background: #f8fbff; }
 .toggle-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .toggle-checkbox { width: 16px; height: 16px; accent-color: #2563eb; cursor: pointer; }
-.toggle-name { font-size: 13px; font-weight: 500; color: #334155; }
+.toggle-name { font-size: 13px; font-weight: 600; color: #334155; }
 .toggle-desc { font-size: 12px; color: #94a3b8; padding-left: 26px; }
-.save-success { background: #dcfce7; color: #16a34a; padding: 10px 14px; border-radius: 6px; font-size: 13px; }
-.save-error { background: #fee2e2; color: #dc2626; padding: 10px 14px; border-radius: 6px; font-size: 13px; }
+.save-success { background: #dcfce7; color: #16a34a; padding: 12px 14px; border-radius: 12px; font-size: 13px; }
+.save-error { background: #fee2e2; color: #dc2626; padding: 12px 14px; border-radius: 12px; font-size: 13px; }
 .form-actions { display: flex; gap: 10px; }
-.btn { height: 36px; padding: 0 18px; border-radius: 6px; font-size: 13px; cursor: pointer; border: none; }
+.btn { height: 40px; padding: 0 18px; border-radius: 12px; font-size: 13px; cursor: pointer; border: none; font-weight: 600; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: #2563eb; color: #fff; font-weight: 600; }
-.btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+.btn-primary { background: linear-gradient(135deg, #2563eb, #3b82f6); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, #1d4ed8, #2563eb); }
 .btn-ghost { background: transparent; color: #64748b; border: 1px solid #e2e8f0; }
 .btn-ghost:hover:not(:disabled) { background: #f8fafc; }
+@media (max-width: 1200px) { .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .field-grid, .toggle-grid { grid-template-columns: 1fr; } .form-actions { flex-wrap: wrap; } }
 </style>
