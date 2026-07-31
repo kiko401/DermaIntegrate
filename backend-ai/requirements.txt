@@ -1,24 +1,73 @@
+# ============================================
+# DermaIntegrate Backend AI - Python Dependencies
+# ============================================
+# Python >= 3.10 required
+#
+# 安装步骤：
+#   1. 手动安装 torch GPU 版（体积大，见下方注释）
+#   2. pip install -r requirements.txt
+# ============================================
+
+# ----- Web Framework -----
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 python-multipart==0.0.6
-pydantic==2.5.0
 aiofiles==23.2.1
 
+# ----- Data Validation -----
+# 修复：langgraph 1.2.9 要求 pydantic>=2.7.4，原 2.5.0 冲突
+pydantic>=2.7.4,<3.0.0
+
+# ----- Database -----
 SQLAlchemy==2.0.25
-aiomysql==0.2.0
+aiomysql==0.3.2
 
+# ----- Medical Imaging -----
 pydicom==3.0.2
-Pillow==12.2.0
-numpy==1.26.4                      # 1.x 最终版，满足 onnxruntime>=1.26.3 需求且兼容 OpenCV
-opencv-python-headless==4.9.0.80    # 无头模式，适合服务器环境
+# 修复：避免与 torch 预装的 Pillow 12.3.0 产生降级冲突
+Pillow>=12.2.0
 
-onnxruntime==1.17.0                # 高性能 CPU 推理引擎，用于 UNet 分割模型
+# ----- ML / CV -----
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+onnxruntime==1.17.0
 sentence-transformers==2.7.0
-transformers==4.36.1               # 锁定版本，防止与 torch 2.1.0 发生依赖冲突
+transformers==4.36.1
 
-openai==2.40.0                      # 兼容 DeepSeek/MiniMax 等 OpenAI 协议接口
-qdrant-client==1.18.0              # Qdrant 向量数据库客户端
-json-repair==0.60.1                 # 运行时修复 LLM 输出的破损 JSON
+# ----- PyTorch (GPU 版 - 需手动安装) -----
+# pip install torch==2.2.0+cu121 torchvision==0.17.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+# torch==2.2.0+cu121
+# torchvision==0.17.0+cu121
 
-httpx==0.28.1                      # 异步 HTTP 客户端
-python-dotenv==1.0.0                # 环境变量加载
+# ----- LLM / API -----
+openai==2.40.0
+
+# ----- Vector DB -----
+qdrant-client==1.18.0
+
+# ----- HTTP Client -----
+httpx==0.28.1
+urllib3>=1.26.14,<2.0.0
+
+# ----- Utils -----
+json-repair==0.60.1
+python-dotenv==1.0.0
+filelock==3.13.1
+
+# ----- LangChain / LangGraph -----
+langgraph==1.2.9
+langgraph-checkpoint==4.1.1
+langgraph-prebuilt==1.1.0
+langchain-core==1.4.9
+langsmith==0.10.2
+
+# ----- Document Processing -----
+pypdf==6.14.2
+python-docx==1.2.0
+
+# ----- Data Processing -----
+# 修复：pandas 3.0+ 可能要求 numpy 2.0，锁定 2.2.x 确保与 numpy 1.26.4 兼容
+pandas==2.2.3
+
+# ----- 分词 -----
+jieba==0.42.1
