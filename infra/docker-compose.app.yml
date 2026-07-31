@@ -1,36 +1,35 @@
-services:
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
-      MYSQL_DATABASE: derma_app
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./init-app.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "--password=${DB_PASSWORD}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
+# DermaIntegrate 应用域部署
+# backend-app 加入 infra_default 网络，可直接访问 infra_mysql_1
+# frontend 容器内 nginx 代理 /api/ 到 backend-app
 
+services:
   backend-app:
     build:
       context: ../backend-app
+      dockerfile: Dockerfile
+    container_name: derma-app
     env_file: .env
-    depends_on:
-      mysql:
-        condition: service_healthy
+    ports:
+      - "3000:3000"
+    networks:
+      - infra_default
     restart: unless-stopped
+    mem_limit: 512m
 
   frontend:
     build:
       context: ../frontend
+      dockerfile: Dockerfile
+    container_name: derma-frontend
     ports:
       - "80:80"
     depends_on:
       - backend-app
+    networks:
+      - infra_default
     restart: unless-stopped
+    mem_limit: 128m
 
-volumes:
-  mysql_data:
+networks:
+  infra_default:
+    external: true

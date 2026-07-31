@@ -146,7 +146,7 @@ async function deleteUser(user) {
       <table class="data-table">
         <thead>
           <tr>
-            <th>ID</th>
+            <th>序号</th>
             <th>姓名</th>
             <th>用户名</th>
             <th>角色</th>
@@ -156,8 +156,8 @@ async function deleteUser(user) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="u in users" :key="u.id">
-            <td class="mono">{{ u.id }}</td>
+          <tr v-for="(u, index) in users" :key="u.id">
+            <td class="mono">{{ index + 1 }}</td>
             <td>{{ u.name }}</td>
             <td class="mono">{{ u.username }}</td>
             <td>
