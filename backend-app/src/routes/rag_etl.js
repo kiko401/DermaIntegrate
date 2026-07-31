@@ -252,6 +252,53 @@ router.post('/etl/jobs/:jobCode/sync', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/rag/etl/jobs/clinical — 临床病例 ETL 入库（代理 AI 域 /rag/etl/clinical）
+// 应用域负责 PHI 脱敏，AI 域接收已脱敏文本后完成切分/向量化/入库
+router.post('/etl/jobs/clinical', requireAdmin, async (req, res) => {
+  const { kb_id, case_type, patient_context, case_text, doc_version_id, doctor_id, chunk_size, chunk_overlap } = req.body;
+  if (!kb_id)        return res.status(400).json({ error: 'MISSING_KB_ID',   message: '缺少 kb_id' });
+  if (!case_type)    return res.status(400).json({ error: 'MISSING_CASE_TYPE', message: '缺少 case_type' });
+  if (!case_text)    return res.status(400).json({ error: 'MISSING_CASE_TEXT', message: '缺少 case_text' });
+  // patient_context 必填：AI 域用 summary_text 构建病例文本头，缺失会导致文本拼接出现 undefined
+  if (!patient_context || !patient_context.summary_text) {
+    return res.status(400).json({ error: 'MISSING_PATIENT_CONTEXT', message: '缺少 patient_context.summary_text' });
+  }
+  // doc_version_id 必填：用于生成 chunk_id（格式 {doc_id}_{doc_version_id}_{index}），不传则同一知识库多次入库 chunk_id 碰撞互相覆盖
+  if (!doc_version_id) {
+    return res.status(400).json({ error: 'MISSING_DOC_VERSION_ID', message: '缺少 doc_version_id，每次临床入库必须传入唯一值（如时间戳或文档版本 ID）' });
+  }
+
+  try {
+    const payload = {
+      kb_id: Number(kb_id),
+      case_type,
+      patient_context,
+      case_text,
+      doc_version_id: Number(doc_version_id),
+      doctor_id: doctor_id ? Number(doctor_id) : null,
+      chunk_size: Number(chunk_size) || 800,
+      chunk_overlap: Number(chunk_overlap) || 120,
+    };
+
+    const axios = require('axios');
+    const AI_BASE_URL = process.env.RAG_AI_BASE_URL || 'http://localhost:8000';
+    const INTERNAL_HEADERS = process.env.X_INTERNAL_SECRET
+      ? { 'X-Internal-Token': process.env.X_INTERNAL_SECRET }
+      : {};
+
+    const { data } = await axios.post(`${AI_BASE_URL}/rag/etl/clinical`, payload, {
+      headers: { ...INTERNAL_HEADERS, 'Content-Type': 'application/json' },
+      timeout: 300000,
+    });
+
+    return res.status(202).json(data);
+  } catch (err) {
+    const msg = err.response?.data?.detail || err.message || '临床 ETL 任务提交失败';
+    const status = err.response?.status || 500;
+    return res.status(status).json({ error: 'CLINICAL_ETL_FAILED', message: msg });
+  }
+});
+
 // 从列表响应中去除敏感字段
 function stripSensitiveFields(job) {
   const { config_json, result_json, ...rest } = job;  // eslint-disable-line no-unused-vars

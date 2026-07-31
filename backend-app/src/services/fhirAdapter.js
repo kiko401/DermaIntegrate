@@ -82,7 +82,7 @@ function normalizePacs(raw) {
     description:  raw.description    || null,
     image_path:   raw.img_path       || null,
     thumbnail_path: raw.thumb_path   || null,
-    recorded_at:  raw.study_date     || new Date().toISOString().slice(0, 19).replace('T', ' '),
+    recorded_at:  new Date().toISOString().slice(0, 19).replace('T', ' '),
   };
 }
 

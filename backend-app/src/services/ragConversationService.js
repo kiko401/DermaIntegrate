@@ -37,11 +37,15 @@ function resolveKbIds(primary, fallback = []) {
   return normalizeKbIds(fallback);
 }
 
+// summary_text 最大字符数；超出时截断并附说明，防止 prompt 过长
+const PATIENT_CONTEXT_MAX_CHARS = 500;
+
 /**
  * 从 clinical-view 构建脱敏患者上下文。
  * PHI 字段（name/id_card/phone/patient_id/source_id）一律不进入上下文。
  * 仅提取临床最小必要字段：性别、年龄、诊断、主诉、化验关键值、病理要点、PACS描述。
  * 自由文本字段经 sanitizeClinicalText 二次清洗后才写入。
+ * summary_text 超过 PATIENT_CONTEXT_MAX_CHARS 时截断，保证 token 上限可控。
  */
 async function buildPatientContext(patientId, doctorId, conversationId = null) {
   if (!patientId) return null;
@@ -104,12 +108,23 @@ async function buildPatientContext(patientId, doctorId, conversationId = null) {
   if (pathology.breslow_thickness_mm) pathologyPoints.push(`Breslow ${pathology.breslow_thickness_mm}mm`);
   if (pathology.ulceration) pathologyPoints.push('伴溃疡形成');
 
-  // PACS 描述（取最近一条描述，过自由文本清洗）
-  const rawPacsDesc = (view.pacs || []).sort((a, b) => new Date(b.recorded_at || 0) - new Date(a.recorded_at || 0))[0]?.description || null;
-  const { text: pacsDesc, detectedFields: pacsPhi } = sanitizeClinicalText(rawPacsDesc, patient);
+  // PACS 描述（取最近两条，过自由文本清洗，保留检查类型供区分）
+  const sortedPacs = (view.pacs || []).sort((a, b) => new Date(b.recorded_at || 0) - new Date(a.recorded_at || 0));
+  const pacsItems = [];
+  const allPacsPhi = [];
+  for (const pacsRecord of sortedPacs.slice(0, 2)) {
+    const rawDesc = pacsRecord.description || pacsRecord.ai_result_summary || null;
+    if (!rawDesc) continue;
+    const { text: cleanedDesc, detectedFields: pPhi } = sanitizeClinicalText(rawDesc, patient);
+    if (cleanedDesc) {
+      const label = pacsRecord.modality ? `${pacsRecord.modality}` : '影像';
+      pacsItems.push({ label, description: cleanedDesc });
+      allPacsPhi.push(...pPhi);
+    }
+  }
 
   // 汇总自由文本清洗命中的 PHI 字段类型，写审计（仅在实际命中时写）
-  const allFreeTextPhi = [...new Set([...dxPhi, ...ccPhi, ...allPathPhi, ...pacsPhi])];
+  const allFreeTextPhi = [...new Set([...dxPhi, ...ccPhi, ...allPathPhi, ...allPacsPhi])];
   if (allFreeTextPhi.length) {
     phiAudit.writePhiAuditLog({
       doctorId,
@@ -120,7 +135,7 @@ async function buildPatientContext(patientId, doctorId, conversationId = null) {
     });
   }
 
-  // 构建 summary_text（仅包含清洗后的内容）
+  // 构建 summary_text，开头固定为「当前患者」完成主动匿名化
   const parts = ['当前患者'];
   if (gender) parts.push(gender);
   if (age !== null) parts.push(`${age}岁`);
@@ -128,9 +143,14 @@ async function buildPatientContext(patientId, doctorId, conversationId = null) {
   if (chiefComplaint) parts.push(`主诉：${chiefComplaint}`);
   if (labLines) parts.push(`化验关键值：${labLines}`);
   if (pathologyPoints.length) parts.push(`病理要点：${pathologyPoints.join('，')}`);
-  if (pacsDesc) parts.push(`影像描述：${pacsDesc}`);
+  for (const p of pacsItems) parts.push(`${p.label}描述：${p.description}`);
 
-  const summary_text = parts.join('，') + '。';
+  let summary_text = parts.join('，') + '。';
+
+  // 超过长度上限时截断，避免 context 过长影响 prompt 质量
+  if (summary_text.length > PATIENT_CONTEXT_MAX_CHARS) {
+    summary_text = summary_text.slice(0, PATIENT_CONTEXT_MAX_CHARS - 10) + '…[已截断]';
+  }
 
   return {
     summary_text,
@@ -140,6 +160,7 @@ async function buildPatientContext(patientId, doctorId, conversationId = null) {
       recent_diagnosis: recentDiagnosis || null,
       chief_complaint: chiefComplaint || null,
       pathology_key_points: pathologyPoints,
+      pacs_descriptions: pacsItems,
     },
   };
 }
@@ -368,7 +389,7 @@ async function listForAiExport(query = {}) {
   const [rows] = await db.query(
     `SELECT l.conversation_id, l.request_summary, l.response_summary,
             l.kb_ids_json, l.created_at,
-            m.confidence_score, f.rating, f.rating_text
+            m.confidence_score, f.rating, f.correction_text
      FROM rag_logs l
      LEFT JOIN rag_messages m ON m.id = l.message_id
      LEFT JOIN rag_feedback f ON f.message_id = l.message_id
@@ -384,7 +405,6 @@ async function listForAiExport(query = {}) {
     const kbIds = safeJson(row.kb_ids_json, []) || [];
     const kbList = normalizeKbIds(kbIds);
     if (filterKbIds.length && !kbList.some((id) => filterKbIds.includes(id))) continue;
-    const ratingText = row.rating_text || (row.rating === 1 ? 'positive' : (row.rating === -1 ? 'negative' : null));
     conversations.push({
       conversation_id: row.conversation_id,
       question: row.request_summary || '',
@@ -392,7 +412,8 @@ async function listForAiExport(query = {}) {
       confidence: row.confidence_score != null ? Number(row.confidence_score) : null,
       kb_id: kbList[0] || null,
       kb_ids: kbList,
-      feedback: ratingText,
+      feedback: row.rating === 1 ? 'positive' : (row.rating === -1 ? 'negative' : null),
+      correction: row.correction_text || null,
       created_at: row.created_at,
     });
   }

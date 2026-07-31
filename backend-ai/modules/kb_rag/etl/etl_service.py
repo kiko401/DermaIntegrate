@@ -44,6 +44,19 @@ def _prune_etl_jobs():
     logger.info(f"Pruned {remove_count} old ETL jobs from memory.")
 
 
+def register_etl_job_pending(job_id: str, job_name: Optional[str] = None):
+    """后台任务提交前预注册 job，状态为 pending，确保立即可查询"""
+    _ETL_JOBS[job_id] = ETLJobStatus(
+        job_id=job_id,
+        job_name=job_name,
+        status="pending",
+        progress=0,
+        stage="pending",
+        created_at=datetime.now().isoformat(),
+    )
+    _prune_etl_jobs()
+
+
 def _clean_text(text: str) -> str:
     """
     文本增强清洗流程：

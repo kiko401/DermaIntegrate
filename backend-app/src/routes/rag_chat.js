@@ -196,9 +196,9 @@ router.post('/chat/completions', requireRagAccess, async (req, res) => {
     const auditCtx = {
       log_type: 'api',
       doctor_id: req.doctor?.id || null,
+      api_key_id: req.apiKeyId || null,
       kb_ids: kbIdsForLog,
       request_summary: lastUserMsg?.content || req.body?.question || null,
-      detail_json: req.apiKeyId ? { api_key_id: req.apiKeyId } : null,
     };
 
     return await proxyCompletionToAi(req, res, auditCtx);

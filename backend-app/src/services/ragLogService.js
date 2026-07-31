@@ -25,12 +25,13 @@ function toLogObject(row) {
 }
 
 function buildWhere(filters) {
-  const { log_type, doctor_id, kb_id, start_date, end_date, keyword } = filters || {};
+  const { log_type, doctor_id, api_key_id, kb_id, start_date, end_date, keyword } = filters || {};
   const where = ['1=1'];
   const params = [];
 
   if (log_type) { where.push('log_type = ?'); params.push(log_type); }
   if (doctor_id) { where.push('doctor_id = ?'); params.push(Number(doctor_id)); }
+  if (api_key_id) { where.push('api_key_id = ?'); params.push(Number(api_key_id)); }
   if (start_date) { where.push('created_at >= ?'); params.push(start_date); }
   if (end_date) { where.push("created_at < DATE_ADD(?, INTERVAL 1 DAY)"); params.push(end_date); }
   if (keyword) {
@@ -168,6 +169,7 @@ async function exportLogs(body = {}) {
 async function writeLog({
   log_type = 'api',
   doctor_id = null,
+  api_key_id = null,
   conversation_id = null,
   message_id = null,
   kb_ids = [],
@@ -181,13 +183,14 @@ async function writeLog({
   try {
     await db.query(
       `INSERT INTO rag_logs
-         (log_type, doctor_id, conversation_id, message_id,
+         (log_type, doctor_id, api_key_id, conversation_id, message_id,
           kb_ids_json, trace_id, request_summary, response_summary,
           latency_ms, status, detail_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         log_type,
         doctor_id || null,
+        api_key_id || null,
         conversation_id || null,
         message_id || null,
         kb_ids && kb_ids.length ? JSON.stringify(kb_ids) : null,

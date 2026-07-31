@@ -117,6 +117,7 @@
                 <option value="file">文件（txt/md/pdf/docx）</option>
                 <option value="csv">CSV</option>
                 <option value="excel">Excel</option>
+                <option value="clinical">临床病例脱敏入库</option>
               </select>
             </div>
 
@@ -197,6 +198,47 @@
               </div>
             </div>
 
+            <!-- 临床病例脱敏入库 -->
+            <div v-if="form.source_type === 'clinical'" class="source-config">
+              <div class="phi-warning" style="margin-bottom:12px;">
+                <strong>⚠️ PHI 合规提示</strong>：请确保以下所有文本已在提交前完成脱敏处理，不得包含患者真实姓名、身份证号、住院号等直接标识信息。
+              </div>
+              <div class="form-group">
+                <label>病例类型 <span class="required">*</span></label>
+                <select v-model="form.clinical.case_type" class="form-select" required>
+                  <option value="his">HIS（门诊/住院病历）</option>
+                  <option value="lis">LIS（检验报告）</option>
+                  <option value="pacs">PACS（影像报告）</option>
+                  <option value="pathology">病理报告</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>医生 ID（用于检索权限隔离）</label>
+                <input v-model.number="form.clinical.doctor_id" type="number" class="form-input" placeholder="可选，留空则不做医生级隔离" min="1" />
+              </div>
+              <div class="form-group">
+                <label>文档版本 ID <span class="required">*</span></label>
+                <input v-model.number="form.clinical.doc_version_id" type="number" class="form-input" placeholder="每次入库必须唯一，建议用时间戳（如 20260731001）" required min="1" />
+                <p class="hint">用于区分同一知识库内不同病例，相同值的入库会互相覆盖，请确保唯一。</p>
+              </div>
+              <div class="form-group">
+                <label>患者概况摘要（summary_text）<span class="required">*</span></label>
+                <textarea v-model="form.clinical.patient_context.summary_text" class="form-textarea" rows="3"
+                  placeholder="已脱敏的患者概况，例：老年男性，足底色素性皮损，近期增大..." required></textarea>
+              </div>
+              <div class="form-group">
+                <label>患者结构化信息（structured，JSON 格式，可选）</label>
+                <textarea v-model="form.clinical.structured_text" class="form-textarea" rows="3"
+                  placeholder='{"年龄": "68岁", "性别": "男", "既往史": "糖尿病"}'></textarea>
+                <p class="hint">填写 JSON 对象，键值对会拼接到病例文本中；留空则跳过。</p>
+              </div>
+              <div class="form-group">
+                <label>病例文本（case_text）<span class="required">*</span></label>
+                <textarea v-model="form.clinical.case_text" class="form-textarea" rows="6"
+                  placeholder="已脱敏的病例正文，例：主诉：左足底黑痣增大伴破溃3月..." required></textarea>
+              </div>
+            </div>
+
             <!-- 切分参数 -->
             <div class="form-row">
               <div class="form-group flex-1">
@@ -214,7 +256,7 @@
             <div class="modal-footer">
               <button type="button" class="btn btn-secondary" @click="closeCreateModal">取消</button>
               <button type="submit" class="btn btn-primary" :disabled="submitting">
-                {{ submitting ? '提交中...' : '提交任务' }}
+                {{ submitting ? (isFileSubmit ? '处理中，请勿关闭页面...' : '提交中...') : '提交任务' }}
               </button>
             </div>
           </form>
@@ -238,7 +280,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 
 const API = '/api/rag'
 
@@ -256,6 +298,7 @@ const submitError = ref('')
 const fileInput = ref(null)
 const selectedFile = ref(null)
 const errorModal = reactive({ show: false, message: '' })
+let _pollTimer = null
 
 const form = reactive({
   job_name: '',
@@ -264,6 +307,14 @@ const form = reactive({
   chunk_size: 800,
   chunk_overlap: 120,
   source_config: {},
+  clinical: {
+    case_type: 'his',
+    doctor_id: null,
+    doc_version_id: null,
+    case_text: '',
+    structured_text: '',
+    patient_context: { summary_text: '' },
+  },
 })
 
 const fileAccept = computed(() => {
@@ -278,6 +329,8 @@ const fileAcceptHint = computed(() => {
   return 'txt / md / pdf / docx'
 })
 
+const isFileSubmit = computed(() => ['file', 'csv', 'excel'].includes(form.source_type))
+
 function statusLabel(s) {
   const map = { pending: '等待中', running: '运行中', succeeded: '已完成', failed: '已失败' }
   return map[s] || s
@@ -285,13 +338,17 @@ function statusLabel(s) {
 
 function stageLabel(s) {
   const map = {
-    extracting:  '提取中',
-    cleaning:    '清洗中',
-    splitting:   '切分中',
-    embedding:   '向量化',
-    indexing:    '建索引',
-    completed:   '已完成',
-    failed:      '失败',
+    extracting:         '提取中',
+    cleaning:           '清洗中',
+    splitting:          '切分中',
+    ner_extraction:     'NER 实体抽取',
+    dense_embedding:    '向量化',
+    embedding:          '向量化',
+    indexing:           '建索引',
+    preparing_payload:  '构建 payload',
+    done:               '已完成',
+    completed:          '已完成',
+    failed:             '失败',
   }
   return s ? (map[s] || s) : '—'
 }
@@ -327,6 +384,23 @@ async function loadJobs() {
     console.error('loadJobs error', err)
   } finally {
     loading.value = false
+  }
+
+  // 有活跃任务时启动3秒轮询，否则停止
+  const hasActive = jobs.value.some(j => j.status === 'pending' || j.status === 'running')
+  if (hasActive && !_pollTimer) {
+    _pollTimer = setInterval(() => {
+      const stillActive = jobs.value.some(j => j.status === 'pending' || j.status === 'running')
+      if (stillActive) {
+        loadJobs()
+      } else {
+        clearInterval(_pollTimer)
+        _pollTimer = null
+      }
+    }, 3000)
+  } else if (!hasActive && _pollTimer) {
+    clearInterval(_pollTimer)
+    _pollTimer = null
   }
 }
 
@@ -367,6 +441,14 @@ function resetForm() {
   form.chunk_size = 800
   form.chunk_overlap = 120
   form.source_config = {}
+  form.clinical = {
+    case_type: 'his',
+    doctor_id: null,
+    doc_version_id: null,
+    case_text: '',
+    structured_text: '',
+    patient_context: { summary_text: '' },
+  }
   selectedFile.value = null
   submitError.value = ''
   if (fileInput.value) fileInput.value.value = ''
@@ -379,7 +461,44 @@ async function submitJob() {
   try {
     const isFileType = ['file', 'csv', 'excel'].includes(form.source_type)
 
-    if (isFileType) {
+    if (form.source_type === 'clinical') {
+      // 前端二次校验
+      if (!form.kb_id) throw new Error('请选择目标知识库')
+      if (!form.clinical.doc_version_id) throw new Error('请填写文档版本 ID（每次入库必须唯一）')
+      if (!form.clinical.patient_context.summary_text.trim()) throw new Error('请填写患者概况摘要（summary_text）')
+      if (!form.clinical.case_text.trim()) throw new Error('请填写病例文本（case_text）')
+
+      // 解析可选的 structured JSON
+      let structured = {}
+      if (form.clinical.structured_text.trim()) {
+        try {
+          structured = JSON.parse(form.clinical.structured_text)
+        } catch {
+          throw new Error('患者结构化信息格式错误，请填写合法的 JSON 对象，如 {"年龄":"68岁"}')
+        }
+      }
+
+      const body = {
+        kb_id: form.kb_id,
+        case_type: form.clinical.case_type,
+        patient_context: {
+          summary_text: form.clinical.patient_context.summary_text.trim(),
+          structured,
+        },
+        case_text: form.clinical.case_text.trim(),
+        doc_version_id: form.clinical.doc_version_id,
+        doctor_id: form.clinical.doctor_id || undefined,
+        chunk_size: form.chunk_size,
+        chunk_overlap: form.chunk_overlap,
+      }
+      const res = await fetch(`${API}/etl/jobs/clinical`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || '临床入库提交失败')
+    } else if (isFileType) {
       if (!selectedFile.value) {
         submitError.value = '请选择文件'
         return
@@ -425,6 +544,13 @@ async function submitJob() {
 onMounted(() => {
   loadKbs()
   loadJobs()
+})
+
+onUnmounted(() => {
+  if (_pollTimer) {
+    clearInterval(_pollTimer)
+    _pollTimer = null
+  }
 })
 </script>
 

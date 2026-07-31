@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict
@@ -15,6 +16,7 @@ from ..etl.etl_service import (
     submit_etl_job,
     export_feedback_by_filters,
     clinical_etl_and_ingest,
+    register_etl_job_pending,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,8 +55,9 @@ async def run_etl_file_endpoint(
         )
     filename = file.filename
     job_id = f"etl_job_{doc_id}_{doc_version_id}"
-    job_status = await extract_and_ingest(content, filename, kb_id, doc_id, doc_version_id, job_id, job_name)
-    return {"job_id": job_id, "status": job_status.status}
+    register_etl_job_pending(job_id, job_name)
+    asyncio.create_task(extract_and_ingest(content, filename, kb_id, doc_id, doc_version_id, job_id, job_name))
+    return {"job_id": job_id, "status": "pending"}
 
 
 @router.get("/etl/jobs")

@@ -76,7 +76,7 @@ async function triggerEtlRunFile(dbJob, { jobName, kbId, chunkSize, chunkOverlap
 
   const { data } = await axios.post(`${AI_BASE_URL}/rag/etl/run-file`, form, {
     headers: { ...INTERNAL_HEADERS, ...form.getHeaders() },
-    timeout: 60000,
+    timeout: 300000,
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
   });
@@ -111,7 +111,16 @@ async function syncJobFromAI(job) {
       timeout: 10000,
     });
     aiData = data;
-  } catch {
+  } catch (err) {
+    const httpStatus = err.response?.status;
+    console.warn(`[ragEtlService] syncJobFromAI failed for job ${job.job_code}: HTTP ${httpStatus ?? 'N/A'} ${err.message}`);
+    if (httpStatus === 404) {
+      await db.query(
+        `UPDATE rag_etl_jobs SET status = 'failed', error_message = ? WHERE id = ?`,
+        ['AI 域查无此任务（404），可能服务已重启', job.id]
+      );
+      return { ...job, status: 'failed', error_message: 'AI 域查无此任务（404），可能服务已重启' };
+    }
     return job;
   }
 

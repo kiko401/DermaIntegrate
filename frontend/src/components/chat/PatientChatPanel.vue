@@ -127,12 +127,6 @@ async function send() {
     message.warning('会话未就绪，请稍后')
     return
   }
-  if (!selectedKbIds.value.length) {
-    kbDrawerOpen.value = true
-    message.warning('请至少选择一个知识库')
-    return
-  }
-
   messages.value.push({ role: 'user', content_markdown: q, _local: true })
   question.value = ''
   sending.value = true
@@ -143,8 +137,9 @@ async function send() {
   let finalPayload = null
 
   try {
+    const kbIds = selectedKbIds.value.length ? selectedKbIds.value : [0]
     const qs = new URLSearchParams({ question: q })
-    selectedKbIds.value.forEach(id => qs.append('kb_ids', String(id)))
+    kbIds.forEach(id => qs.append('kb_ids', String(id)))
     const url = `/api/rag/conversations/${convId.value}/stream?${qs.toString()}`
 
     const res = await fetch(url, { credentials: 'include' })

@@ -187,7 +187,7 @@ async function getClinicalView(patientId) {
        FROM pacs_records r
        JOIN pacs_patients p ON p.id = r.pacs_patient_id
        WHERE r.pacs_patient_id IN (?)
-       ORDER BY r.recorded_at DESC`,
+       ORDER BY r.recorded_at DESC, r.id DESC`,
       [ptIds]
     )
     return rows.map(r => ({

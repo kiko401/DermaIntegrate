@@ -280,32 +280,84 @@ async function forceReleaseSessions() {
 }
 
 // ── 推送沙箱 ───────────────────────────────────────────────────
+// 演示套装说明：两套数据使用相同身份证，EMPI 自动归一到张伟(patient_id=1)
+// 每套 HIS/LIS/PACS 的 UID 不同，可独立重复推送，互不冲突
+// PACS img_path 必须指向服务器 public/ 目录下已有的真实图片文件
+
 const HIS_EXAMPLE = JSON.stringify({
-  pat_no: 'H-ZW-002', id_no: '110101198801015678',
+  pat_no: 'H-ZW-DEMO-A', id_no: '110101198801015678',
   name: '张伟', phone: '13800138001',
-  visit_info: { dept_name: '皮肤科', cc: '背部色素痣疑似恶变',
-    diag: '皮肤恶性黑色素瘤', diag_code: 'C43.5',
-    visit_date: '2026-06-27', type: '门诊' }
+  visit_info: {
+    dept_name: '皮肤科',
+    cc: '左足底色素性皮损，边界不规则，近期快速增大伴轻度出血',
+    diag: '皮肤恶性黑色素瘤', diag_code: 'C43.7',
+    visit_date: '2026-07-31', type: '门诊'
+  }
 }, null, 2)
 
 const LIS_EXAMPLE = JSON.stringify({
-  specimen_id: 'LIS-ZW-002', patient_id_card: '110101198801015678',
+  specimen_id: 'LIS-ZW-DEMO-A', patient_id_card: '110101198801015678',
   patient_name: '张伟', patient_phone: '13800138001',
-  reported_at: '2026-06-27',
-  test_results: [{ item: 'LDH', val: '320', unit_str: 'U/L', ref: '120-246', abnormal: true }],
+  reported_at: '2026-07-31',
+  test_results: [
+    { item: 'LDH', val: '320', unit_str: 'U/L', ref: '120-246', abnormal: true }
+  ],
   is_pathology: true,
-  pathology: { report_no: 'PATH-ZW-002', sample_type: '切除活检',
-    diagnosis_text: '皮肤恶性黑色素瘤', histological_type: '浅表扩散型',
-    thickness: 2.1, ulcer: true, mitosis: 4, clark: 4, braf: 'V600E' }
+  pathology: {
+    report_no: 'PATH-ZW-DEMO-A', sample_type: '切除活检',
+    diagnosis_text: '皮肤恶性黑色素瘤', histological_type: '肢端雀斑样型',
+    thickness: 2.1, ulcer: true, mitosis: 4, clark: 4, braf: 'V600E'
+  }
 }, null, 2)
 
 const PACS_EXAMPLE = JSON.stringify({
-  ris_uid: 'PACS-ZW-002', card_no: '110101198801015678',
+  ris_uid: 'PACS-ZW-DEMO-A', card_no: '110101198801015678',
   patient_name: '张伟', patient_phone: '13800138001',
-  img_path: '/pacs/test/image.dcm', thumb_path: '/pacs/test/thumb.jpg',
-  modality_code: 'US', body_part: '皮肤', description: '皮肤超声检查',
-  study_date: '2026-06-27'
+  img_path: '/pacs/images/ZW-007-B-origin.jpg',
+  thumb_path: '/pacs/images/ZW-007-B-thumb.jpg',
+  modality_code: 'DERM', body_part: '左足底',
+  description: '左足底色素性皮损皮肤镜检查',
+  study_date: '2026-07-31'
 }, null, 2)
+
+// ── 第二套演示数据（备用，UID 不同，可在第一套之后独立使用）──
+const HIS_EXAMPLE_B = JSON.stringify({
+  pat_no: 'H-ZW-DEMO-B', id_no: '110101198801015678',
+  name: '张伟', phone: '13800138001',
+  visit_info: {
+    dept_name: '皮肤科',
+    cc: '左足底病灶复查，术后随访',
+    diag: '皮肤恶性黑色素瘤术后随访', diag_code: 'C43.7',
+    visit_date: '2026-07-31', type: '门诊'
+  }
+}, null, 2)
+
+const LIS_EXAMPLE_B = JSON.stringify({
+  specimen_id: 'LIS-ZW-DEMO-B', patient_id_card: '110101198801015678',
+  patient_name: '张伟', patient_phone: '13800138001',
+  reported_at: '2026-07-31',
+  test_results: [
+    { item: 'LDH', val: '298', unit_str: 'U/L', ref: '120-246', abnormal: true }
+  ],
+  is_pathology: true,
+  pathology: {
+    report_no: 'PATH-ZW-DEMO-B', sample_type: '穿刺活检',
+    diagnosis_text: '皮肤恶性黑色素瘤', histological_type: '肢端雀斑样型',
+    thickness: 1.8, ulcer: false, mitosis: 3, clark: 3, braf: 'V600E'
+  }
+}, null, 2)
+
+const PACS_EXAMPLE_B = JSON.stringify({
+  ris_uid: 'PACS-ZW-DEMO-B', card_no: '110101198801015678',
+  patient_name: '张伟', patient_phone: '13800138001',
+  img_path: '/pacs/images/ZW-007-A-origin.jpg',
+  thumb_path: '/pacs/images/ZW-007-A-thumb.jpg',
+  modality_code: 'DERM', body_part: '右手背',
+  description: '右手背色素性皮损皮肤镜复查',
+  study_date: '2026-07-31'
+}, null, 2)
+
+const demoSet = ref('A') // 当前演示套装，A 或 B
 
 const pushCards = ref([
   { key: 'his',  label: 'HIS',  color: 'his',
@@ -321,6 +373,20 @@ const pushCards = ref([
     desc: '影像推送，命中 EMPI 后自动触发 30s 防抖分析',
     json: PACS_EXAMPLE, loading: false, resp: null },
 ])
+
+function switchDemoSet(set) {
+  demoSet.value = set
+  if (set === 'A') {
+    pushCards.value[0].json = HIS_EXAMPLE
+    pushCards.value[1].json = LIS_EXAMPLE
+    pushCards.value[2].json = PACS_EXAMPLE
+  } else {
+    pushCards.value[0].json = HIS_EXAMPLE_B
+    pushCards.value[1].json = LIS_EXAMPLE_B
+    pushCards.value[2].json = PACS_EXAMPLE_B
+  }
+  pushCards.value.forEach(c => { c.resp = null })
+}
 
 async function sendPush(card) {
   let body
@@ -530,6 +596,14 @@ watch(() => route.query, initFromQuery, { immediate: true })
 
       <!-- Tab 3: 推送沙箱 -->
       <a-tab-pane key="sandbox" tab="推送沙箱">
+        <div class="sandbox-toolbar">
+          <span class="sandbox-toolbar-label">演示套装：</span>
+          <a-radio-group v-model:value="demoSet" size="small" button-style="solid" @change="e => switchDemoSet(e.target.value)">
+            <a-radio-button value="A">套装 A（左足底，厚度 2.1mm，BRAF+）</a-radio-button>
+            <a-radio-button value="B">套装 B（右手背，厚度 1.8mm，BRAF+）</a-radio-button>
+          </a-radio-group>
+          <span class="sandbox-toolbar-hint">两套 UID 不同，可各自独立推送 ≥2 次不冲突</span>
+        </div>
         <div class="sandbox-grid">
           <div v-for="card in pushCards" :key="card.key" class="sandbox-card">
             <div class="sandbox-card-header">
@@ -999,6 +1073,31 @@ watch(() => route.query, initFromQuery, { immediate: true })
 }
 
 /* sandbox */
+.sandbox-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.82);
+  border: 1px solid rgba(109,145,186,0.12);
+  flex-wrap: wrap;
+}
+
+.sandbox-toolbar-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #35506f;
+  white-space: nowrap;
+}
+
+.sandbox-toolbar-hint {
+  font-size: 11px;
+  color: #8aa0b8;
+  margin-left: auto;
+}
+
 .sandbox-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
