@@ -6,6 +6,9 @@ const route = useRoute()
 const router = useRouter()
 
 const isAuthPage = computed(() => route.meta.requiresAuth === false)
+const isFixedViewportPage = computed(() => {
+  return route.path.startsWith('/clinical/') || route.path === '/doctor/chat'
+})
 
 function getDoctorInfo() {
   try { return JSON.parse(localStorage.getItem('doctor_info') || '{}') } catch { return {} }
@@ -16,8 +19,8 @@ watch(() => route.path, () => { doctorInfo.value = getDoctorInfo() })
 const isAdmin = computed(() => doctorInfo.value.role === 'admin')
 
 const doctorNavItems = [
-  { path: '/patients',      label: '患者管理' },
-  { path: '/doctor/chat',   label: '知识库' },
+  { path: '/patients',     label: '患者管理' },
+  { path: '/doctor/chat',  label: '知识库' },
 ]
 const adminNavItems = [
   { path: '/admin/patients',         label: '患者管理' },
@@ -26,6 +29,13 @@ const adminNavItems = [
   { path: '/admin/users',            label: '用户管理' },
   { path: '/admin/rag/kbs',          label: '知识库' },
   { path: '/admin/rag/documents',    label: '文档管理' },
+  { path: '/admin/rag/vectors',      label: '向量任务' },
+  { path: '/admin/rag/etl',          label: 'ETL 管理' },
+  { path: '/admin/rag/governance',   label: 'RAG治理' },
+  { path: '/admin/rag/api-keys',     label: 'API Keys' },
+  { path: '/admin/rag/logs',         label: '问答日志' },
+  { path: '/admin/rag/settings',     label: 'RAG配置' },
+  { path: '/admin/rag/debug',        label: '调试' },
 ]
 
 const navItems = computed(() => isAdmin.value ? adminNavItems : doctorNavItems)
@@ -64,14 +74,21 @@ async function logout() {
         <span class="logout-btn" @click="logout">退出</span>
       </div>
     </header>
-    <main class="main-content">
+    <main class="main-content" :class="{ 'main-content--fixed': isFixedViewportPage }">
       <RouterView />
     </main>
   </div>
 </template>
 
 <style scoped>
-.layout { display: flex; flex-direction: column; min-height: 100vh; background: #f1f5f9; }
+.layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+  background: #f1f5f9;
+}
 
 .topbar {
   display: flex;
@@ -118,5 +135,15 @@ async function logout() {
 }
 .logout-btn:hover { color: #64748b; }
 
-.main-content { flex: 1; min-width: 0; overflow: auto; }
+.main-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.main-content--fixed {
+  height: calc(100vh - 52px);
+  overflow: hidden;
+}
 </style>

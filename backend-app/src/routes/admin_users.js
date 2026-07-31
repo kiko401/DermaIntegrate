@@ -6,7 +6,7 @@ const db = require('../db');
 router.get('/', async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, name, username, role, is_active, created_at FROM doctors WHERE deleted_at IS NULL ORDER BY created_at DESC'
+      'SELECT id, name, username, role, is_active, created_at FROM doctors WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC'
     );
     res.json(rows);
   } catch (e) {

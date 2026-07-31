@@ -34,7 +34,7 @@ async function triggerAnalysis(patientId) {
 
   // 2. 取该患者最新 PACS 记录（通过 EMPI → pacs_patients → pacs_records）
   const [empiRows] = await db.query(
-    `SELECT source_id FROM empi_index WHERE patient_id = ? AND source_system = 'PACS' LIMIT 1`,
+    `SELECT source_id FROM empi_index WHERE patient_id = ? AND source_system = 'PACS' ORDER BY linked_at DESC LIMIT 1`,
     [patientId]
   );
   if (!empiRows.length) {

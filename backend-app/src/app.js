@@ -42,10 +42,24 @@ app.use('/api/patients', requireDoctor, require('./routes/patients'));
 // RAG 子系统路由
 // /api/rag/tasks/:taskId/callback 使用独立 internalToken 中间件，不走 requireAuth
 app.use('/api/rag/tasks',     require('./routes/rag_tasks'));
-// /api/rag/chat/completions 使用 ragApiAuth 中间件，不走 Cookie
-app.use('/api/rag',           require('./routes/rag_api'));
 app.use('/api/rag/kbs',       requireAuth,  require('./routes/rag_kb'));
-app.use('/api/rag/documents', requireAuth,  require('./routes/rag_documents')
+app.use('/api/rag/documents', requireAuth,  require('./routes/rag_documents'));
+// Phase 6：日志、反馈、配置路由（需在 rag_chat 前注册，避免路径被 /api/rag 通配截断）
+app.use('/api/rag',           require('./routes/rag_logs'));
+app.use('/api/rag',           require('./routes/rag_feedback'));
+app.use('/api/rag',           require('./routes/rag_config'));
+app.use('/api/rag',           require('./routes/rag_chat'));
+// Phase 9：ETL 管理（全部 requireAdmin，在路由内部已声明）
+app.use('/api/rag',           require('./routes/rag_etl'));
+// Phase 10：工具与 Agent 展示（requireAdmin 在路由内部声明；必须在 requireAdmin 块之前注册，否则 doctor 访问 GET /tools/templates 会被拦截）
+app.use('/api/rag',           require('./routes/rag_tools'));
+app.use('/api/rag',           require('./routes/rag_agents'));
+// 以下路由均需 requireAdmin，统一放在无鉴权路由之后
+app.use('/api/rag',           requireAdmin, require('./routes/rag_debug'));
+// Phase 7：API Key 管理（requireAdmin 安全修复，/api/rag/api-keys 须登录）
+app.use('/api/rag',           requireAdmin, require('./routes/rag_api_keys'));
+// Phase 11：Admin 治理代理路由（rules / rejections / sensitive-words / model-configs）
+app.use('/api/rag',           requireAdmin, require('./routes/rag_admin'));
 
 app.get('/', (req, res) => {
   res.json({
