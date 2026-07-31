@@ -30,6 +30,7 @@ backend-ai/test_*.py
 backend-ai/test_data/
 backend-ai/diagnose_color.py
 backend-ai/test_sse.html
+backend-ai/scripts/
 
 # =============== Node 依赖 ===============
 node_modules/
@@ -45,6 +46,7 @@ node_modules/
 
 # =============== Claude Code 会话数据 ===============
 .claudian/
+.claude/
 
 # =============== 本地辅助文档（AI 协作 / 学习 / 面试，不属于工程交付） ===============
 CLAUDE.md
