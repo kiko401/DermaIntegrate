@@ -44,6 +44,18 @@ DermaIntegrate 面向皮肤科门诊与临床协同场景，解决 HIS / LIS / P
 - 前端交互与 SSE 接收
 - 外部医疗系统数据接入与聚合
 
+### RAG 知识库子系统
+
+- 知识库生命周期管理（创建 / 克隆 / 升级申请）
+- 文档管理（上传 / 版本 / 回滚 / 差异对比）
+- 会话问答主链（流式 SSE + 引用来源 + 医疗免责声明）
+- 患者上下文问答（临床摘要脱敏注入，PHI 二次守护）
+- 统一 API（OpenAI 风格兼容接口 + API Key 管理）
+- ETL 管理（URL / 数据库 / 文件三类来源，PHI 黑名单检查）
+- 工具与 Agent（工具注册 / 快捷模板 / LangGraph 节点 trace）
+- RAG 治理（规则回答 / 拒答规则 / 敏感词 / 安全审计 / 模型配置）
+- 日志与反馈（问答日志落库 / 导出 csv|excel / 反馈导出 jsonl / 归档）
+
 ### 智能推理域
 
 - 图像预处理与模态识别
@@ -70,7 +82,7 @@ DermaIntegrate
 ## 技术栈
 
 - **应用平台域**：Vue 3、Node.js、Express、MySQL
-- **智能推理域**：Python 3.11、FastAPI、ONNX Runtime、Qdrant
+- **智能推理域**：Python 3.11、FastAPI、ONNX Runtime、Qdrant、LangGraph
 - **基础设施**：Docker、Docker Compose、Nginx
 
 ---
@@ -115,6 +127,8 @@ DB_USER=root
 DB_PASSWORD=your_password
 JWT_SECRET=your_jwt_secret
 AI_BASE_URL=http://localhost:8000/ai
+RAG_AI_BASE_URL=http://localhost:8000
+X_INTERNAL_SECRET=your_internal_secret
 ```
 
 ### 4. 启动智能推理域
@@ -124,6 +138,14 @@ cp backend-ai/.env.example backend-ai/.env
 docker-compose up -d mysql qdrant
 docker-compose up -d --build fastapi
 docker exec -it derma-fastapi python init_rag.py
+```
+
+初始化内置知识库（首次部署必须执行一次）：
+
+```bash
+curl -X POST http://localhost:8000/rag/init/from-docs \
+  -H "Content-Type: application/json" \
+  -d '{"recreate": false}'
 ```
 
 ### 5. 访问系统
@@ -140,14 +162,21 @@ http://localhost:3000
 
 ## 接口契约
 
-应用平台域与智能推理域仅通过以下接口交互：
+应用平台域与智能推理域通过以下两类通道交互：
 
+**业务流 1 — 图像诊断**
 - `POST /upload`
 - `GET /stream/{task_id}`
+
+**业务流 2 — RAG 知识库问答**
+- `POST /rag/chat`
+- `POST /rag/stream/{conversation_id}`
+- `POST /rag/ingest`、`POST /rag/delete-index` 等文档管理接口
 
 详细定义见：
 
 - `docs/api-contract.yaml`
+- `docs/API_SPEC.md`
 
 ---
 
@@ -159,8 +188,10 @@ DermaIntegrate/
 │  ├─ agents/                   # Multi-Agent 逻辑
 │  ├─ api/                      # FastAPI 路由与 SSE 接口
 │  ├─ cnn/                      # 视觉模型推理
+│  ├─ modules/
+│  │  └─ kb_rag/                # RAG 子系统（检索 / 生成 / 治理 / Agent）
 │  ├─ preprocessing/            # DICOM 预处理
-│  ├─ rag/                      # 检索增强
+│  ├─ rag/                      # 图像诊断用内置知识库
 │  └─ init_rag.py               # 知识库初始化脚本
 ├─ backend-app/                 # 应用平台域后端
 │  ├─ src/routes/               # HTTP 路由
