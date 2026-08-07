@@ -341,8 +341,12 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
     """
     try:
         from ..utils import tokenize as _shared_tokenize
-        from ..retrieval.retriever import _get_global_idf
         from collections import Counter
+
+        try:
+            from ..retrieval.retriever import _get_global_idf
+        except Exception:
+            _get_global_idf = None
 
         # 1. 解析关键词（对查询短语也进行分词，实现 token 级别匹配）
         query_phrases = req.query.strip().split()
@@ -350,14 +354,17 @@ async def keyword_search_endpoint(req: KeywordSearchRequest):
             raise ValueError("查询词不能为空")
         query_tokens: list[str] = []
         for phrase in query_phrases:
-            for tok in _shared_tokenize(phrase):
+            tokens = _shared_tokenize(phrase)
+            if not tokens:
+                tokens = [phrase.strip()]
+            for tok in tokens:
                 if tok not in query_tokens:
                     query_tokens.append(tok)
         if not query_tokens:
             raise ValueError("查询词不能为空")
 
         # 获取全局 IDF（来自已持久化的 bm25_idf.json）
-        idf_map = _get_global_idf()
+        idf_map = _get_global_idf() if callable(_get_global_idf) else {}
         avg_doc_len = 200.0  # 默认平均文档长度（字符级估算）
 
         # 2. 分批 scroll Qdrant，维护有序 top_k 结果（防止 OOM）

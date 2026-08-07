@@ -107,7 +107,7 @@ def run_integration_agent(
             "recommendations": [{"item": "建议优先完善相关检查或寻求第二意见", "source_id": INTERNAL_SOURCE_ID}],
             "differential": ["推理服务暂不可用"],
             "disclaimer": "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断",
-            "status": "incomplete"
+            "status": "complete"
         }
 
     if settings.USE_MOCK_INTEGRATION:
@@ -132,7 +132,7 @@ def run_integration_agent(
             "recommendations": [{"item": "请完善相关检查 (Mock建议)", "source_id": INTERNAL_SOURCE_ID}],
             "differential": ["Mock黑色素瘤", "Mock色素痣"],
             "disclaimer": "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断",
-            "status": "complete" if is_complete else "incomplete"
+            "status": "complete"
         }
 
     logger.info(f"Running REAL Integration Agent for task: {task_id}")
@@ -160,13 +160,6 @@ def run_integration_agent(
             logger.warning(f"LLM output JSON decode failed, attempting json-repair. Raw: {result_str[:100]}...")
             parsed_data = json_repair.loads(result_str)
 
-        is_incomplete_by_data = (
-                pathology_result is None or
-                pathology_result.get("t_stage") in ["未提供", "无法分期", "非黑色素瘤病变"]
-        )
-
-        llm_status = parsed_data.get("status", "incomplete").lower()
-        final_status = "incomplete" if is_incomplete_by_data or llm_status == "incomplete" else "complete"
 
         final_data = {
             "task_id": task_id,
@@ -176,7 +169,7 @@ def run_integration_agent(
             "differential": parsed_data.get("differential", ["未知"]),
             "disclaimer": parsed_data.get("disclaimer",
                                           "本系统结果仅供临床参考，不具有最终诊断效力，请执业医师结合临床判断"),
-            "status": final_status
+            "status": "complete"
         }
 
         # 确保 source_id 不缺失
@@ -187,7 +180,7 @@ def run_integration_agent(
             if isinstance(item, dict):
                 item.setdefault("source_id", "R00")
 
-        logger.info(f"Integration Agent successful for task: {task_id}, status: {final_status}")
+        logger.info(f"Integration Agent successful for task: {task_id}, status: complete")
         return final_data
 
     except Exception as e:

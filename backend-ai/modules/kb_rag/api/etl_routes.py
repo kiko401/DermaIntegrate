@@ -1,5 +1,7 @@
 import asyncio
+import io
 import logging
+from uuid import uuid4
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -54,9 +56,15 @@ async def run_etl_file_endpoint(
             detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE // (1024*1024)}MB）"
         )
     filename = file.filename
-    job_id = f"etl_job_{doc_id}_{doc_version_id}"
+    # 同一文档版本允许重复重跑，不能用 doc_id/version_id 作为唯一 job_id。
+    job_id = f"etl_job_{doc_id}_{doc_version_id}_{uuid4().hex[:10]}"
     register_etl_job_pending(job_id, job_name)
-    asyncio.create_task(extract_and_ingest(content, filename, kb_id, doc_id, doc_version_id, job_id, job_name))
+    asyncio.create_task(
+        extract_and_ingest(
+            content, filename, kb_id, doc_id, doc_version_id, job_id, job_name,
+            chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        )
+    )
     return {"job_id": job_id, "status": "pending"}
 
 

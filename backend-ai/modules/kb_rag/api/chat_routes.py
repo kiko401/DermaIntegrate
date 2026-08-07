@@ -19,6 +19,9 @@ async def chat_endpoint(req: ChatRequest):
     生产环境建议统一使用流式接口 GET /stream/，
     前端可对 SSE 响应进行缓冲后一次性展示，体验等同于非流式。
     """
+    if not req.kb_ids:
+        raise HTTPException(status_code=422, detail="kb_ids must not be empty")
+
     try:
         response = await run_rag_workflow(req)
         return response

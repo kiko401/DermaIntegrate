@@ -1,6 +1,8 @@
 import logging
 import re
 import asyncio
+import hashlib
+from uuid import uuid4
 from datetime import datetime
 from typing import Dict, Optional, List, Tuple
 
@@ -10,6 +12,14 @@ from shared.config import (
     ETL_CONNECT_TIMEOUT,
     ETL_READ_TIMEOUT,
     MAX_ETL_JOBS as _MAX_ETL_JOBS,
+    APP_BASE_URL,
+    X_INTERNAL_SECRET,
+    CALLBACK_CONNECT_TIMEOUT,
+    CALLBACK_READ_TIMEOUT,
+    CALLBACK_WRITE_TIMEOUT,
+    CALLBACK_POOL_TIMEOUT,
+    MAX_CALLBACK_RETRIES,
+    CALLBACK_RETRY_DELAY,
 )
 from ..ingest.parsers import extract_text_with_metadata
 from ..ingest.splitters import split_text, _get_chunk_position, _split_table_blocks
@@ -22,6 +32,60 @@ logger = logging.getLogger(__name__)
 
 # 内存级 ETL 任务状态（上限从 shared/config 统一读取）
 _ETL_JOBS: Dict[str, ETLJobStatus] = {}
+
+
+async def _notify_app_domain_etl_update(job_id: str, payload: Dict) -> None:
+    """回调应用域，持久化 ETL 状态。"""
+    if not APP_BASE_URL or not X_INTERNAL_SECRET:
+        return
+
+    callback_url = f"{APP_BASE_URL}/api/rag/etl/jobs/{job_id}/callback"
+    timeout = httpx.Timeout(
+        connect=CALLBACK_CONNECT_TIMEOUT,
+        read=CALLBACK_READ_TIMEOUT,
+        write=CALLBACK_WRITE_TIMEOUT,
+        pool=CALLBACK_POOL_TIMEOUT,
+    )
+
+    last_error = None
+    for attempt in range(1, MAX_CALLBACK_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                res = await client.post(
+                    callback_url,
+                    json=payload,
+                    headers={
+                        "X-Internal-Token": X_INTERNAL_SECRET,
+                        "Content-Type": "application/json",
+                    },
+                )
+                res.raise_for_status()
+                return
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_CALLBACK_RETRIES:
+                await asyncio.sleep(CALLBACK_RETRY_DELAY)
+    logger.warning(f"ETL callback failed for {job_id}: {last_error}")
+
+
+async def _set_job_state(job_id: str, **patch):
+    """统一更新内存态并回调应用域。"""
+    job = _ETL_JOBS.get(job_id)
+    if not job:
+        return None
+
+    for key, value in patch.items():
+        setattr(job, key, value)
+
+    callback_payload = {}
+    for key in ("status", "progress", "stage", "detail", "error_message"):
+        value = getattr(job, key, None)
+        if value is not None:
+            callback_payload[key] = value
+
+    if callback_payload:
+        await _notify_app_domain_etl_update(job_id, callback_payload)
+    return job
 
 
 def _derive_doc_title(filename: str) -> str:
@@ -121,32 +185,55 @@ async def _fetch_from_database(
         import aiomysql
         conn = await aiomysql.connect(
             host=host, port=port, user=user, password=password, db=database,
-            connect_timeout=ETL_CONNECT_TIMEOUT, read_timeout=ETL_READ_TIMEOUT,
+            connect_timeout=ETL_CONNECT_TIMEOUT,
         )
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            if sql_query:
-                await cur.execute(sql_query)
-            else:
-                await cur.execute(f"SELECT * FROM `{table_name}` LIMIT 10000")
-            rows = await cur.fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
+        try:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                if sql_query:
+                    await asyncio.wait_for(cur.execute(sql_query), timeout=ETL_READ_TIMEOUT)
+                else:
+                    await asyncio.wait_for(
+                        cur.execute(f"SELECT * FROM `{table_name}` LIMIT 10000"),
+                        timeout=ETL_READ_TIMEOUT,
+                    )
+                rows = await asyncio.wait_for(cur.fetchall(), timeout=ETL_READ_TIMEOUT)
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
 
     elif db_type == "postgresql":
         import asyncpg
         conn = await asyncpg.connect(
             host=host, port=port, user=user, password=password, database=database,
-            timeout=ETL_READ_TIMEOUT,
+            timeout=ETL_CONNECT_TIMEOUT,
         )
-        if sql_query:
-            rows = await conn.fetch(sql_query)
-        else:
-            rows = await conn.fetch(f'SELECT * FROM "{table_name}" LIMIT 10000')
-        await conn.close()
-        return [dict(r) for r in rows]
+        try:
+            if sql_query:
+                rows = await asyncio.wait_for(conn.fetch(sql_query), timeout=ETL_READ_TIMEOUT)
+            else:
+                rows = await asyncio.wait_for(
+                    conn.fetch(f'SELECT * FROM "{table_name}" LIMIT 10000'),
+                    timeout=ETL_READ_TIMEOUT,
+                )
+            return [dict(r) for r in rows]
+        finally:
+            await conn.close()
 
     else:
         raise ValueError(f"Unsupported db_type: {db_type}. Supported: mysql, postgresql")
+
+
+def _make_synthetic_doc_ids(job_id: str) -> Tuple[int, int]:
+    """Create stable doc identifiers for URL/database ETL jobs to avoid chunk_id collisions."""
+    digest = hashlib.sha256(job_id.encode("utf-8")).digest()
+    # Keep IDs in positive signed 32-bit range for broad DB/frontend compatibility.
+    doc_id = int.from_bytes(digest[:4], byteorder="big") % 2_147_483_647
+    if doc_id == 0:
+        doc_id = 1
+    doc_version_id = int.from_bytes(digest[4:8], byteorder="big") % 2_147_483_647
+    if doc_version_id == 0:
+        doc_version_id = 1
+    return doc_id, doc_version_id
 
 
 def _rows_to_text(rows: List[Dict], chunk_field: str) -> str:
@@ -180,8 +267,22 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
     source_type=url 时从远程 URL 拉取文件内容；
     source_type=file/csv/excel 时由调用方通过 run_etl_file_endpoint 上传。
     """
-    job_id = f"etl_job_{req.kb_id}_{int(datetime.now().timestamp())}"
+    # 避免同一 KB 在同一秒提交多个任务时发生 job_id 冲突。
+    job_id = f"etl_job_{req.kb_id}_{int(datetime.now().timestamp())}_{uuid4().hex[:10]}"
     job_name = req.job_name or f"ETL-{job_id}"
+    job_status = ETLJobStatus(
+        job_id=job_id,
+        job_name=job_name,
+        status="running",
+        progress=0,
+        stage="pending",
+        created_at=datetime.now().isoformat(),
+    )
+    # 先把 job 注册到内存状态表，再启动后台任务。
+    # 否则 create_task 若先一步执行并更新了进度，
+    # 这里再覆盖写回一个新的 0% 对象，会导致查询卡在 0%。
+    _ETL_JOBS[job_id] = job_status
+    _prune_etl_jobs()
 
     if req.source_type == "url":
         source_url = req.source_config.get("url", "")
@@ -207,7 +308,10 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
         # 异步执行入库，错误由 extract_and_ingest 内部捕获并更新 job 状态
         try:
             asyncio.create_task(
-                extract_and_ingest(content, filename, req.kb_id, 0, 0, job_id, job_name)
+                extract_and_ingest(
+                    content, filename, req.kb_id, *_make_synthetic_doc_ids(job_id), job_id, job_name,
+                    chunk_size=req.chunk_size, chunk_overlap=req.chunk_overlap,
+                )
             )
         except Exception as e:
             logger.error(f"Failed to start ETL task {job_id}: {e}")
@@ -244,14 +348,17 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
             # 将每行数据拼接为文本
             raw_text = _rows_to_text(rows_data, chunk_field)
             content = raw_text.encode("utf-8")
-            filename = f"db_{table_name or 'query'}"
+            filename = f"db_{table_name or 'query'}.txt"
         except Exception as e:
             logger.error(f"Failed to fetch data from database for ETL: {e}")
             raise RuntimeError(f"Failed to fetch database: {e}")
 
         try:
             asyncio.create_task(
-                extract_and_ingest(content, filename, req.kb_id, 0, 0, job_id, job_name)
+                extract_and_ingest(
+                    content, filename, req.kb_id, *_make_synthetic_doc_ids(job_id), job_id, job_name,
+                    chunk_size=req.chunk_size, chunk_overlap=req.chunk_overlap,
+                )
             )
         except Exception as e:
             logger.error(f"Failed to start ETL task {job_id}: {e}")
@@ -266,16 +373,6 @@ async def submit_etl_job(req) -> Tuple[str, ETLJobStatus]:
         # file/csv/excel 由 run_etl_file_endpoint 处理
         raise ValueError(f"source_type={req.source_type} should use /etl/run-file endpoint")
 
-    job_status = ETLJobStatus(
-        job_id=job_id,
-        job_name=job_name,
-        status="running",
-        progress=0,
-        stage="pending",
-        created_at=datetime.now().isoformat(),
-    )
-    _ETL_JOBS[job_id] = job_status
-    _prune_etl_jobs()
     return job_id, job_status
 
 
@@ -287,6 +384,8 @@ async def extract_and_ingest(
         doc_version_id: int,
         job_id: str,
         job_name: Optional[str] = None,
+        chunk_size: int = 800,
+        chunk_overlap: int = 120,
         access_level: str = "internal",
         department_id: Optional[int] = None,
 ):
@@ -307,8 +406,7 @@ async def extract_and_ingest(
     job = _ETL_JOBS[job_id]
     try:
         # ===== 第1步：抽取（带元数据）=====
-        job.stage = "extracting"
-        job.progress = 10
+        await _set_job_state(job_id, status="running", stage="extracting", progress=10)
         parsed = extract_text_with_metadata(content, filename)
         raw_text = parsed["text"]
         file_meta = parsed.get("file_meta", {})
@@ -317,24 +415,21 @@ async def extract_and_ingest(
             raise ValueError("解析出的文本为空")
 
         # ===== 第2步：清洗 =====
-        job.stage = "cleaning"
-        job.progress = 25
+        await _set_job_state(job_id, status="running", stage="cleaning", progress=25)
         cleaned_text = _clean_text(raw_text)
 
         # ===== 第3步：切分（区分表格/非表格）=====
-        job.stage = "splitting"
-        job.progress = 40
+        await _set_job_state(job_id, status="running", stage="splitting", progress=40)
         ext = filename.split(".")[-1].lower()
         if ext in ["csv", "xlsx", "xls"] and blocks:
             chunks = _split_table_blocks(blocks, doc_id, doc_version_id or 0)
         else:
-            chunks = split_text(cleaned_text, 800, 120, doc_id, doc_version_id or 0)
+            chunks = split_text(cleaned_text, chunk_size, chunk_overlap, doc_id, doc_version_id or 0)
         if not chunks:
             raise ValueError("切分后的 chunk 为空")
 
         # ===== 第4步：NER 实体抽取 =====
-        job.stage = "ner_extraction"
-        job.progress = 50
+        await _set_job_state(job_id, status="running", stage="ner_extraction", progress=50)
         texts = []
         for c in chunks:
             chunk_text = c["text"]
@@ -347,13 +442,11 @@ async def extract_and_ingest(
             texts.append(chunk_text)
 
         # ===== 第5步：Dense 向量 =====
-        job.stage = "embedding"
-        job.progress = 68
+        await _set_job_state(job_id, status="running", stage="embedding", progress=68)
         vectors = generate_embeddings(texts)
 
         # ===== 第6步：构建完整 Payload =====
-        job.stage = "indexing"
-        job.progress = 85
+        await _set_job_state(job_id, status="running", stage="indexing", progress=85)
         payloads = []
         for c in chunks:
             payload = {
@@ -390,17 +483,13 @@ async def extract_and_ingest(
         # ===== 第7步：写入 Qdrant（纯 Dense 向量）=====
         await upsert_vectors_async(vectors, payloads)
 
-        job.status = "succeeded"
-        job.progress = 100
-        job.stage = "completed"
+        await _set_job_state(job_id, status="succeeded", progress=100, stage="completed")
         logger.info(f"ETL job {job_id} succeeded, {len(vectors)} chunks indexed.")
         return job
 
     except Exception as e:
         logger.error(f"ETL job {job_id} failed: {e}", exc_info=True)
-        job.status = "failed"
-        job.error_message = str(e)
-        job.stage = "failed"
+        await _set_job_state(job_id, status="failed", stage="failed", error_message=str(e))
         return job
 
 

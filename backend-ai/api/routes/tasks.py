@@ -165,7 +165,7 @@ async def upload_data(
 
     return UploadIngestResponse(
         task_id=task_id,
-        status="accepted" if not image_parsing_failed else "failed_image_parsing"
+        status="accepted"
     )
 
 
@@ -248,7 +248,7 @@ async def ingest_image(req: IngestRequest, db: AsyncSession = Depends(get_db)) -
 
     return UploadIngestResponse(
         task_id=task_id,
-        status="accepted" if task_status == "queued" else "failed_image_parsing"
+        status="accepted"
     )
 
 

@@ -41,6 +41,9 @@ async def run_agent_endpoint(req: AgentRunRequest, background_tasks: BackgroundT
 
     返回 run_id 用于后续查询执行结果。
     """
+    if not req.kb_ids:
+        raise HTTPException(status_code=422, detail="kb_ids must not be empty")
+
     try:
         run_id = str(uuid.uuid4())
         init_agent_trace(run_id)

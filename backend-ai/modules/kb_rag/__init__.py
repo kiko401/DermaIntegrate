@@ -22,10 +22,10 @@ def register_kb_rag_module(app: FastAPI):
         from .api.compat_routes import router as compat_router
         from .api.tool_routes import router as tool_router
         from .api.agent_routes import router as agent_router
+        from .api.debug_routes import router as debug_router
         from .api.etl_routes import router as etl_router
         from .api.init_routes import router as init_router
         from .api.admin_routes import router as admin_router
-        from .api.debug_routes import router as debug_router
 
         # 统一前缀 /rag
         app.include_router(ingest_router, prefix="/rag", tags=["KB_RAG Ingest"])
@@ -33,10 +33,10 @@ def register_kb_rag_module(app: FastAPI):
         app.include_router(compat_router, prefix="/rag", tags=["KB_RAG Compat"])
         app.include_router(tool_router, prefix="/rag", tags=["KB_RAG Tools"])
         app.include_router(agent_router, prefix="/rag", tags=["KB_RAG Agent"])
+        app.include_router(debug_router, prefix="/rag", tags=["KB_RAG Debug"])
         app.include_router(etl_router, prefix="/rag", tags=["KB_RAG ETL"])
         app.include_router(init_router, prefix="/rag", tags=["KB_RAG Init"])
         app.include_router(admin_router, prefix="/rag", tags=["KB_RAG Admin"])
-        app.include_router(debug_router, prefix="/rag", tags=["KB_RAG Debug"])
 
         logger.info("KB_RAG routes registered successfully.")
 

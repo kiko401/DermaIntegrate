@@ -41,6 +41,8 @@ _CACHE_LOCK = threading.RLock()
 
 # 缓存 TTL（从 shared/config 统一读取）
 _CACHE_TTL: float = SENSITIVE_WORD_CACHE_TTL
+# Do not keep empty cache for too long; retry soon after DB recovery.
+_EMPTY_CACHE_RETRY_TTL: float = min(10.0, max(1.0, _CACHE_TTL / 10.0))
 
 
 def _build_automaton(words: List[str]):
@@ -106,25 +108,28 @@ def _load_from_file() -> List[str]:
 
 
 def _get_cache() -> _SensitiveWordCache:
-    """获取敏感词缓存（TTL 5分钟，使用双重检查锁定）"""
+    """Get sensitive-word cache with double-checked locking and retry empty cache quickly."""
     global _CACHE, _CACHE_AT
     now = time.monotonic()
 
-    # 首次检查：缓存有效且未过期（读操作不加锁）
-    if _CACHE is not None and (now - _CACHE_AT) <= _CACHE_TTL:
-        return _CACHE
-
-    # 获取锁后进行二次检查和更新
-    with _CACHE_LOCK:
-        # 二次检查：其他线程可能已经刷新了缓存
-        if _CACHE is not None and (now - _CACHE_AT) <= _CACHE_TTL:
+    # First check: cache still valid.
+    if _CACHE is not None:
+        ttl = _EMPTY_CACHE_RETRY_TTL if not _CACHE.words else _CACHE_TTL
+        if (now - _CACHE_AT) <= ttl:
             return _CACHE
 
-        # 缓存 miss 或过期，重新加载
+    # Second check under lock.
+    with _CACHE_LOCK:
+        # Second check under lock.
+        if _CACHE is not None:
+            ttl = _EMPTY_CACHE_RETRY_TTL if not _CACHE.words else _CACHE_TTL
+            if (now - _CACHE_AT) <= ttl:
+                return _CACHE
+
+        # Cache miss or expired, reload.
         _CACHE = _reload_sensitive_words()
         _CACHE_AT = time.monotonic()
         return _CACHE
-
 
 def invalidate_sensitive_word_cache():
     """写操作后主动失效缓存，下一次 check 触发回源"""

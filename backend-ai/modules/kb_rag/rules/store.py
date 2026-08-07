@@ -405,10 +405,20 @@ async def add_sensitive_hit_log(hit_words: list, user_question: str,
     import json as _json
     factory = _get_session_factory()
     async with factory() as session:
-        result = await session.execute(
-            text("INSERT INTO rag_sensitive_hit_logs (hit_words, user_question, action, conversation_id) VALUES (:hw, :uq, :act, :cid)"),
-            {"hw": _json.dumps(hit_words, ensure_ascii=False), "uq": user_question[:500], "act": action, "cid": conversation_id}
-        )
+        params = {"hw": _json.dumps(hit_words, ensure_ascii=False), "uq": user_question[:500], "act": action, "cid": conversation_id}
+        try:
+            result = await session.execute(
+                text("INSERT INTO rag_sensitive_hit_logs (hit_words_json, user_question, action, conversation_id) VALUES (:hw, :uq, :act, :cid)"),
+                params,
+            )
+        except Exception as exc:
+            await session.rollback()
+            if "Unknown column 'hit_words_json'" not in str(exc):
+                raise
+            result = await session.execute(
+                text("INSERT INTO rag_sensitive_hit_logs (hit_words, user_question, action, conversation_id) VALUES (:hw, :uq, :act, :cid)"),
+                params,
+            )
         await session.commit()
         return result.lastrowid
 
@@ -428,8 +438,9 @@ async def get_sensitive_hit_logs(limit: int = 100, offset: int = 0) -> Tuple[Lis
         result = []
         for row in rows:
             d = dict(row._mapping)
+            raw_hit_words = d.pop("hit_words_json", d.pop("hit_words", []))
             try:
-                d["hit_words"] = _json.loads(d["hit_words"]) if isinstance(d["hit_words"], str) else d["hit_words"]
+                d["hit_words"] = _json.loads(raw_hit_words) if isinstance(raw_hit_words, str) else (raw_hit_words or [])
             except Exception:
                 d["hit_words"] = []
             result.append(d)
