@@ -12,6 +12,7 @@ function toLogObject(row) {
     id: row.id,
     log_type: row.log_type,
     doctor_id: row.doctor_id,
+    api_key_id: row.api_key_id,
     conversation_id: row.conversation_id,
     message_id: row.message_id,
     kb_ids: safeJson(row.kb_ids_json, []),
@@ -117,22 +118,30 @@ function exportAsCsv(headers, data) {
     headers.join(','),
     ...data.map(row => headers.map(h => escapeCell(row[h])).join(',')),
   ];
-  return { buffer: Buffer.from('﻿' + lines.join('\r\n'), 'utf8'), format: 'csv' };
+  return { buffer: Buffer.from('\uFEFF' + lines.join('\r\n'), 'utf8'), format: 'csv' };
 }
 
 async function exportLogs(body = {}) {
-  const { start_date, end_date, kb_id, format = 'csv' } = body;
-  const { whereStr, params } = buildWhere({ start_date, end_date, kb_id });
+  const {
+    start_date,
+    end_date,
+    kb_id,
+    log_type,
+    doctor_id,
+    keyword,
+    format = 'csv',
+  } = body;
+  const { whereStr, params } = buildWhere({ start_date, end_date, kb_id, log_type, doctor_id, keyword });
 
   const [rows] = await db.query(
-    `SELECT id, log_type, doctor_id, conversation_id, message_id,
+    `SELECT id, log_type, doctor_id, api_key_id, conversation_id, message_id,
             kb_ids_json, trace_id, request_summary, response_summary,
             latency_ms, status, created_at
      FROM rag_logs WHERE ${whereStr} ORDER BY created_at DESC LIMIT 10000`,
     params
   );
 
-  const headers = ['id', 'log_type', 'doctor_id', 'conversation_id', 'message_id',
+  const headers = ['id', 'log_type', 'doctor_id', 'api_key_id', 'conversation_id', 'message_id',
                    'kb_ids', 'trace_id', 'request_summary', 'response_summary',
                    'latency_ms', 'status', 'created_at'];
 
@@ -140,6 +149,7 @@ async function exportLogs(body = {}) {
     id: r.id,
     log_type: r.log_type,
     doctor_id: r.doctor_id ?? '',
+    api_key_id: r.api_key_id ?? '',
     conversation_id: r.conversation_id ?? '',
     message_id: r.message_id ?? '',
     kb_ids: r.kb_ids_json || '',
@@ -165,7 +175,7 @@ async function exportLogs(body = {}) {
   return exportAsCsv(headers, data);
 }
 
-// Low-level fire-and-forget audit writer — does not throw
+// Low-level fire-and-forget audit writer; never throws to callers.
 async function writeLog({
   log_type = 'api',
   doctor_id = null,
@@ -203,7 +213,7 @@ async function writeLog({
       ]
     );
   } catch {
-    // audit failure must never break the main flow
+    // Audit failures must never break the main flow.
   }
 }
 

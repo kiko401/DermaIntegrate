@@ -182,7 +182,8 @@ function shouldShowProgressMessage(docId) {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchDocs(), fetchKbs()])
+  await fetchKbs()
+  await fetchDocs()
   await restoreActiveTaskSubscriptions()
 })
 
@@ -194,9 +195,17 @@ onUnmounted(() => {
 async function fetchDocs() {
   loading.value = true
   deleteErr.value = ''
+  if (!filterKb.value && kbs.value.length) {
+    filterKb.value = String(kbs.value[0].id)
+  }
+  if (!filterKb.value) {
+    docs.value = []
+    total.value = 0
+    loading.value = false
+    return
+  }
   const params = new URLSearchParams()
-  if (filterKb.value) params.set('kb_id', filterKb.value)
-  else params.set('all_kbs', 'true')
+  params.set('kb_id', filterKb.value)
   if (filterStatus.value) params.set('status', filterStatus.value)
   if (filterSearch.value) params.set('search', filterSearch.value)
   if (filterExt.value) params.set('file_ext', filterExt.value)
@@ -214,6 +223,7 @@ async function fetchKbs() {
   const data = await res.json()
   kbs.value = Array.isArray(data) ? data : (data.data || [])
   if (!uploadKbId.value && kbs.value.length) uploadKbId.value = String(kbs.value[0].id)
+  if (!filterKb.value && kbs.value.length) filterKb.value = String(kbs.value[0].id)
 }
 
 async function restoreActiveTaskSubscriptions() {

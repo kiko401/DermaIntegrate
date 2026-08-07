@@ -7,6 +7,14 @@ const db = require('../db');
 
 const AI_BASE = () => process.env.RAG_AI_BASE_URL || 'http://localhost:8000';
 
+function setNoCacheHeaders(res) {
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+    Pragma: 'no-cache',
+    Expires: '0',
+  });
+}
+
 function fwd(method, aiPathOrFn) {
   return async (req, res) => {
     const aiPath = typeof aiPathOrFn === 'function' ? aiPathOrFn(req.params) : aiPathOrFn;
@@ -19,10 +27,15 @@ function fwd(method, aiPathOrFn) {
       else if (method === 'DELETE') resp = await axios.delete(url, opts);
       else if (method === 'PUT')    resp = await axios.put(url, req.body, opts);
       else                          resp = await axios.post(url, req.body, opts);
+      setNoCacheHeaders(res);
       res.status(resp.status).json(resp.data);
     } catch (e) {
-      if (e.response) return res.status(e.response.status).json(e.response.data);
-      res.status(502).json({ error: 'AI_DOMAIN_UNREACHABLE', message: `AI 域不可达: ${e.message}` });
+      if (e.response) {
+        setNoCacheHeaders(res);
+        return res.status(e.response.status).json(e.response.data);
+      }
+      setNoCacheHeaders(res);
+      res.status(502).json({ error: 'AI_DOMAIN_UNREACHABLE', message: `AI domain unreachable: ${e.message}` });
     }
   };
 }
@@ -69,13 +82,16 @@ router.post('/admin/logs/archive', requireAdmin, (req, res) => {
 
   child.on('close', code => {
     if (code === 0) {
+      setNoCacheHeaders(res);
       res.json({ status: 'ok', output: stdout.trim() });
     } else {
+      setNoCacheHeaders(res);
       res.status(500).json({ status: 'error', code, output: stdout.trim(), error: stderr.trim() });
     }
   });
 
   child.on('error', err => {
+    setNoCacheHeaders(res);
     res.status(500).json({ status: 'error', error: err.message });
   });
 });
@@ -96,6 +112,7 @@ router.get('/admin/phi-audit-logs', requireAdmin, async (req, res) => {
     if (req.query.conversation_id) { where.push('conversation_id = ?'); params.push(parseInt(req.query.conversation_id, 10)); }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
+    setNoCacheHeaders(res);
     const [[{ total }]] = await db.query(
       `SELECT COUNT(*) AS total FROM rag_phi_audit_logs ${whereSql}`,
       params
@@ -110,6 +127,7 @@ router.get('/admin/phi-audit-logs', requireAdmin, async (req, res) => {
       [...params, limit, offset]
     );
 
+    setNoCacheHeaders(res);
     res.json({
       logs: rows.map(row => ({
         id: row.id,
@@ -127,6 +145,7 @@ router.get('/admin/phi-audit-logs', requireAdmin, async (req, res) => {
       offset,
     });
   } catch (e) {
+    setNoCacheHeaders(res);
     res.status(500).json({ error: 'PHI_AUDIT_QUERY_FAILED', message: e.message });
   }
 });

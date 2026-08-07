@@ -49,21 +49,26 @@ router.post('/his_push', async (req, res) => {
       hisPatientId = ins.insertId;
     }
 
-    // 插入 his_record
+    // 插入 his_record（幂等：重复推送跳过，返回已有记录 id）
     const [rec] = await hisPool.execute(
-      `INSERT INTO his_records
+      `INSERT IGNORE INTO his_records
          (his_patient_id, visit_type, visit_date, department, diagnosis_code, diagnosis_name, chief_complaint)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [hisPatientId, n.visit_type, n.visit_date, n.department,
        n.diagnosis_code, n.diagnosis_name, n.chief_complaint]
     );
-
-    // HIS 不触发分析，但如果已匹配到内部患者，安排防抖（可选，根据业务可去掉）
-    // TODO.md 明确写"HIS 推送不触发分析"，此处不调用 debounce.schedule
+    let hisRecordId = rec.insertId;
+    if (!hisRecordId) {
+      const [existing] = await hisPool.execute(
+        'SELECT id FROM his_records WHERE his_patient_id=? AND visit_date=? AND diagnosis_code=?',
+        [hisPatientId, n.visit_date, n.diagnosis_code]
+      );
+      hisRecordId = existing[0]?.id ?? null;
+    }
 
     res.status(201).json({
       message: 'HIS record ingested',
-      his_record_id: rec.insertId,
+      his_record_id: hisRecordId,
       empi: match ? { patient_id: match.patient.patient_id ?? match.patient.id, matched_by: match.matched_by } : null,
     });
   } catch (e) {
@@ -120,12 +125,12 @@ router.post('/lis_push', async (req, res) => {
       resultIds.push(ins.insertId);
     }
 
-    // 插入病理报告
+    // 插入病理报告（幂等：report_no 重复时跳过，返回已有记录 id）
     let pathologyId = null;
     if (n.is_pathology && n.pathology) {
       const p = n.pathology;
       const [ins] = await lisPool.execute(
-        `INSERT INTO lis_pathology_reports
+        `INSERT IGNORE INTO lis_pathology_reports
            (lis_patient_id, report_no, sample_type, diagnosis_text, histological_type,
             breslow_thickness_mm, ulceration, mitotic_rate, clark_level,
             lymphovascular_invasion, perineural_invasion, lymph_node_status,
@@ -138,7 +143,14 @@ router.post('/lis_push', async (req, res) => {
          p.sentinel_node_biopsy, p.braf_mutation, p.nras_mutation, p.kit_mutation,
          p.pd_l1_expression, p.reported_at]
       );
-      pathologyId = ins.insertId;
+      if (ins.insertId) {
+        pathologyId = ins.insertId;
+      } else {
+        const [existing] = await lisPool.execute(
+          'SELECT id FROM lis_pathology_reports WHERE report_no = ?', [p.report_no]
+        );
+        pathologyId = existing[0]?.id ?? null;
+      }
     }
 
     // is_pathology=true 时触发分析

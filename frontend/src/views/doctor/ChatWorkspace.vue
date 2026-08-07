@@ -9,6 +9,25 @@ function renderMd(text) {
   return marked.parse(text)
 }
 
+function displayRoute(route) {
+  const map = {
+    knowledge_query: '知识库问答',
+    patient_context_query: '患者上下文问答',
+    tool_call: '工具调用',
+    general_chat: '通用问答',
+    agent_workflow: 'Agent 工作流',
+    rule_answer: '规则回答',
+  }
+  return map[route] || route || '未标注'
+}
+
+function displayChunkText(chunk) {
+  const text = typeof chunk === 'string'
+    ? chunk
+    : (chunk?.text || chunk?.snippet || '')
+  return text.length > 240 ? `${text.slice(0, 240)}…` : text
+}
+
 async function apiFetch(path, opts = {}) {
   const res = await fetch(path, { credentials: 'include', ...opts })
   const isJson = res.headers.get('content-type')?.includes('application/json')
@@ -268,6 +287,10 @@ async function sendMessage() {
     content_markdown: '',
     sources: [],
     risk_highlights: [],
+    tool_calls: [],
+    agent_trace: null,
+    route: null,
+    chunks: [],
     disclaimer: null,
     _streaming: true,
     created_at: new Date().toISOString(),
@@ -313,6 +336,9 @@ async function sendMessage() {
           msg.content_markdown = payload.answer || msg.content_markdown
           msg.sources = payload.sources || []
           msg.risk_highlights = payload.risk_highlights || []
+          msg.tool_calls = payload.tool_calls || msg.tool_calls || []
+          msg.agent_trace = payload.agent_trace || msg.agent_trace || null
+          msg.route = payload.route || msg.route || null
           if (payload.disclaimer) msg.disclaimer = payload.disclaimer
           msg.confidence = payload.confidence
           msg._streaming = false
@@ -328,8 +354,19 @@ async function sendMessage() {
           if (!msg.content_markdown) msg._status = payload.message || msg._status
         } else if (eventType === 'chunks') {
           // 检索完成事件：检索结果可提前展示，不等 result 事件
+          msg.chunks = Array.isArray(payload.chunks) ? payload.chunks : (msg.chunks || [])
           if (Array.isArray(payload.chunks) && payload.chunks.length) {
             msg._status = `已检索到 ${payload.chunks.length} 条参考，正在生成回答...`
+          }
+        } else if (eventType === 'tool_call') {
+          upsertToolCall(msg, payload)
+          if (!msg.content_markdown) {
+            msg._status = `工具 ${payload.tool_name || '未知工具'}：${displayToolStatus(payload.status)}`
+          }
+        } else if (eventType === 'agent_trace') {
+          upsertAgentTrace(msg, payload)
+          if (!msg.content_markdown) {
+            msg._status = `Agent 节点 ${payload.node || '未知节点'}：${displayTraceStatus(payload.status)}`
           }
         } else if (eventType === 'error') {
           msg.content_markdown = `请求失败：${payload.message || payload.code}`
@@ -567,6 +604,60 @@ function formatKbScope(kb) {
 function displayRisk(item) {
   if (typeof item === 'string') return item
   return item?.label || item?.text || item?.message || JSON.stringify(item)
+}
+
+function displayToolStatus(status) {
+  const map = {
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败',
+  }
+  return map[status] || status || '未知'
+}
+
+function displayTraceStatus(status) {
+  const map = {
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败',
+    skipped: '已跳过',
+  }
+  return map[status] || status || '未知'
+}
+
+function upsertToolCall(msg, payload = {}) {
+  if (!msg.tool_calls) msg.tool_calls = []
+  const key = `${payload.tool_name || ''}::${payload.status || ''}`
+  const idx = msg.tool_calls.findIndex(item => `${item.tool_name || ''}::${item.status || ''}` === key)
+  if (idx >= 0) {
+    msg.tool_calls[idx] = { ...msg.tool_calls[idx], ...payload }
+    return
+  }
+  msg.tool_calls.push({
+    tool_name: payload.tool_name || '未知工具',
+    status: payload.status || 'running',
+    output_summary: payload.output_summary || '',
+  })
+}
+
+function upsertAgentTrace(msg, payload = {}) {
+  if (!msg.agent_trace || typeof msg.agent_trace !== 'object') {
+    msg.agent_trace = {
+      workflow: payload.workflow || 'langgraph_rag_agent',
+      nodes: [],
+    }
+  }
+  if (payload.workflow) msg.agent_trace.workflow = payload.workflow
+  if (!Array.isArray(msg.agent_trace.nodes)) msg.agent_trace.nodes = []
+  if (!payload.node) return
+
+  const idx = msg.agent_trace.nodes.findIndex(item => item.name === payload.node)
+  const nextNode = {
+    name: payload.node,
+    status: payload.status || 'running',
+  }
+  if (idx >= 0) msg.agent_trace.nodes[idx] = { ...msg.agent_trace.nodes[idx], ...nextNode }
+  else msg.agent_trace.nodes.push(nextNode)
 }
 
 async function fetchDocs(page = docsPage.value) {
@@ -863,6 +954,58 @@ function formatDate(value) {
                   <span v-for="(risk, ri) in msg.risk_highlights" :key="ri" class="risk-tag">⚠ {{ displayRisk(risk) }}</span>
                 </div>
               </div>
+
+              <details
+                v-if="msg.route || msg.chunks?.length || msg.tool_calls?.length || msg.agent_trace?.nodes?.length"
+                class="msg-section execution-details"
+              >
+                <summary class="msg-section-title">执行详情</summary>
+
+                <div v-if="msg.route" class="source-snippet">路由：{{ displayRoute(msg.route) }}</div>
+
+                <div v-if="msg.chunks?.length" class="execution-subsection">
+                  <div class="source-snippet">检索命中：{{ msg.chunks.length }} 条（展示前 3 条）</div>
+                  <div
+                    v-for="(chunk, ci) in msg.chunks.slice(0, 3)"
+                    :key="`chunk-${ci}`"
+                    class="source-item"
+                  >
+                    <div class="source-snippet">{{ displayChunkText(chunk) }}</div>
+                  </div>
+                </div>
+
+                <div v-if="msg.tool_calls?.length" class="execution-subsection">
+                  <div class="msg-section-title">工具调用</div>
+                  <button
+                    v-for="(tool, ti) in msg.tool_calls"
+                    :key="`${tool.tool_name || 'tool'}-${ti}`"
+                    type="button"
+                    class="source-item"
+                  >
+                    <div class="source-head">
+                      <span>{{ tool.tool_name || '未知工具' }}</span>
+                      <span class="source-score">{{ displayToolStatus(tool.status) }}</span>
+                    </div>
+                    <div v-if="tool.output_summary" class="source-snippet">{{ tool.output_summary }}</div>
+                  </button>
+                </div>
+
+                <div v-if="msg.agent_trace?.nodes?.length" class="execution-subsection">
+                  <div class="msg-section-title">Agent 轨迹</div>
+                  <button
+                    v-for="(node, ni) in msg.agent_trace.nodes"
+                    :key="`${node.name || 'node'}-${ni}`"
+                    type="button"
+                    class="source-item"
+                  >
+                    <div class="source-head">
+                      <span>{{ node.name || '未知节点' }}</span>
+                      <span class="source-score">{{ displayTraceStatus(node.status) }}</span>
+                    </div>
+                    <div v-if="msg.agent_trace.workflow" class="source-snippet">工作流：{{ msg.agent_trace.workflow }}</div>
+                  </button>
+                </div>
+              </details>
 
               <div v-if="msg.disclaimer" class="msg-disclaimer">{{ msg.disclaimer }}</div>
 

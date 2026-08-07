@@ -7,6 +7,22 @@ function safeJson(v, fallback = null) {
   try { return JSON.parse(v); } catch { return fallback; }
 }
 
+function parseDocVersionId(source = {}) {
+  if (source.doc_version_id != null) {
+    const direct = Number.parseInt(source.doc_version_id, 10);
+    if (Number.isInteger(direct) && direct > 0) return direct;
+  }
+
+  const chunkId = String(source.chunk_id || '');
+  const parts = chunkId.split('_');
+  if (parts.length >= 3) {
+    const candidate = Number.parseInt(parts[parts.length - 2], 10);
+    if (Number.isInteger(candidate) && candidate > 0) return candidate;
+  }
+
+  return null;
+}
+
 async function saveUserMessage(conversationId, question) {
   const messageCode = `msg_${nanoid(12)}`;
   const [result] = await db.query(
@@ -73,7 +89,8 @@ async function saveAssistantMessage(conversationId, chatResponse) {
 async function saveSources(messageId, sources) {
   if (!Array.isArray(sources) || !sources.length) return;
   for (const src of sources) {
-    const { doc_id, doc_version_id, chunk_id, score, snippet, source_location } = src;
+    const { doc_id, chunk_id, score, snippet, source_location } = src;
+    const doc_version_id = parseDocVersionId(src);
     if (!doc_id || !doc_version_id || !chunk_id) continue;
     try {
       await db.query(

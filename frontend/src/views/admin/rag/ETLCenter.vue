@@ -366,8 +366,9 @@ async function loadKbs() {
   } catch {}
 }
 
-async function loadJobs() {
-  loading.value = true
+async function loadJobs(options = {}) {
+  const { silent = false } = options
+  if (!silent) loading.value = true
   try {
     const params = new URLSearchParams({
       page: page.value,
@@ -383,7 +384,7 @@ async function loadJobs() {
   } catch (err) {
     console.error('loadJobs error', err)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 
   // 有活跃任务时启动3秒轮询，否则停止
@@ -392,7 +393,7 @@ async function loadJobs() {
     _pollTimer = setInterval(() => {
       const stillActive = jobs.value.some(j => j.status === 'pending' || j.status === 'running')
       if (stillActive) {
-        loadJobs()
+        syncActiveJobs()
       } else {
         clearInterval(_pollTimer)
         _pollTimer = null
@@ -418,6 +419,36 @@ async function syncJob(job) {
     job.job_id = data.job_id
   } catch {}
   job.syncing = false
+}
+
+async function syncActiveJobs() {
+  const activeJobs = jobs.value.filter(j => j.status === 'pending' || j.status === 'running')
+  if (!activeJobs.length) {
+    if (_pollTimer) {
+      clearInterval(_pollTimer)
+      _pollTimer = null
+    }
+    return
+  }
+
+  await Promise.all(activeJobs.map(async (job) => {
+    job.syncing = true
+    try {
+      const res = await fetch(`${API}/etl/jobs/${job.job_id || job.job_code}/sync`, { method: 'POST' })
+      const data = await res.json()
+      if (res.ok && data) {
+        Object.assign(job, data)
+        job.job_id = data.job_id
+      }
+    } catch (err) {
+      console.error('syncActiveJobs error', err)
+    } finally {
+      job.syncing = false
+    }
+  }))
+
+  // 后台静默刷新一次列表，避免分页总数/排序/状态漂移
+  await loadJobs({ silent: true })
 }
 
 function showError(job) {

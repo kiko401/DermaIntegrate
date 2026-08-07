@@ -170,6 +170,85 @@ async function runTool() {
   }
 }
 
+// ── 分块预览 ─────────────────────────────────────────────────
+const sp_text         = ref('')
+const sp_kbId         = ref(1)
+const sp_chunkSize    = ref(800)
+const sp_chunkOverlap = ref(120)
+const sp_docId        = ref(0)
+const sp_docVersionId = ref(0)
+const sp_loading      = ref(false)
+const sp_result       = ref(null)
+const sp_error        = ref('')
+
+async function runSplitPreview() {
+  if (!sp_text.value.trim()) { sp_error.value = '请输入待切分文本'; return }
+  sp_loading.value = true
+  sp_result.value  = null
+  sp_error.value   = ''
+  try {
+    const { ok, data } = await apiFetch('/api/rag/debug/split-preview', {
+      text: sp_text.value,
+      kb_id: Number(sp_kbId.value) || 1,
+      chunk_size: Number(sp_chunkSize.value) || 800,
+      chunk_overlap: Number(sp_chunkOverlap.value) || 120,
+      doc_id: Number(sp_docId.value) || 0,
+      doc_version_id: Number(sp_docVersionId.value) || 0,
+    })
+    if (!ok) {
+      sp_error.value = data?.detail || data?.error || '请求失败'
+    } else {
+      sp_result.value = data
+    }
+  } catch (e) {
+    sp_error.value = e.message
+  } finally {
+    sp_loading.value = false
+  }
+}
+
+// ── 关键词搜索（BM25）────────────────────────────────────────
+const ks_query   = ref('')
+const ks_kbIds   = ref('')
+const ks_topK    = ref(20)
+const ks_docId   = ref('')
+const ks_loading = ref(false)
+const ks_result  = ref(null)
+const ks_error   = ref('')
+
+async function runKeywordSearch() {
+  if (!ks_query.value.trim()) { ks_error.value = '请输入搜索关键词'; return }
+  const kb_ids = ks_kbIds.value
+    .split(',')
+    .map(s => parseInt(s.trim(), 10))
+    .filter(n => !isNaN(n) && n > 0)
+  if (!kb_ids.length) { ks_error.value = '请输入至少一个 KB ID'; return }
+
+  ks_loading.value = true
+  ks_result.value  = null
+  ks_error.value   = ''
+  try {
+    const body = {
+      query: ks_query.value.trim(),
+      kb_ids,
+      top_k: Number(ks_topK.value) || 20,
+    }
+    const docIdVal = parseInt(ks_docId.value, 10)
+    if (!isNaN(docIdVal) && docIdVal > 0) body.doc_id = docIdVal
+
+    const { ok, data } = await apiFetch('/api/rag/debug/keyword-search', body)
+    if (!ok) {
+      ks_error.value = data?.detail || data?.error || '请求失败'
+    } else {
+      ks_result.value = data
+    }
+  } catch (e) {
+    ks_error.value = e.message
+  } finally {
+    ks_loading.value = false
+  }
+}
+
 // ── Agent 调试 ────────────────────────────────────────────────
 const a_convId      = ref('')
 const a_question    = ref('')
@@ -595,6 +674,145 @@ function nodeStatusLabel(status) {
         </div>
       </div>
 
+      <!-- ══════════════════════════════════════════ 分块预览 ══ -->
+      <div class="panel panel-wide">
+        <div class="panel-title">分块预览</div>
+
+        <div class="form-grid">
+          <div class="form-item">
+            <label class="form-label">KB ID</label>
+            <input v-model.number="sp_kbId" type="number" min="1" class="field-input" placeholder="1" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">Chunk Size</label>
+            <input v-model.number="sp_chunkSize" type="number" min="100" max="4000" class="field-input" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">Chunk Overlap</label>
+            <input v-model.number="sp_chunkOverlap" type="number" min="0" max="2000" class="field-input" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">Doc ID <span class="hint">预览用，可填 0</span></label>
+            <input v-model.number="sp_docId" type="number" min="0" class="field-input" />
+          </div>
+          <div class="form-item form-item-full">
+            <label class="form-label">待切分文本</label>
+            <textarea
+              v-model="sp_text"
+              class="field-input field-textarea"
+              rows="5"
+              placeholder="粘贴要预览切分效果的文本内容"
+            />
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" :disabled="sp_loading" @click="runSplitPreview">
+            {{ sp_loading ? '切分中...' : '预览切分' }}
+          </button>
+        </div>
+
+        <div v-if="sp_error" class="msg-error">{{ sp_error }}</div>
+
+        <div v-if="sp_result" class="result-block">
+          <div class="result-meta">
+            <div class="meta-row">
+              <span class="meta-key">总字符数</span>
+              <span class="meta-val">{{ sp_result.total_chars }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-key">切分块数</span>
+              <span class="meta-val">{{ sp_result.chunk_count }}</span>
+            </div>
+          </div>
+          <div class="chunk-header">Chunk 列表</div>
+          <div
+            v-for="chunk in sp_result.chunks"
+            :key="chunk.chunk_id"
+            class="chunk-card"
+          >
+            <div class="chunk-meta">
+              <span class="chunk-idx">#{{ chunk.chunk_index + 1 }}</span>
+              <span class="chunk-id" :title="chunk.chunk_id">{{ chunk.chunk_id }}</span>
+              <span class="chunk-doc">{{ chunk.char_count }} 字符</span>
+            </div>
+            <div class="chunk-text">{{ chunk.text_preview }}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════════════════════════════ 关键词搜索 ══ -->
+      <div class="panel panel-wide">
+        <div class="panel-title">关键词搜索（BM25）</div>
+
+        <div class="form-grid">
+          <div class="form-item form-item-full">
+            <label class="form-label">关键词 <span class="hint">空格分隔多词</span></label>
+            <input
+              v-model="ks_query"
+              class="field-input"
+              placeholder="如：银屑病 治疗方案"
+              @keydown.enter="runKeywordSearch"
+            />
+          </div>
+          <div class="form-item">
+            <label class="form-label">KB IDs <span class="hint">逗号分隔</span></label>
+            <input v-model="ks_kbIds" class="field-input" placeholder="1,2" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">Top-K</label>
+            <input v-model.number="ks_topK" type="number" min="1" max="200" class="field-input" />
+          </div>
+          <div class="form-item">
+            <label class="form-label">Doc ID <span class="hint">限定文档，可选</span></label>
+            <input v-model="ks_docId" class="field-input" placeholder="留空=不限定" />
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-primary" :disabled="ks_loading" @click="runKeywordSearch">
+            {{ ks_loading ? '搜索中...' : '关键词搜索' }}
+          </button>
+        </div>
+
+        <div v-if="ks_error" class="msg-error">{{ ks_error }}</div>
+
+        <div v-if="ks_result" class="result-block">
+          <div class="result-meta">
+            <div class="meta-row">
+              <span class="meta-key">查询词</span>
+              <span class="meta-val">{{ ks_result.query }}</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-key">命中总数</span>
+              <span class="meta-val">{{ ks_result.total_hits }}</span>
+            </div>
+          </div>
+          <div class="chunk-header">Top {{ ks_result.results?.length ?? 0 }} 结果</div>
+          <div v-if="!ks_result.results?.length" class="empty-msg">无命中结果</div>
+          <div
+            v-for="(r, i) in ks_result.results"
+            :key="r.chunk_id || i"
+            class="chunk-card"
+          >
+            <div class="chunk-meta">
+              <span class="chunk-idx">#{{ i + 1 }}</span>
+              <span class="chunk-id" :title="r.chunk_id">{{ r.chunk_id }}</span>
+              <span class="chunk-doc">doc_id: {{ r.doc_id }}</span>
+              <span class="chunk-score" style="color:#92400e;">BM25: {{ r.bm25_score }}</span>
+            </div>
+            <div class="chunk-meta" style="margin-bottom:6px;">
+              <span
+                v-for="kw in r.keyword_matches"
+                :key="kw"
+                class="kw-badge"
+              >{{ kw }}</span>
+            </div>
+            <div class="chunk-text">{{ r.text_snippet }}</div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 </template>
@@ -790,6 +1008,7 @@ function nodeStatusLabel(status) {
 /* 通用 badges */
 .badge-yes { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #dcfce7; color: #16a34a; font-size: 12px; font-weight: 700; }
 .badge-no  { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 12px; font-weight: 700; }
+.kw-badge  { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #fef3c7; color: #92400e; font-size: 11px; font-weight: 600; margin-right: 6px; }
 @media (max-width: 1100px) {
   .panels { grid-template-columns: 1fr; }
   .panel-half, .panel-wide { grid-column: 1 / -1; }

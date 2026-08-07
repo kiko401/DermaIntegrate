@@ -98,9 +98,12 @@ async function exportLogs() {
   try {
     const body = {
       format: exportFormat.value,
+      ...(filter.value.log_type && { log_type: filter.value.log_type }),
+      ...(filter.value.doctor_id && { doctor_id: Number(filter.value.doctor_id) }),
       ...(filter.value.start_date && { start_date: filter.value.start_date }),
       ...(filter.value.end_date && { end_date: filter.value.end_date }),
       ...(filter.value.kb_id && { kb_id: Number(filter.value.kb_id) }),
+      ...(filter.value.keyword && { keyword: filter.value.keyword }),
     }
     const res = await fetch('/api/rag/logs/export', {
       method: 'POST',

@@ -9,6 +9,10 @@ const appPool = mysql.createPool({
   password: process.env.DB_PASSWORD || '',
   waitForConnections: true,
   connectionLimit: 10,
+  charset: 'utf8mb4',
+  connectAttributes: {
+    program_name: 'derma-app',
+  },
 });
 
 module.exports = appPool;
