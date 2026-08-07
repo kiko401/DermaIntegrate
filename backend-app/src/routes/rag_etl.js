@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const { requireAdmin } = require('../middleware/requireAdmin');
+const internalToken = require('../middleware/internalToken');
 const db = require('../db');
 const etlSvc = require('../services/ragEtlService');
 
@@ -187,6 +188,17 @@ router.get('/etl/jobs', requireAdmin, async (req, res) => {
 
   try {
     const result = await etlSvc.listEtlJobs({ page, pageSize, status, kbId });
+    // 列表页也自动同步进行中的任务，避免前端看到陈旧的 pending/running 状态。
+    result.data = await Promise.all(result.data.map(async (job) => {
+      if (job.status === 'pending' || job.status === 'running') {
+        try {
+          return await etlSvc.syncJobFromAI(job);
+        } catch {
+          return job;
+        }
+      }
+      return job;
+    }));
     // 确保响应中不含 config_json（避免脱敏后仍泄露结构）
     result.data = result.data.map(stripSensitiveFields);
     return res.json(result);
@@ -226,6 +238,35 @@ router.get('/etl/jobs/:jobCode', requireAdmin, async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: 'GET_FAILED', message: err.message });
+  }
+});
+
+// POST /api/rag/etl/jobs/:jobCode/callback — AI 域回调应用域，持久化 ETL 状态
+router.post('/etl/jobs/:jobCode/callback', internalToken, async (req, res) => {
+  const { jobCode } = req.params;
+  const {
+    status,
+    progress,
+    stage,
+    detail,
+    error_message,
+  } = req.body || {};
+
+  try {
+    const job = await etlSvc.getEtlJobByCode(jobCode);
+    if (!job) return res.status(404).json({ error: 'NOT_FOUND', message: 'ETL 任务不存在' });
+
+    const patch = {};
+    if (status != null) patch.status = status;
+    if (progress != null) patch.progress = progress;
+    if (stage != null) patch.stage = stage;
+    if (detail != null) patch.detail = detail;
+    if (error_message != null) patch.error_message = error_message;
+
+    await etlSvc.updateEtlJobByCode(jobCode, patch);
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'CALLBACK_FAILED', message: err.message });
   }
 });
 

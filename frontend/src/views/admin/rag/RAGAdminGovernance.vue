@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { apiFetch } from '@/utils/api'
 
@@ -27,6 +27,64 @@ async function apiDelete(path) {
   const res = await apiFetch(path, { method: 'DELETE' })
   if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.message || d.detail || `${res.status}`) }
   return res.json()
+}
+
+const AUDIT_REFRESH_INTERVAL_MS = 2000
+let auditRefreshTimer = null
+
+function stopAuditAutoRefresh() {
+  if (auditRefreshTimer) {
+    clearInterval(auditRefreshTimer)
+    auditRefreshTimer = null
+  }
+}
+
+function startAuditAutoRefresh() {
+  stopAuditAutoRefresh()
+  auditRefreshTimer = setInterval(() => {
+    if (activeTab.value !== 'securityaudit') return
+    if (rejLogsOffset.value === 0) void loadRejectionLogs()
+    if (sensitiveHitOffset.value === 0) void loadSensitiveHitLogs()
+    if (phiAuditOffset.value === 0) void loadPhiAuditLogs()
+  }, AUDIT_REFRESH_INTERVAL_MS)
+}
+
+async function refreshRejectionLogs() {
+  rejLogsOffset.value = 0
+  await loadRejectionLogs()
+}
+
+async function loadMoreRejectionLogs() {
+  rejLogsOffset.value += rejLogsLimit.value
+  await loadRejectionLogs()
+}
+
+async function refreshSensitiveHitLogs() {
+  sensitiveHitOffset.value = 0
+  await loadSensitiveHitLogs()
+}
+
+async function loadMoreSensitiveHitLogs() {
+  sensitiveHitOffset.value += sensitiveHitLimit.value
+  await loadSensitiveHitLogs()
+}
+
+async function refreshPhiAuditLogs() {
+  phiAuditOffset.value = 0
+  await loadPhiAuditLogs()
+}
+
+async function loadMorePhiAuditLogs() {
+  phiAuditOffset.value += phiAuditLimit.value
+  await loadPhiAuditLogs()
+}
+
+async function refreshAllAuditLogs() {
+  await Promise.all([
+    refreshRejectionLogs(),
+    refreshSensitiveHitLogs(),
+    refreshPhiAuditLogs(),
+  ])
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -298,10 +356,12 @@ async function onTabChange(key) {
   activeTab.value = key
   if (key === 'rules' && !loaded.rules) { await loadRules(); loaded.rules = true }
   if (key === 'rejections' && !loaded.rejections) { await loadRejections(); loaded.rejections = true }
-  if (key === 'securityaudit' && !loaded.securityaudit) {
-    await loadRejectionLogs()
-    auditLoaded.rejection_hits = true
+  if (key === 'securityaudit') {
+    await refreshAllAuditLogs()
     loaded.securityaudit = true
+    startAuditAutoRefresh()
+  } else {
+    stopAuditAutoRefresh()
   }
   if (key === 'sensitive' && !loaded.sensitive) { await loadSensitiveWords(); loaded.sensitive = true }
   if (key === 'modelconfigs' && !loaded.modelconfigs) { await loadModelConfigs(); loaded.modelconfigs = true }
@@ -309,16 +369,16 @@ async function onTabChange(key) {
 
 async function onAuditTabChange(key) {
   activeAuditTab.value = key
-  if (key === 'rejection_hits' && !auditLoaded.rejection_hits) {
-    await loadRejectionLogs()
+  if (key === 'rejection_hits') {
+    await refreshRejectionLogs()
     auditLoaded.rejection_hits = true
   }
-  if (key === 'sensitive_hits' && !auditLoaded.sensitive_hits) {
-    await loadSensitiveHitLogs()
+  if (key === 'sensitive_hits') {
+    await refreshSensitiveHitLogs()
     auditLoaded.sensitive_hits = true
   }
-  if (key === 'phi_audit' && !auditLoaded.phi_audit) {
-    await loadPhiAuditLogs()
+  if (key === 'phi_audit') {
+    await refreshPhiAuditLogs()
     auditLoaded.phi_audit = true
   }
 }
@@ -326,6 +386,10 @@ async function onAuditTabChange(key) {
 onMounted(async () => {
   await loadRules()
   loaded.rules = true
+})
+
+onUnmounted(() => {
+  stopAuditAutoRefresh()
 })
 </script>
 
@@ -465,7 +529,7 @@ onMounted(async () => {
         <a-tabs :active-key="activeAuditTab" @change="onAuditTabChange" size="small" class="audit-tabs">
           <a-tab-pane key="rejection_hits" tab="拒绝规则命中">
             <div class="tab-toolbar">
-              <a-button size="small" @click="loadRejectionLogs" :loading="rejLogsLoading">刷新</a-button>
+              <a-button size="small" @click="refreshRejectionLogs" :loading="rejLogsLoading">刷新</a-button>
               <span class="total-badge">共 {{ rejLogsTotal }} 条</span>
             </div>
             <a-table
@@ -488,13 +552,13 @@ onMounted(async () => {
               <a-table-column title="时间" data-index="created_at" width="160" />
             </a-table>
             <div v-if="rejLogsTotal > rejLogsLimit" class="load-more">
-              <a-button size="small" @click="rejLogsOffset += rejLogsLimit; loadRejectionLogs()">加载更多</a-button>
+              <a-button size="small" @click="loadMoreRejectionLogs">加载更多</a-button>
             </div>
           </a-tab-pane>
 
           <a-tab-pane key="sensitive_hits" tab="敏感词命中">
             <div class="tab-toolbar">
-              <a-button size="small" @click="loadSensitiveHitLogs" :loading="sensitiveHitLoading">刷新</a-button>
+              <a-button size="small" @click="refreshSensitiveHitLogs" :loading="sensitiveHitLoading">刷新</a-button>
               <span class="total-badge">共 {{ sensitiveHitTotal }} 条</span>
             </div>
             <a-table
@@ -520,13 +584,13 @@ onMounted(async () => {
               <a-table-column title="时间" data-index="created_at" width="160" />
             </a-table>
             <div v-if="sensitiveHitTotal > sensitiveHitLimit" class="load-more">
-              <a-button size="small" @click="sensitiveHitOffset += sensitiveHitLimit; loadSensitiveHitLogs()">加载更多</a-button>
+              <a-button size="small" @click="loadMoreSensitiveHitLogs">加载更多</a-button>
             </div>
           </a-tab-pane>
 
           <a-tab-pane key="phi_audit" tab="PHI 审计">
             <div class="tab-toolbar">
-              <a-button size="small" @click="loadPhiAuditLogs" :loading="phiAuditLoading">刷新</a-button>
+              <a-button size="small" @click="refreshPhiAuditLogs" :loading="phiAuditLoading">刷新</a-button>
               <span class="total-badge">共 {{ phiAuditTotal }} 条</span>
             </div>
             <a-table
@@ -555,7 +619,7 @@ onMounted(async () => {
               <a-table-column title="时间" data-index="created_at" width="160" />
             </a-table>
             <div v-if="phiAuditTotal > phiAuditLimit" class="load-more">
-              <a-button size="small" @click="phiAuditOffset += phiAuditLimit; loadPhiAuditLogs()">加载更多</a-button>
+              <a-button size="small" @click="loadMorePhiAuditLogs">加载更多</a-button>
             </div>
           </a-tab-pane>
         </a-tabs>

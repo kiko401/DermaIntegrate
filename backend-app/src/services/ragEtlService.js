@@ -193,6 +193,29 @@ async function getEtlJobByCode(jobCode) {
   return rows[0] || null;
 }
 
+async function updateEtlJobByCode(jobCode, patch = {}) {
+  const job = await getEtlJobByCode(jobCode);
+  if (!job) return null;
+
+  const sets = [];
+  const vals = [];
+  for (const [key, value] of Object.entries(patch)) {
+    if (value !== undefined) {
+      sets.push(`${key} = ?`);
+      vals.push(value);
+    }
+  }
+  if (!sets.length) return job;
+
+  if ((patch.status === 'succeeded' || patch.status === 'failed') && patch.completed_at === undefined) {
+    sets.push('completed_at = NOW()');
+  }
+
+  vals.push(job.id);
+  await db.query(`UPDATE rag_etl_jobs SET ${sets.join(', ')} WHERE id = ?`, vals);
+  return getEtlJobByCode(jobCode);
+}
+
 module.exports = {
   createEtlJob,
   triggerEtlRun,
@@ -200,5 +223,6 @@ module.exports = {
   syncJobFromAI,
   listEtlJobs,
   getEtlJobByCode,
+  updateEtlJobByCode,
   redactConfig,
 };

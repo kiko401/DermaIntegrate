@@ -11,6 +11,79 @@ function renderMd(text) {
   return marked.parse(text)
 }
 
+function displayRoute(route) {
+  const map = {
+    knowledge_query: '知识库问答',
+    patient_context_query: '患者上下文问答',
+    tool_call: '工具调用',
+    general_chat: '通用问答',
+    agent_workflow: 'Agent 工作流',
+    rule_answer: '规则回答',
+  }
+  return map[route] || route || '未标注'
+}
+
+function displayChunkText(chunk) {
+  const text = typeof chunk === 'string'
+    ? chunk
+    : (chunk?.text || chunk?.snippet || '')
+  return text.length > 240 ? `${text.slice(0, 240)}…` : text
+}
+
+function displayToolStatus(status) {
+  const map = {
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败',
+  }
+  return map[status] || status || '未知'
+}
+
+function displayTraceStatus(status) {
+  const map = {
+    running: '执行中',
+    completed: '已完成',
+    failed: '失败',
+    skipped: '已跳过',
+  }
+  return map[status] || status || '未知'
+}
+
+function upsertToolCall(target, payload = {}) {
+  if (!target.tool_calls) target.tool_calls = []
+  const key = `${payload.tool_name || ''}::${payload.status || ''}`
+  const idx = target.tool_calls.findIndex(item => `${item.tool_name || ''}::${item.status || ''}` === key)
+  if (idx >= 0) {
+    target.tool_calls[idx] = { ...target.tool_calls[idx], ...payload }
+    return
+  }
+  target.tool_calls.push({
+    tool_name: payload.tool_name || '未知工具',
+    status: payload.status || 'running',
+    output_summary: payload.output_summary || '',
+  })
+}
+
+function upsertAgentTrace(target, payload = {}) {
+  if (!target.agent_trace || typeof target.agent_trace !== 'object') {
+    target.agent_trace = {
+      workflow: payload.workflow || 'langgraph_rag_agent',
+      nodes: [],
+    }
+  }
+  if (payload.workflow) target.agent_trace.workflow = payload.workflow
+  if (!Array.isArray(target.agent_trace.nodes)) target.agent_trace.nodes = []
+  if (!payload.node) return
+
+  const idx = target.agent_trace.nodes.findIndex(item => item.name === payload.node)
+  const nextNode = {
+    name: payload.node,
+    status: payload.status || 'running',
+  }
+  if (idx >= 0) target.agent_trace.nodes[idx] = { ...target.agent_trace.nodes[idx], ...nextNode }
+  else target.agent_trace.nodes.push(nextNode)
+}
+
 const props = defineProps({
   patientId: { type: [String, Number], required: true },
   conversationId: { type: [String, Number], default: null },
@@ -173,7 +246,7 @@ async function send() {
         try { payload = JSON.parse(dataStr) } catch { continue }
 
         if (eventType === 'result') {
-          finalPayload = payload
+          finalPayload = { ...(finalPayload || {}), ...payload }
           if (payload.answer) streamAnswer.value = payload.answer
         } else if (eventType === 'saved') {
           if (finalPayload) finalPayload._savedMessageId = payload.message_id
@@ -181,6 +254,22 @@ async function send() {
           if (finalPayload) finalPayload.disclaimer = payload.disclaimer
         } else if (eventType === 'progress') {
           streamAnswer.value = payload.message || payload.step || streamAnswer.value
+        } else if (eventType === 'thinking') {
+          streamAnswer.value = payload.message || payload.step || streamAnswer.value
+        } else if (eventType === 'chunks') {
+          if (!finalPayload) finalPayload = { tool_calls: [], agent_trace: null }
+          finalPayload.chunks = Array.isArray(payload.chunks) ? payload.chunks : []
+          if (finalPayload.chunks.length) {
+            streamAnswer.value = `已检索到 ${finalPayload.chunks.length} 条参考，正在生成回答...`
+          }
+        } else if (eventType === 'tool_call') {
+          if (!finalPayload) finalPayload = { tool_calls: [], agent_trace: null }
+          upsertToolCall(finalPayload, payload)
+          streamAnswer.value = `工具 ${payload.tool_name || '未知工具'}：${displayToolStatus(payload.status)}`
+        } else if (eventType === 'agent_trace') {
+          if (!finalPayload) finalPayload = { tool_calls: [], agent_trace: null }
+          upsertAgentTrace(finalPayload, payload)
+          streamAnswer.value = `Agent 节点 ${payload.node || '未知节点'}：${displayTraceStatus(payload.status)}`
         } else if (eventType === 'error') {
           throw new Error(payload.message || payload.code || '问答失败')
         }
@@ -198,6 +287,10 @@ async function send() {
         confidence: finalPayload.confidence,
         blocked_reason: finalPayload.blocked_reason || null,
         risk_highlights: finalPayload.risk_highlights || [],
+        tool_calls: finalPayload.tool_calls || [],
+        agent_trace: finalPayload.agent_trace || null,
+        route: finalPayload.route || null,
+        chunks: finalPayload.chunks || [],
       })
     }
     await scrollBottom()
@@ -440,6 +533,58 @@ onUnmounted(() => {
                 <div v-if="src.snippet" class="pcp-source-snippet">{{ src.snippet }}</div>
               </button>
             </div>
+
+            <details
+              v-if="msg.route || msg.chunks?.length || msg.tool_calls?.length || msg.agent_trace?.nodes?.length"
+              class="pcp-section execution-details"
+            >
+              <summary class="pcp-section-title">执行详情</summary>
+
+              <div v-if="msg.route" class="pcp-source-snippet">路由：{{ displayRoute(msg.route) }}</div>
+
+              <div v-if="msg.chunks?.length" class="execution-subsection">
+                <div class="pcp-source-snippet">检索命中：{{ msg.chunks.length }} 条（展示前 3 条）</div>
+                <div
+                  v-for="(chunk, ci) in msg.chunks.slice(0, 3)"
+                  :key="`chunk-${ci}`"
+                  class="pcp-source-item"
+                >
+                  <div class="pcp-source-snippet">{{ displayChunkText(chunk) }}</div>
+                </div>
+              </div>
+
+              <div v-if="msg.tool_calls?.length" class="execution-subsection">
+                <div class="pcp-section-title">工具调用</div>
+                <button
+                  v-for="(tool, ti) in msg.tool_calls"
+                  :key="`${tool.tool_name || 'tool'}-${ti}`"
+                  type="button"
+                  class="pcp-source-item"
+                >
+                  <div class="pcp-source-head">
+                    <span>{{ tool.tool_name || '未知工具' }}</span>
+                    <span class="pcp-source-score">{{ displayToolStatus(tool.status) }}</span>
+                  </div>
+                  <div v-if="tool.output_summary" class="pcp-source-snippet">{{ tool.output_summary }}</div>
+                </button>
+              </div>
+
+              <div v-if="msg.agent_trace?.nodes?.length" class="execution-subsection">
+                <div class="pcp-section-title">Agent 轨迹</div>
+                <button
+                  v-for="(node, ni) in msg.agent_trace.nodes"
+                  :key="`${node.name || 'node'}-${ni}`"
+                  type="button"
+                  class="pcp-source-item"
+                >
+                  <div class="pcp-source-head">
+                    <span>{{ node.name || '未知节点' }}</span>
+                    <span class="pcp-source-score">{{ displayTraceStatus(node.status) }}</span>
+                  </div>
+                  <div v-if="msg.agent_trace.workflow" class="pcp-source-snippet">工作流：{{ msg.agent_trace.workflow }}</div>
+                </button>
+              </div>
+            </details>
 
             <div v-if="msg.disclaimer" class="pcp-disclaimer">{{ msg.disclaimer }}</div>
 
